@@ -157,10 +157,10 @@ def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
     # Convert indices to actual data
     fold_data = []
     for train_indices, val_indices in folds:
-        train_images = [dataset[idx]['image'] for idx in train_indices]
-        train_labels = [dataset[idx]['label'] for idx in train_indices]
-        val_images = [dataset[idx]['image'] for idx in val_indices]
-        val_labels = [dataset[idx]['label'] for idx in val_indices]
+        train_images = [dataset[int(idx)]['image'] for idx in train_indices]
+        train_labels = [dataset[int(idx)]['label'] for idx in train_indices]
+        val_images = [dataset[int(idx)]['image'] for idx in val_indices]
+        val_labels = [dataset[int(idx)]['label'] for idx in val_indices]
         
         fold_data.append((train_images, train_labels, val_images, val_labels))
     
