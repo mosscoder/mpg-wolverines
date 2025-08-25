@@ -1,22 +1,25 @@
 # Pelage Sorting Workflow
 
-A systematic hyperparameter optimization workflow for identifying high-quality wolverine pelage images using DINOv3 features and linear classification. **Optimized for preemptible cluster with 40 concurrent jobs.**
+A systematic hyperparameter optimization workflow for identifying high-quality wolverine pelage images using DINOv3 features and linear classification. **Requires GPU/CUDA support - optimized for compute clusters with preemptible partition and 40 concurrent jobs.**
 
 ## Installation
 
+**Prerequisites**: GPU cluster with CUDA support (CUDA 11.8 or 12.x) and mamba/conda
+
 ### Option 1: Using the Installation Script (Recommended)
 ```bash
-# Create and activate environment
-mamba create -n wolverines python=3.10
-mamba activate wolverines
-
 # Clone repository
 cd /home/kdoherty/wolverines/
 git clone <repo-url> pelage_sorting
 
-# Run installation script (handles PyTorch CUDA versions automatically)
+# Run installation script (creates environment and installs all dependencies)
 cd pelage_sorting
 bash ../install_dependencies.sh
+
+# Script automatically:
+# - Creates mamba environment 'wolverines' with Python 3.12
+# - Detects CUDA version and installs appropriate PyTorch
+# - Installs all required dependencies
 ```
 
 ### Option 2: Using Conda Environment File
@@ -25,12 +28,12 @@ bash ../install_dependencies.sh
 mamba env create -f environment.yml
 mamba activate wolverines
 
-# Note: You may need to edit environment.yml to match your CUDA version
+# Note: Requires CUDA 12.1 by default - edit environment.yml for different CUDA versions
 ```
 
 ### Option 3: Manual Installation
 ```bash
-mamba create -n wolverines python=3.10
+mamba create -n wolverines python=3.12
 mamba activate wolverines
 
 # Install PyTorch (adjust CUDA version as needed)
@@ -45,8 +48,10 @@ pip install git+https://github.com/huggingface/transformers.git
 
 ### Verify Installation
 ```bash
-python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
 python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
+
+# Installation should show CUDA: True and GPUs > 0 for successful setup
 ```
 
 ## Overview

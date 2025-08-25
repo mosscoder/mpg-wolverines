@@ -58,9 +58,9 @@ pip install transformers  # Use stable version instead
 
 ### 5. CUDA Version Detection Issues
 
-**Error**: Wrong CUDA version detected
+**Error**: Wrong CUDA version detected or PyTorch can't find GPUs
 
-**Manual Solutions**:
+**Solutions for GPU Clusters**:
 ```bash
 # Check your CUDA version
 nvidia-smi
@@ -68,20 +68,21 @@ nvcc --version
 
 # Install PyTorch for your specific CUDA version
 # For CUDA 11.8:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
 
-# For CUDA 12.1:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# For CUDA 12.1 (most common):
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
 
-# For CPU only:
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Verify GPU access:
+python -c "import torch; print(f'GPUs available: {torch.cuda.device_count()}')"
 ```
 
-### 6. Minimal Installation (If All Else Fails)
+### 6. Minimal Installation for GPU Clusters
 
-Install only essential packages:
+Install only essential packages with GPU support:
 ```bash
-pip install torch torchvision  # Latest stable
+# Essential with CUDA 12.1 (adjust CUDA version as needed)
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
 pip install datasets transformers  # Core ML packages
 pip install numpy pandas matplotlib scikit-learn  # Basic data science
 pip install pillow  # Image processing
@@ -89,29 +90,30 @@ pip install pillow  # Image processing
 
 Then install additional packages as needed:
 ```bash
-pip install scipy seaborn  # Optional for figure generation
+pip install scipy seaborn  # For figure generation
 ```
 
 ### 7. Environment Issues
 
-**Problem**: Package conflicts or broken environment
+**Problem**: Package conflicts or broken environment on GPU cluster
 
-**Solution**: Start fresh
+**Solution**: Start fresh with GPU support
 ```bash
 # Remove old environment
 mamba env remove -n wolverines
 
 # Create new environment
-mamba create -n wolverines python=3.10
+mamba create -n wolverines python=3.12
 mamba activate wolverines
 
-# Try minimal installation first
-pip install torch torchvision datasets transformers numpy pandas matplotlib scikit-learn pillow
+# Install with GPU support (adjust CUDA version as needed)
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
+pip install datasets transformers numpy pandas matplotlib scikit-learn pillow
 ```
 
-### 8. Check Installation
+### 8. Check Installation on GPU Cluster
 
-Verify everything works:
+Verify everything works with GPU support:
 ```bash
 python -c "
 import torch
@@ -122,7 +124,16 @@ import numpy as np
 print('✓ All core packages imported successfully')
 print(f'PyTorch: {torch.__version__}')
 print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU count: {torch.cuda.device_count()}')
 print(f'Transformers: {transformers.__version__}')
+
+# Test GPU access
+if torch.cuda.is_available():
+    print('✓ GPU access verified')
+    print(f'Current GPU: {torch.cuda.get_device_name()}')
+else:
+    print('✗ ERROR: GPU access failed')
+    exit(1)
 "
 ```
 
@@ -135,15 +146,18 @@ huggingface-cli login
 # Then enter your HF token
 ```
 
-## Quick Fix Commands
+## Quick Fix Commands for GPU Clusters
 
-If you just need to get running quickly:
+If you just need to get running quickly on a GPU cluster:
 
 ```bash
-# Minimal working installation
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Minimal working installation with GPU support
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
 pip install transformers datasets numpy pandas matplotlib scikit-learn pillow
 
-# Test it works
-python -c "import torch; print('CUDA:', torch.cuda.is_available())"
+# Test GPU access works
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
+
+# If that fails, verify GPU is detected at system level
+nvidia-smi
 ```
