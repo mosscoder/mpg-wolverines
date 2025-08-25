@@ -123,7 +123,7 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
         return None
     
     print(f"Training config: zoom={params['max_zoom']}, hflip={params['h_flip_p']}, "
-          f"grayscale={params['grayscale_p']}, blur={params['blur_p']}, "
+          f"grayscale={params['grayscale_p']}, blur_type={params['blur_type']}, blur_p={params['blur_p']}, "
           f"cutmix={params['cutmix_p']}, seed={seed}")
     
     # Load dataset
