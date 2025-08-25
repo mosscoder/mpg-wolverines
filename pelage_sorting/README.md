@@ -167,7 +167,7 @@ ls -la checkpoints/
 **Parameters**:
 - max_zoom: [1.0, 1.25, 1.5]
 - h_flip_p: [0, 0.5]
-- night_sim_p: [0, 0.25, 0.5] × 3 modes
+- grayscale_p: [0, 0.25, 0.5]
 - blur_p: [0, 0.25, 0.5] × 3 types  
 - cutmix_p: [0, 0.25, 0.5]
 - seeds: [0, 1, 2]
