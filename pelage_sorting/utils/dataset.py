@@ -123,7 +123,7 @@ def create_stratified_train_val_split(dataset,
 
 
 def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
-    """Create k-fold cross-validation splits"""
+    """Create k-fold cross-validation splits using HF dataset select()"""
     random.seed(seed)
     np.random.seed(seed)
     
@@ -154,17 +154,15 @@ def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
                 train_1, val_1 = label_folds[i]
                 folds[i] = (np.concatenate([train_0, train_1]), np.concatenate([val_0, val_1]))
     
-    # Convert indices to actual data
-    fold_data = []
+    # Create HF dataset splits instead of extracting data into lists
+    fold_datasets = []
     for train_indices, val_indices in folds:
-        train_images = [dataset[int(idx)]['image'] for idx in train_indices]
-        train_labels = [dataset[int(idx)]['label'] for idx in train_indices]
-        val_images = [dataset[int(idx)]['image'] for idx in val_indices]
-        val_labels = [dataset[int(idx)]['label'] for idx in val_indices]
-        
-        fold_data.append((train_images, train_labels, val_images, val_labels))
+        # Use HF dataset.select() to create efficient subsets
+        train_dataset = dataset.select(train_indices.tolist())
+        val_dataset = dataset.select(val_indices.tolist())
+        fold_datasets.append((train_dataset, val_dataset))
     
-    return fold_data
+    return fold_datasets
 
 
 def create_dataloaders(train_images, train_labels, val_images, val_labels, 

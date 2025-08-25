@@ -117,16 +117,57 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     print("Loading dataset...")
     dataset, _ = load_wolverines_dataset()
     
-    # Create k-fold splits (full training set)
-    print("Creating 5-fold splits...")
-    fold_data = create_kfold_splits(dataset, n_folds=5, seed=0)
+    # Preprocess images using HF native tools (crop and resize once)
+    print("Preprocessing images with HF native tools...")
+    def preprocess_images(batch):
+        """Preprocess images: center crop and resize"""
+        from PIL import Image
+        crop_size = best_params['crop_size']
+        resize_size = best_params['resize_size']
+        
+        images = []
+        for img in batch['image']:
+            # Center crop
+            width, height = img.size
+            if width < crop_size or height < crop_size:
+                # If image is smaller than crop size, pad or skip
+                continue
+            left = (width - crop_size) // 2
+            top = (height - crop_size) // 2
+            img_cropped = img.crop((left, top, left + crop_size, top + crop_size))
+            
+            # Resize to target size
+            img_resized = img_cropped.resize((resize_size, resize_size), Image.LANCZOS)
+            images.append(img_resized)
+        
+        batch['image'] = images
+        return batch
     
-    if fold >= len(fold_data):
+    # Process in batches to manage memory efficiently
+    dataset = dataset.map(
+        preprocess_images, 
+        batched=True, 
+        batch_size=32, 
+        num_proc=4,
+        desc="Preprocessing images"
+    )
+    
+    # Create k-fold splits (using preprocessed dataset)
+    print("Creating 5-fold splits...")
+    fold_datasets = create_kfold_splits(dataset, n_folds=5, seed=0)
+    
+    if fold >= len(fold_datasets):
         print(f"Error: Fold {fold} not available")
         return None
     
-    train_images, train_labels, val_images, val_labels = fold_data[fold]
-    print(f"Train samples: {len(train_images)}, Val samples: {len(val_images)}")
+    train_dataset, val_dataset = fold_datasets[fold]
+    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    
+    # Extract data for compatibility with existing DataLoader creation
+    train_images = [item['image'] for item in train_dataset]
+    train_labels = [item['label'] for item in train_dataset]
+    val_images = [item['image'] for item in val_dataset]
+    val_labels = [item['label'] for item in val_dataset]
     
     # Create transforms
     train_transform = create_transform_from_params(best_params, is_train=True)
