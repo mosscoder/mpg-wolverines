@@ -79,19 +79,31 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
     
     print(f"Training config: crop_size={params['crop_size']}, seed={seed}")
     
-    # Load dataset
-    print("Loading dataset...")
-    dataset, _ = load_wolverines_dataset()
+    # Load dataset with error handling
+    print("Loading dataset from HuggingFace...")
+    try:
+        dataset, _ = load_wolverines_dataset()
+        print(f"✓ Dataset loaded successfully: {len(dataset)} samples")
+    except Exception as e:
+        print(f"✗ ERROR: Failed to load dataset: {e}")
+        print(f"  This could be due to:")
+        print(f"  - No internet connection")
+        print(f"  - HuggingFace Hub access issues")
+        print(f"  - Missing authentication token")
+        return None
     
     # Create non-overlapping stratified train/val split (10% each per class)
-    train_images, train_labels, val_images, val_labels = create_stratified_train_val_split(
-        dataset,
-        train_percentage=params['dataset_sample'],  # 10%
-        val_percentage=params['dataset_sample'],     # 10%
-        seed=seed
-    )
-    
-    print(f"Train samples: {len(train_images)}, Val samples: {len(val_images)}")
+    try:
+        train_images, train_labels, val_images, val_labels = create_stratified_train_val_split(
+            dataset,
+            train_percentage=params['dataset_sample'],  # 10%
+            val_percentage=params['dataset_sample'],     # 10%
+            seed=seed
+        )
+        print(f"✓ Train samples: {len(train_images)}, Val samples: {len(val_images)}")
+    except Exception as e:
+        print(f"✗ ERROR: Failed to create train/val split: {e}")
+        return None
     
     # Create transforms
     train_transform = create_transform_from_params(params, is_train=True)
@@ -162,6 +174,7 @@ def main():
     
     print("=" * 60)
     print(f"Image Size Sweep - Job {args.idx}")
+    print(f"Arguments: {vars(args)}")
     print("=" * 60)
     
     # Setup preemption handling

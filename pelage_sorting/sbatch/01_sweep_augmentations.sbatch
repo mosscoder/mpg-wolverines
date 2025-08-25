@@ -8,15 +8,15 @@
 #SBATCH --time=12:00:00
 #SBATCH --array=0-39
 #SBATCH --requeue
-#SBATCH --output=logs/01_augmentations/%x_%A_%a.out
-#SBATCH --error=logs/01_augmentations/%x_%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_augmentations/%x_%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_augmentations/%x_%A_%a.err
 #SBATCH --job-name=01_sweep_augmentations
 
 # Change to project base directory
 cd /home/kdoherty/wolverines/pelage_sorting
 
 # Create log directory if it doesn't exist
-mkdir -p logs/01_augmentations
+mkdir -p /home/kdoherty/logs/wolverines/pelage/01_augmentations
 
 echo "Starting job $SLURM_ARRAY_TASK_ID on node $(hostname) at $(date)"
 echo "Working directory: $(pwd)"

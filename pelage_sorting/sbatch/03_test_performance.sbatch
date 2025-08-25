@@ -8,15 +8,15 @@
 #SBATCH --time=4:00:00
 #SBATCH --array=0
 #SBATCH --requeue
-#SBATCH --output=logs/03_test/%x_%A_%a.out
-#SBATCH --error=logs/03_test/%x_%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.err
 #SBATCH --job-name=03_test_performance
 
 # Change to project base directory
 cd /home/kdoherty/wolverines/pelage_sorting
 
 # Create log directory if it doesn't exist
-mkdir -p logs/03_test
+mkdir -p /home/kdoherty/logs/wolverines/pelage/03_test
 
 echo "Starting final test evaluation on node $(hostname) at $(date)"
 echo "Working directory: $(pwd)"
