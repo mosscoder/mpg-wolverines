@@ -50,25 +50,29 @@ def generate_all_combinations():
                     for cutmix_p in cutmix_p_values:
                         for seed in seeds:
                             
-                            # Skip blur type when blur_p is 0  
-                            blur_types_to_use = ['none'] if blur_p == 0 else blur_types
+                            # Map blur_p to blur_type directly
+                            if blur_p == 0:
+                                blur_type = 'none'
+                            elif blur_p == 0.25:
+                                blur_type = 'moderate'
+                            else:  # blur_p == 0.5
+                                blur_type = 'high'
                             
-                            for blur_type in blur_types_to_use:
-                                params = {
-                                    'crop_size': best_crop_size,  # Automatically uses best from script 00
-                                    'resize_size': 256,
-                                    'max_zoom': max_zoom,
-                                    'h_flip_p': h_flip_p,
-                                    'grayscale_p': grayscale_p,
-                                    'blur_type': blur_type,
-                                    'blur_p': blur_p,
-                                    'cutmix_p': cutmix_p,
-                                    'learning_rate': 0.001,
-                                    'batch_size': 32,
-                                    'epochs': 10,
-                                    'dataset_sample': 0.1
-                                }
-                                combinations.append((params, seed))
+                            params = {
+                                'crop_size': best_crop_size,  # Automatically uses best from script 00
+                                'resize_size': 256,
+                                'max_zoom': max_zoom,
+                                'h_flip_p': h_flip_p,
+                                'grayscale_p': grayscale_p,
+                                'blur_type': blur_type,
+                                'blur_p': blur_p,
+                                'cutmix_p': cutmix_p,
+                                'learning_rate': 0.001,
+                                'batch_size': 32,
+                                'epochs': 10,
+                                'dataset_sample': 0.1
+                            }
+                            combinations.append((params, seed))
     
     return combinations
 
