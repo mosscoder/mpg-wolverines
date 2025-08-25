@@ -25,7 +25,7 @@ echo "Environment created. Installing dependencies in wolverines environment..."
 
 # Install PyTorch with CUDA 12.1 (standard for modern clusters)
 echo "=== Installing PyTorch with CUDA 12.1 ==="
-mamba run -n wolverines pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
+mamba run -n wolverines pip install torch==2.7.1 torchvision==0.22.1
 
 # Install other requirements
 echo "=== Installing other dependencies ==="
