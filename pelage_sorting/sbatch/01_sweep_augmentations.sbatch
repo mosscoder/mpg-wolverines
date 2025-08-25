@@ -6,7 +6,7 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
-#SBATCH --array=0-39
+#SBATCH --array=0-31%32
 #SBATCH --requeue
 #SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_augmentations/%x_%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_augmentations/%x_%A_%a.err

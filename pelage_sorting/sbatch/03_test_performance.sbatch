@@ -6,7 +6,7 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --array=0
+#SBATCH --array=0%32
 #SBATCH --requeue
 #SBATCH --output=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.err
