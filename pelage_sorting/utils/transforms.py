@@ -151,28 +151,101 @@ def create_augmented_transforms(
     return transforms.Compose(transform_list)
 
 
+def create_augmented_transforms_preprocessed(
+    max_zoom: float = 1.0,
+    h_flip_p: float = 0.0,
+    grayscale_p: float = 0.0,
+    blur_type: str = 'none',
+    blur_p: float = 0.0,
+    cutmix_p: float = 0.0
+):
+    """Create augmented transforms for preprocessed 256x256 images (skip crop/resize)"""
+    
+    transform_list = []
+    
+    # Random zoom (implemented as random resized crop on 256x256 image)
+    if max_zoom > 1.0:
+        zoom_size = int(256 * max_zoom)
+        transform_list.append(
+            transforms.RandomResizedCrop(256, scale=(1.0/max_zoom, 1.0), ratio=(1.0, 1.0))
+        )
+    
+    # Random horizontal flip
+    if h_flip_p > 0:
+        transform_list.append(transforms.RandomHorizontalFlip(p=h_flip_p))
+    
+    # Convert to tensor early for PIL-based augmentations
+    transform_list.append(transforms.ToTensor())
+    
+    # Grayscale conversion
+    if grayscale_p > 0:
+        transform_list.append(transforms.RandomGrayscale(p=grayscale_p))
+    
+    # Blur (applied to tensor)
+    if blur_p > 0:
+        # Convert back to PIL for blur, then back to tensor
+        transform_list.extend([
+            transforms.ToPILImage(),
+            AdaptiveBlur(blur_type=blur_type, probability=blur_p),
+            transforms.ToTensor()
+        ])
+    
+    # CutMix (applied to tensor)
+    if cutmix_p > 0:
+        transform_list.extend([
+            transforms.ToPILImage(),
+            CutMix(probability=cutmix_p),
+            transforms.ToTensor()
+        ])
+    
+    # Final normalization
+    transform_list.append(transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+    
+    return transforms.Compose(transform_list)
+
+
 def get_validation_transforms(crop_size: int, resize_size: int = 256):
     """Get validation transforms (no augmentation)"""
     return create_base_transforms(crop_size, resize_size)
 
 
-def create_transform_from_params(params: Dict[str, Any], is_train: bool = True):
+def create_transform_from_params(params: Dict[str, Any], is_train: bool = True, preprocessed: bool = False):
     """Create transform from parameter dictionary"""
     
-    crop_size = params.get('crop_size', 512)
-    resize_size = params.get('resize_size', 256)
-    
-    if not is_train:
-        return get_validation_transforms(crop_size, resize_size)
-    
-    # Training transforms with augmentation parameters
-    return create_augmented_transforms(
-        crop_size=crop_size,
-        resize_size=resize_size,
-        max_zoom=params.get('max_zoom', 1.0),
-        h_flip_p=params.get('h_flip_p', 0.0),
-        grayscale_p=params.get('grayscale_p', 0.0),
-        blur_type=params.get('blur_type', 'none'),
-        blur_p=params.get('blur_p', 0.0),
-        cutmix_p=params.get('cutmix_p', 0.0)
-    )
+    if preprocessed:
+        # For images already preprocessed (cropped to crop_size, resized to resize_size)
+        if not is_train:
+            # Validation: just normalize
+            return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            # Training: augmentations on preprocessed 256x256 images
+            return create_augmented_transforms_preprocessed(
+                max_zoom=params.get('max_zoom', 1.0),
+                h_flip_p=params.get('h_flip_p', 0.0),
+                grayscale_p=params.get('grayscale_p', 0.0),
+                blur_type=params.get('blur_type', 'none'),
+                blur_p=params.get('blur_p', 0.0),
+                cutmix_p=params.get('cutmix_p', 0.0)
+            )
+    else:
+        # Original path for non-preprocessed images
+        crop_size = params.get('crop_size', 512)
+        resize_size = params.get('resize_size', 256)
+        
+        if not is_train:
+            return get_validation_transforms(crop_size, resize_size)
+        
+        # Training transforms with augmentation parameters
+        return create_augmented_transforms(
+            crop_size=crop_size,
+            resize_size=resize_size,
+            max_zoom=params.get('max_zoom', 1.0),
+            h_flip_p=params.get('h_flip_p', 0.0),
+            grayscale_p=params.get('grayscale_p', 0.0),
+            blur_type=params.get('blur_type', 'none'),
+            blur_p=params.get('blur_p', 0.0),
+            cutmix_p=params.get('cutmix_p', 0.0)
+        )

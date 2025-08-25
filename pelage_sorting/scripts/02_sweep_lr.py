@@ -11,6 +11,7 @@ import os
 import argparse
 import time
 import json
+import torch
 from pathlib import Path
 
 # Add utils to path (assumes we cd to pelage_sorting in sbatch)
@@ -163,20 +164,35 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     train_dataset, val_dataset = fold_datasets[fold]
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
-    # Extract data for compatibility with existing DataLoader creation
-    train_images = [item['image'] for item in train_dataset]
-    train_labels = [item['label'] for item in train_dataset]
-    val_images = [item['image'] for item in val_dataset]
-    val_labels = [item['label'] for item in val_dataset]
+    # Create transforms (skip crop/resize since already preprocessed)
+    train_transform = create_transform_from_params(best_params, is_train=True, preprocessed=True)
+    val_transform = create_transform_from_params(best_params, is_train=False, preprocessed=True)
     
-    # Create transforms
-    train_transform = create_transform_from_params(best_params, is_train=True)
-    val_transform = create_transform_from_params(best_params, is_train=False)
+    # Create dataloaders directly from HF datasets (more memory efficient)
+    from torch.utils.data import DataLoader
     
-    # Create dataloaders
-    train_loader, val_loader = create_dataloaders(
-        train_images, train_labels, val_images, val_labels,
-        train_transform, val_transform, best_params['batch_size']
+    def hf_collate_fn(batch, transform):
+        """Collate function for HF datasets"""
+        images = torch.stack([transform(item['image']) for item in batch])
+        labels = torch.tensor([item['label'] for item in batch])
+        return images, labels
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=best_params['batch_size'],
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=lambda batch: hf_collate_fn(batch, train_transform)
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=best_params['batch_size'],
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=lambda batch: hf_collate_fn(batch, val_transform)
     )
     
     # Create model
