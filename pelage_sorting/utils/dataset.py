@@ -1,0 +1,191 @@
+import torch
+from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
+import random
+import numpy as np
+from typing import List, Tuple, Any
+from sklearn.model_selection import KFold
+
+
+class WolverinesDataset(Dataset):
+    """Dataset class for wolverines images with labels"""
+    
+    def __init__(self, images: List[Any], labels: List[int], transform=None):
+        self.images = images
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        label = self.labels[idx]
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label
+
+
+def load_wolverines_dataset():
+    """Load the wolverines dataset from HuggingFace"""
+    dataset = load_dataset("kdoherty/wolverines", split="train")
+    test_dataset = load_dataset("kdoherty/wolverines", split="test")
+    return dataset, test_dataset
+
+
+def create_stratified_sample(dataset, sample_percentage: float = 0.1, seed: int = 42):
+    """Create a stratified sample from the dataset"""
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Group indices by label
+    label_to_indices = {0: [], 1: []}
+    for idx, item in enumerate(dataset):
+        label = item['label']
+        label_to_indices[label].append(idx)
+    
+    sampled_images = []
+    sampled_labels = []
+    
+    for label in [0, 1]:
+        indices = label_to_indices[label]
+        sample_size = int(len(indices) * sample_percentage)
+        
+        # Randomly sample
+        random.shuffle(indices)
+        sampled_idx = indices[:sample_size]
+        
+        for idx in sampled_idx:
+            sampled_images.append(dataset[idx]['image'])
+            sampled_labels.append(label)
+    
+    return sampled_images, sampled_labels
+
+
+def create_stratified_train_val_split(dataset, 
+                                      train_percentage: float = 0.1,
+                                      val_percentage: float = 0.1,
+                                      seed: int = 42):
+    """
+    Create non-overlapping stratified train/val splits.
+    
+    Args:
+        dataset: HuggingFace dataset
+        train_percentage: Percentage of each class for training (0.1 = 10%)
+        val_percentage: Percentage of each class for validation (0.1 = 10%)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        train_images, train_labels, val_images, val_labels
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Group indices by label
+    label_to_indices = {0: [], 1: []}
+    for idx, item in enumerate(dataset):
+        label = item['label']
+        label_to_indices[label].append(idx)
+    
+    train_images, train_labels = [], []
+    val_images, val_labels = [], []
+    
+    for label in [0, 1]:
+        indices = label_to_indices[label]
+        
+        # Calculate sample sizes
+        train_size = int(len(indices) * train_percentage)
+        val_size = int(len(indices) * val_percentage)
+        total_needed = train_size + val_size
+        
+        # Randomly sample total needed indices
+        random.shuffle(indices)
+        selected_indices = indices[:total_needed]
+        
+        # Split into non-overlapping train and val sets
+        train_indices = selected_indices[:train_size]
+        val_indices = selected_indices[train_size:train_size + val_size]
+        
+        # Add to train set
+        for idx in train_indices:
+            train_images.append(dataset[idx]['image'])
+            train_labels.append(label)
+        
+        # Add to val set
+        for idx in val_indices:
+            val_images.append(dataset[idx]['image'])
+            val_labels.append(label)
+    
+    return train_images, train_labels, val_images, val_labels
+
+
+
+def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
+    """Create k-fold cross-validation splits"""
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Group indices by label for stratification
+    label_to_indices = {0: [], 1: []}
+    for idx, item in enumerate(dataset):
+        label = item['label']
+        label_to_indices[label].append(idx)
+    
+    folds = []
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    
+    for label in [0, 1]:
+        indices = np.array(label_to_indices[label])
+        label_folds = []
+        
+        for train_idx, val_idx in kf.split(indices):
+            train_indices = indices[train_idx]
+            val_indices = indices[val_idx]
+            label_folds.append((train_indices, val_indices))
+        
+        if not folds:
+            folds = label_folds
+        else:
+            # Combine folds from both labels
+            for i in range(n_folds):
+                train_0, val_0 = folds[i]
+                train_1, val_1 = label_folds[i]
+                folds[i] = (np.concatenate([train_0, train_1]), np.concatenate([val_0, val_1]))
+    
+    # Convert indices to actual data
+    fold_data = []
+    for train_indices, val_indices in folds:
+        train_images = [dataset[idx]['image'] for idx in train_indices]
+        train_labels = [dataset[idx]['label'] for idx in train_indices]
+        val_images = [dataset[idx]['image'] for idx in val_indices]
+        val_labels = [dataset[idx]['label'] for idx in val_indices]
+        
+        fold_data.append((train_images, train_labels, val_images, val_labels))
+    
+    return fold_data
+
+
+def create_dataloaders(train_images, train_labels, val_images, val_labels, 
+                      transform_train, transform_val, batch_size: int = 32):
+    """Create train and validation dataloaders"""
+    
+    train_dataset = WolverinesDataset(train_images, train_labels, transform_train)
+    val_dataset = WolverinesDataset(val_images, val_labels, transform_val)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                             num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                           num_workers=4, pin_memory=True)
+    
+    return train_loader, val_loader
+
+
+def set_all_seeds(seed: int):
+    """Set all random seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
