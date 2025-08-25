@@ -2,6 +2,53 @@
 
 A systematic hyperparameter optimization workflow for identifying high-quality wolverine pelage images using DINOv3 features and linear classification. **Optimized for preemptible cluster with 40 concurrent jobs.**
 
+## Installation
+
+### Option 1: Using the Installation Script (Recommended)
+```bash
+# Create and activate environment
+mamba create -n wolverines python=3.10
+mamba activate wolverines
+
+# Clone repository
+cd /home/kdoherty/wolverines/
+git clone <repo-url> pelage_sorting
+
+# Run installation script (handles PyTorch CUDA versions automatically)
+cd pelage_sorting
+bash ../install_dependencies.sh
+```
+
+### Option 2: Using Conda Environment File
+```bash
+# Create environment from file
+mamba env create -f environment.yml
+mamba activate wolverines
+
+# Note: You may need to edit environment.yml to match your CUDA version
+```
+
+### Option 3: Manual Installation
+```bash
+mamba create -n wolverines python=3.10
+mamba activate wolverines
+
+# Install PyTorch (adjust CUDA version as needed)
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Install other dependencies
+pip install -r requirements.txt
+
+# Install transformers from source (required for DINOv3)
+pip install git+https://github.com/huggingface/transformers.git
+```
+
+### Verify Installation
+```bash
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
+```
+
 ## Overview
 
 This workflow consists of 4 main experiments designed to optimize wolverine image classification:
