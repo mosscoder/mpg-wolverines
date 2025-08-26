@@ -28,40 +28,39 @@ from utils.training import (
 )
 
 
-def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
-    """Map job index to list of (lr, fold) tuples - supports up to 24 jobs"""
+def get_job_combinations(job_idx: int, max_jobs: int = 8) -> list:
+    """Map job index to list of (lr, fold) tuples - supports up to 8 jobs"""
     
-    # Parameters from CLAUDE.md
-    learning_rates = [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
+    # Parameters from CLAUDE.md - constrained to 5 learning rates
+    learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01]
     folds = [0, 1, 2, 3, 4]  # 5-fold CV
     
-    # Generate all combinations: 7 LRs × 5 folds = 35 total
+    # Generate all combinations: 5 LRs × 5 folds = 25 total
     all_combinations = []
     for lr in learning_rates:
         for fold in folds:
             all_combinations.append((lr, fold))
     
-    total_combinations = len(all_combinations)  # 35 total
+    total_combinations = len(all_combinations)  # 25 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 35 combinations across 24 jobs
-    # Jobs 0-10: 2 configs each (22 configs)
-    # Jobs 11-23: 1 config each (13 configs)
-    if job_idx < 11:
-        # Jobs 0-10 get 2 combinations each
-        start_idx = job_idx * 2
-        end_idx = start_idx + 2
+    # Distribute 25 combinations across 8 jobs
+    # Jobs 0-6: 3 configs each (21 configs)
+    # Job 7: 4 configs (4 configs)
+    if job_idx < 7:
+        # Jobs 0-6 get 3 combinations each
+        start_idx = job_idx * 3
+        end_idx = start_idx + 3
         return all_combinations[start_idx:end_idx]
+    elif job_idx == 7:
+        # Job 7 gets remaining 4 combinations
+        start_idx = 21
+        return all_combinations[start_idx:]
     else:
-        # Jobs 11-23 get 1 combination each
-        config_idx = 22 + (job_idx - 11)  # Start after the 22 configs from jobs 0-10
-        if config_idx < total_combinations:
-            return [all_combinations[config_idx]]
-        else:
-            return []
+        return []
 
 
 
@@ -214,7 +213,7 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
 def main():
     parser = argparse.ArgumentParser(description='Sweep over learning rates with 5-fold CV')
     parser.add_argument('--idx', type=int, required=True, 
-                       help='Job index (0-39)')
+                       help='Job index (0-7)')
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,

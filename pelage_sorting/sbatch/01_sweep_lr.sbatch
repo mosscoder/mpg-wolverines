@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --partition=preempt
+#SBATCH --partition=general
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:A6000:1 
 #SBATCH --time=16:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-7
 #SBATCH --requeue
 #SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_learning_rate/%x_%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_learning_rate/%x_%A_%a.err
