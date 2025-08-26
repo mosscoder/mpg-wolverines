@@ -25,7 +25,6 @@ def preprocess_dataset(dataset, resize_size):
         preprocess_batch,
         batched=True,
         batch_size=32,
-        num_proc=4,
         desc=f"Resizing images to {resize_size}x{resize_size}"
     )
 
