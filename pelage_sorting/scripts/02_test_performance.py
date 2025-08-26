@@ -18,7 +18,7 @@ sys.path.append('.')
 from utils.dataset import (
     load_wolverines_dataset, create_dataloaders, set_all_seeds
 )
-from utils.transforms import create_transform_from_params
+from utils.preprocessing import get_best_resize_size, get_standard_transform, preprocess_dataset
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, check_result_exists
@@ -29,54 +29,56 @@ def get_optimal_params_from_experiments():
     """
     Load optimal parameters from all previous experiments.
     """
-    from utils.training import (
-        get_best_crop_size_from_results, 
-        get_best_augmentation_params,
-        get_best_learning_rate_from_results
-    )
+    import json
+    import glob
     
-    # Get best crop size from script 00
-    best_crop_size = get_best_crop_size_from_results()
+    # Get best resize size from script 00
+    best_resize = get_best_resize_size()
     
-    # Get best augmentation params from script 01
-    best_aug_params = get_best_augmentation_params()
+    # Get best learning rate from script 01
+    best_lr = 0.001  # Default fallback
+    optimal_epochs = 30  # Default fallback
+    results_pattern = "results/01_learning_rate/*.json"
+    result_files = glob.glob(results_pattern)
     
-    # Get best learning rate and optimal epochs from script 02
-    lr_results = get_best_learning_rate_from_results()
-    best_lr = lr_results.get('learning_rate', 0.001)
-    optimal_epochs = lr_results.get('optimal_epochs', 30)
+    if result_files:
+        best_f1 = 0
+        for file_path in result_files:
+            try:
+                with open(file_path, 'r') as f:
+                    result = json.load(f)
+                f1_score = result.get('best_val_f1', 0)
+                if f1_score > best_f1:
+                    best_f1 = f1_score
+                    best_lr = result['learning_rate']
+                    # Find optimal epoch (where best F1 was achieved)
+                    if 'val_history' in result:
+                        val_f1s = [epoch.get('f1_score', 0) for epoch in result['val_history']]
+                        optimal_epochs = val_f1s.index(max(val_f1s)) + 1 if val_f1s else 30
+            except (json.JSONDecodeError, KeyError):
+                continue
+        print(f"Best learning rate from script 01: {best_lr} (F1: {best_f1:.4f})")
+        print(f"Optimal epochs: {optimal_epochs}")
     
     optimal_params = {
         # From script 00
-        'crop_size': best_crop_size,
-        'resize_size': 256,
+        'resize_size': best_resize,
         
         # From script 01
-        'max_zoom': best_aug_params.get('max_zoom', 1.25),
-        'h_flip_p': best_aug_params.get('h_flip_p', 0.5),
-        'grayscale_p': best_aug_params.get('grayscale_p', 0.25),
-        'blur_type': best_aug_params.get('blur_type', 'moderate'),
-        'blur_p': best_aug_params.get('blur_p', 0.25),
-        'cutmix_p': best_aug_params.get('cutmix_p', 0.25),
-        
-        # From script 02
         'learning_rate': best_lr,
         'optimal_epochs': optimal_epochs,
         
         # Fixed params
-        'batch_size': 32,
+        'batch_size': 16,
         'weight_decay': 0.01,
         'seed': 0
     }
     
     print("=" * 60)
     print("OPTIMAL PARAMETERS FROM PREVIOUS EXPERIMENTS:")
-    print(f"Crop size (from 00): {best_crop_size}")
-    print(f"Learning rate (from 02): {best_lr}")
+    print(f"Resize size (from 00): {best_resize}")
+    print(f"Learning rate (from 01): {best_lr}")
     print(f"Optimal epochs: {optimal_epochs}")
-    print("Augmentations (from 01):")
-    for key, value in best_aug_params.items():
-        print(f"  {key}: {value}")
     print("=" * 60)
     
     return optimal_params
@@ -120,6 +122,11 @@ def train_final_model(args: argparse.Namespace) -> dict:
     print("Loading full datasets...")
     train_dataset, test_dataset = load_wolverines_dataset()
     
+    # Preprocess datasets (resize images)
+    print(f"Preprocessing images to {optimal_params['resize_size']}x{optimal_params['resize_size']}...")
+    train_dataset = preprocess_dataset(train_dataset, optimal_params['resize_size'])
+    test_dataset = preprocess_dataset(test_dataset, optimal_params['resize_size'])
+    
     # Convert to lists
     train_images, train_labels = convert_dataset_to_lists(train_dataset)
     test_images, test_labels = convert_dataset_to_lists(test_dataset)
@@ -129,9 +136,10 @@ def train_final_model(args: argparse.Namespace) -> dict:
     print(f"Train label distribution: {[train_labels.count(0), train_labels.count(1)]}")
     print(f"Test label distribution: {[test_labels.count(0), test_labels.count(1)]}")
     
-    # Create transforms
-    train_transform = create_transform_from_params(optimal_params, is_train=True)
-    test_transform = create_transform_from_params(optimal_params, is_train=False)
+    # Create transforms (simple: just normalize)
+    transform = get_standard_transform()
+    train_transform = transform
+    test_transform = transform
     
     # Create dataloaders
     train_loader, test_loader = create_dataloaders(
@@ -222,7 +230,7 @@ def main():
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                       default='results/03_test',
+                       default='results/02_test',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                        default='gpu', help='Device to use for training')

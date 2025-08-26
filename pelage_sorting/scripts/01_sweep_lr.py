@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Script 02: Learning Rate Sweep
+Script 01: Learning Rate Sweep
 Sweeps over different learning rates using 5-fold cross-validation.
 Records performance at each epoch.
-Uses best settings from scripts 00 and 01.
+Uses best resize size from script 00.
 """
 
 import sys
@@ -21,16 +21,15 @@ from utils.dataset import (
     load_wolverines_dataset, create_kfold_splits, 
     create_dataloaders, set_all_seeds
 )
-from utils.transforms import create_transform_from_params
+from utils.preprocessing import preprocess_dataset, get_standard_transform, get_best_resize_size
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, save_results, check_result_exists
 )
-from utils.preemption import CheckpointManager, ProgressTracker
 
 
-def get_job_combinations(job_idx: int, max_jobs: int = 40) -> list:
-    """Map job index to list of (lr, fold) tuples - supports up to 40 jobs"""
+def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
+    """Map job index to list of (lr, fold) tuples - supports up to 24 jobs"""
     
     # Parameters from CLAUDE.md
     learning_rates = [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]
@@ -44,47 +43,41 @@ def get_job_combinations(job_idx: int, max_jobs: int = 40) -> list:
     
     total_combinations = len(all_combinations)  # 35 total
     
-    # Handle case where job_idx exceeds available work
-    if job_idx >= total_combinations:
+    # Handle case where job_idx exceeds available jobs
+    if job_idx >= max_jobs:
         return []
     
-    # Simple 1:1 mapping for learning rate sweep (35 combinations, use jobs 0-34)
-    # Jobs 35-39 will have no work
-    return [all_combinations[job_idx]]
+    # Distribute 35 combinations across 24 jobs
+    # Jobs 0-10: 2 configs each (22 configs)
+    # Jobs 11-23: 1 config each (13 configs)
+    if job_idx < 11:
+        # Jobs 0-10 get 2 combinations each
+        start_idx = job_idx * 2
+        end_idx = start_idx + 2
+        return all_combinations[start_idx:end_idx]
+    else:
+        # Jobs 11-23 get 1 combination each
+        config_idx = 22 + (job_idx - 11)  # Start after the 22 configs from jobs 0-10
+        if config_idx < total_combinations:
+            return [all_combinations[config_idx]]
+        else:
+            return []
+
+
 
 
 def get_best_params_from_previous_experiments():
-    """
-    Load best parameters from previous experiments.
-    Analyzes actual results from scripts 00 and 01.
-    """
-    from utils.training import get_best_crop_size_from_results, get_best_augmentation_params
+    """Load best parameters from script 00 (resize size)"""
     
-    # Get best crop size from script 00
-    best_crop_size = get_best_crop_size_from_results()
-    print(f"Best crop_size from script 00: {best_crop_size}")
-    
-    # Get best augmentation params from script 01
-    best_aug_params = get_best_augmentation_params()
-    print(f"Best augmentation params from script 01:")
-    for key, value in best_aug_params.items():
-        print(f"  {key}: {value}")
+    # Get best resize size from script 00
+    best_resize = get_best_resize_size()
     
     best_params = {
         # From script 00
-        'crop_size': best_crop_size,
-        'resize_size': 256,
-        
-        # From script 01
-        'max_zoom': best_aug_params.get('max_zoom', 1.25),
-        'h_flip_p': best_aug_params.get('h_flip_p', 0.5),
-        'grayscale_p': best_aug_params.get('grayscale_p', 0.25),
-        'blur_type': best_aug_params.get('blur_type', 'moderate'),
-        'blur_p': best_aug_params.get('blur_p', 0.25),
-        'cutmix_p': best_aug_params.get('cutmix_p', 0.25),
+        'resize_size': best_resize,
         
         # Fixed for this experiment
-        'batch_size': 32,
+        'batch_size': 16,
         'epochs': 50,  # Longer training for LR sweep
         'weight_decay': 0.01
     }
@@ -118,40 +111,9 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     print("Loading dataset...")
     dataset, _ = load_wolverines_dataset()
     
-    # Preprocess images using HF native tools (crop and resize once)
-    print("Preprocessing images with HF native tools...")
-    def preprocess_images(batch):
-        """Preprocess images: center crop and resize"""
-        from PIL import Image
-        crop_size = best_params['crop_size']
-        resize_size = best_params['resize_size']
-        
-        images = []
-        for img in batch['image']:
-            # Center crop
-            width, height = img.size
-            if width < crop_size or height < crop_size:
-                # If image is smaller than crop size, pad or skip
-                continue
-            left = (width - crop_size) // 2
-            top = (height - crop_size) // 2
-            img_cropped = img.crop((left, top, left + crop_size, top + crop_size))
-            
-            # Resize to target size
-            img_resized = img_cropped.resize((resize_size, resize_size), Image.LANCZOS)
-            images.append(img_resized)
-        
-        batch['image'] = images
-        return batch
-    
-    # Process in batches to manage memory efficiently
-    dataset = dataset.map(
-        preprocess_images, 
-        batched=True, 
-        batch_size=32, 
-        num_proc=4,
-        desc="Preprocessing images"
-    )
+    # Preprocess images using preprocessing utility
+    print(f"Preprocessing images to {best_params['resize_size']}x{best_params['resize_size']}...")
+    dataset = preprocess_dataset(dataset, best_params['resize_size'])
     
     # Create k-fold splits (using preprocessed dataset)
     print("Creating 5-fold splits...")
@@ -164,9 +126,10 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     train_dataset, val_dataset = fold_datasets[fold]
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
-    # Create transforms (skip crop/resize since already preprocessed)
-    train_transform = create_transform_from_params(best_params, is_train=True, preprocessed=True)
-    val_transform = create_transform_from_params(best_params, is_train=False, preprocessed=True)
+    # Create transforms (simple: already resized, just normalize)
+    transform = get_standard_transform()
+    train_transform = transform
+    val_transform = transform
     
     # Create dataloaders directly from HF datasets (more memory efficient)
     from torch.utils.data import DataLoader

@@ -6,17 +6,17 @@
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --array=0%32
+#SBATCH --array=0-23
 #SBATCH --requeue
-#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/03_test/%x_%A_%a.err
-#SBATCH --job-name=03_test_performance
+#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/02_test/%x_%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/02_test/%x_%A_%a.err
+#SBATCH --job-name=02_test_performance
 
 # Change to project base directory
 cd /home/kdoherty/wolverines/pelage_sorting
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/pelage/03_test
+mkdir -p /home/kdoherty/logs/wolverines/pelage/02_test
 
 echo "Starting final test evaluation on node $(hostname) at $(date)"
 echo "Working directory: $(pwd)"
@@ -31,9 +31,9 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
 # Run script (using relative paths)
-python scripts/03_test_performance.py \
+python scripts/02_test_performance.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
-    --output_dir results/03_test \
+    --output_dir results/02_test \
     --device gpu
 
 echo "Final test evaluation completed at $(date)"

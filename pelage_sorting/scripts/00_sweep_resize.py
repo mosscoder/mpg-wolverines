@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Script 00: Image Size Sweep
-Sweeps over different square center crop sizes before resizing to 256x256.
-Each job handles one crop size across all 3 seeds.
+Script 00: Resize Size Sweep
+Sweeps over different resize sizes (no center cropping).
+Each job handles one resize size across all 3 seeds.
 """
 
 import sys
@@ -18,45 +18,55 @@ from utils.dataset import (
     load_wolverines_dataset, create_stratified_train_val_split,
     create_dataloaders, set_all_seeds
 )
-from utils.transforms import create_transform_from_params
+from utils.preprocessing import preprocess_dataset, get_standard_transform
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, save_results, check_result_exists, 
     create_result_filename
 )
-from utils.preemption import CheckpointManager, ProgressTracker
 
 
-def get_job_combinations(job_idx: int, max_jobs: int = 40) -> list:
-    """Map job index to list of (params, seed) tuples - supports up to 40 jobs"""
+def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
+    """Map job index to list of (params, seed) tuples - supports up to 24 jobs"""
     
     # Parameters from CLAUDE.md
-    crop_sizes = [256, 384, 512, 640, 768, 1024, 1152, 1280]
-    seeds = [0, 1, 2]
+    resize_sizes = [256, 512, 768, 1024]
+    seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
     # Generate all combinations
     all_combinations = []
-    for crop_size in crop_sizes:
+    for resize_size in resize_sizes:
         for seed in seeds:
             params = {
-                'crop_size': crop_size,
-                'resize_size': 256,
+                'resize_size': resize_size,
                 'learning_rate': 0.001,
-                'batch_size': 32,
+                'batch_size': 16,
                 'epochs': 10,
                 'dataset_sample': 0.1  # 10% per class
             }
             all_combinations.append((params, seed))
     
-    total_combinations = len(all_combinations)  # 24 total
+    total_combinations = len(all_combinations)  # 32 total
     
-    # Handle case where job_idx exceeds available work
-    if job_idx >= total_combinations:
+    # Handle case where job_idx exceeds available jobs
+    if job_idx >= max_jobs:
         return []
     
-    # Simple 1:1 mapping for image size sweep (24 combinations, use jobs 0-23)
-    # Jobs 24-39 will have no work
-    return [all_combinations[job_idx]]
+    # Distribute 32 combinations across 24 jobs
+    # Jobs 0-7: 2 configs each (16 configs)
+    # Jobs 8-23: 1 config each (16 configs)
+    if job_idx < 8:
+        # Jobs 0-7 get 2 combinations each
+        start_idx = job_idx * 2
+        end_idx = start_idx + 2
+        return all_combinations[start_idx:end_idx]
+    else:
+        # Jobs 8-23 get 1 combination each
+        config_idx = 16 + (job_idx - 8)  # Start after the 16 configs from jobs 0-7
+        if config_idx < total_combinations:
+            return [all_combinations[config_idx]]
+        else:
+            return []
 
 
 def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> dict:
@@ -77,7 +87,7 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
         print(f"Skipping existing result: {filename}")
         return None
     
-    print(f"Training config: crop_size={params['crop_size']}, seed={seed}")
+    print(f"Training config: resize_size={params['resize_size']}, seed={seed}")
     
     # Load dataset with error handling
     print("Loading dataset from HuggingFace...")
@@ -92,6 +102,10 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
         print(f"  - Missing authentication token")
         return None
     
+    # Preprocess images using preprocessing utility
+    print(f"Preprocessing images to {params['resize_size']}x{params['resize_size']}...")
+    dataset = preprocess_dataset(dataset, params['resize_size'])
+    
     # Create non-overlapping stratified train/val split (10% each per class)
     try:
         train_images, train_labels, val_images, val_labels = create_stratified_train_val_split(
@@ -105,9 +119,10 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
         print(f"✗ ERROR: Failed to create train/val split: {e}")
         return None
     
-    # Create transforms
-    train_transform = create_transform_from_params(params, is_train=True)
-    val_transform = create_transform_from_params(params, is_train=False)
+    # Create transforms (simple: already resized, just normalize)
+    transform = get_standard_transform()
+    train_transform = transform
+    val_transform = transform
     
     # Create dataloaders
     train_loader, val_loader = create_dataloaders(
@@ -177,9 +192,6 @@ def main():
     print(f"Arguments: {vars(args)}")
     print("=" * 60)
     
-    # Setup preemption handling
-    checkpoint_manager = CheckpointManager()
-    experiment_name = "00_image_size"
     
     # Get combinations for this job
     combinations = get_job_combinations(args.idx)
@@ -190,20 +202,8 @@ def main():
     
     print(f"Processing {len(combinations)} configurations:")
     for i, (params, seed) in enumerate(combinations):
-        print(f"  {i+1}. crop_size={params['crop_size']}, seed={seed}")
+        print(f"  {i+1}. resize_size={params['resize_size']}, seed={seed}")
     
-    # Setup progress tracking
-    progress_tracker = ProgressTracker(len(combinations))
-    completed_configs = []
-    
-    # Setup signal handler for preemption
-    def save_checkpoint():
-        remaining_combinations = combinations[len(completed_configs):]
-        checkpoint_manager.save_checkpoint(
-            args.idx, experiment_name, completed_configs, remaining_combinations
-        )
-    
-    checkpoint_manager.register_signal_handler(save_checkpoint)
     
     # Train each combination
     results_summary = []
@@ -212,22 +212,16 @@ def main():
         try:
             result = train_single_config(params, seed, args)
             if result:
-                completed_configs.append({'params': params, 'seed': seed})
-                progress_tracker.add_completed({'params': params, 'seed': seed}, result)
                 results_summary.append(result)
             else:
                 print(f"Skipped configuration {i+1} (already exists)")
         except Exception as e:
             print(f"Error training config {i+1}: {e}")
-            progress_tracker.add_failed({'params': params, 'seed': seed}, str(e))
             continue
-    
-    # Clear checkpoint on successful completion
-    checkpoint_manager.clear_checkpoint(args.idx, experiment_name)
     
     print(f"\n" + "=" * 60)
     print(f"Job {args.idx} completed!")
-    progress_tracker.print_progress()
+    print(f"Processed {len(results_summary)} configurations successfully")
     
     if results_summary:
         avg_f1 = sum(r['final_val_f1'] for r in results_summary) / len(results_summary)
