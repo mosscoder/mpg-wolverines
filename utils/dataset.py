@@ -173,9 +173,9 @@ def create_dataloaders(train_images, train_labels, val_images, val_labels,
     val_dataset = WolverinesDataset(val_images, val_labels, transform_val)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
-                             num_workers=4, pin_memory=True)
+                             num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                           num_workers=4, pin_memory=True)
+                           num_workers=0, pin_memory=True)
     
     return train_loader, val_loader
 

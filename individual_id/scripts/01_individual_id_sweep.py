@@ -23,7 +23,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolverines root
 sys.path.append(wolverines_root)
 
-from utils.dataset import load_wolverines_dataset, set_all_seeds
+from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders, WolverinesDataset
 from utils.preprocessing import preprocess_dataset, get_standard_transform
 from utils.models import create_model
 from utils.training import check_result_exists
@@ -309,13 +309,15 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     # Load dataset - TRAINING SET ONLY for individual ID experiments
     print("Loading dataset...")
     train_dataset, _ = load_wolverines_dataset()
+    print(f"Training dataset: {len(train_dataset)} samples (training set only)")
     
-    # Use only training data for individual analysis
-    training_data = list(train_dataset)
-    print(f"Training dataset: {len(training_data)} samples (training set only)")
+    # Preprocess dataset once (resize images)
+    resize_size = 728  # Use fixed size for individual ID
+    print(f"Preprocessing dataset to {resize_size}x{resize_size}...")
+    preprocessed_dataset = preprocess_dataset(train_dataset, resize_size)
     
     # Get feasible individuals
-    feasible_individuals, individual_counts = get_feasible_individuals(training_data, sample_size)
+    feasible_individuals, individual_counts = get_feasible_individuals(preprocessed_dataset, sample_size)
     
     if len(feasible_individuals) < 3:
         print(f"Error: Only {len(feasible_individuals)} feasible individuals, need at least 3")
@@ -323,7 +325,7 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     # Create individual dataset with fixed 32+32 train/val split
     train_samples, val_samples, individual_to_class = create_individual_dataset(
-        training_data, feasible_individuals, sample_size, approach, seed
+        preprocessed_dataset, feasible_individuals, sample_size, approach, seed
     )
     
     num_classes = len(feasible_individuals)
@@ -332,51 +334,20 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Train samples: {len(train_samples)}")
     print(f"Val samples: {len(val_samples)}")
     
-    # Preprocess images (resize to optimal size from pelage workflow)  
-    resize_size = 728  # Use reasonable default, could load from pelage results
-    print(f"Preprocessing images to {resize_size}x{resize_size}...")
+    # Extract images and labels for shared dataloader utility
+    train_images = [s['image'] for s in train_samples]
+    train_labels = [s['individual_class'] for s in train_samples]
+    val_images = [s['image'] for s in val_samples]
+    val_labels = [s['individual_class'] for s in val_samples]
     
-    # Create temporary HF-like dataset for preprocessing
-    from datasets import Dataset
-    
-    def samples_to_hf_dataset(samples):
-        images = [s['image'] for s in samples]
-        labels = [s['individual_class'] for s in samples]
-        return Dataset.from_dict({'image': images, 'label': labels})
-    
-    train_hf = samples_to_hf_dataset(train_samples)
-    val_hf = samples_to_hf_dataset(val_samples)
-    
-    train_hf = preprocess_dataset(train_hf, resize_size)
-    val_hf = preprocess_dataset(val_hf, resize_size)
-    
-    # Create dataloaders
-    from torch.utils.data import DataLoader
-    
-    def hf_collate_fn(batch, transform):
-        images = torch.stack([transform(item['image']) for item in batch])
-        labels = torch.tensor([item['label'] for item in batch])
-        return images, labels
-    
+    # Create transforms
     transform = get_standard_transform()
     batch_size = 16
     
-    train_loader = DataLoader(
-        train_hf,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-        collate_fn=lambda batch: hf_collate_fn(batch, transform)
-    )
-    
-    val_loader = DataLoader(
-        val_hf,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        collate_fn=lambda batch: hf_collate_fn(batch, transform)
+    # Use shared dataloader utility
+    train_loader, val_loader = create_dataloaders(
+        train_images, train_labels, val_images, val_labels,
+        transform, transform, batch_size
     )
     
     # Create model (modify for multi-class)
@@ -420,11 +391,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'individual_to_class': individual_to_class,
         'individual_counts': {ind_id: individual_counts[ind_id] for ind_id in feasible_individuals},
         'dataset_stats': {
-            'total_samples_used': len(selected_samples),
+            'total_samples_used': len(train_samples) + len(val_samples),
             'train_samples': len(train_samples),
             'val_samples': len(val_samples),
             'samples_per_individual': sample_size,
-            'actual_samples_per_class': len(selected_samples) // len(feasible_individuals)
+            'actual_samples_per_class': (len(train_samples) + len(val_samples)) // len(feasible_individuals)
         },
         'training_time': training_time,
         'performance': results,
