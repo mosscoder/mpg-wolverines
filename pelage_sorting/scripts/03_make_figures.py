@@ -20,7 +20,9 @@ import pandas as pd
 from typing import List, Dict, Any
 
 # Add utils to path (assumes we cd to pelage_sorting in sbatch)
-sys.path.append('.')
+script_dir = os.path.dirname(os.path.abspath(__file__))
+wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolverines root
+sys.path.append(wolverines_root)
 
 from utils.training import load_results
 
