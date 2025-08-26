@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Script 04: Make Figures
+Script 03: Make Figures
 Generate visualizations for the pelage sorting experiments:
-- Bar charts with 95% CI for scripts 00 and 01
-- Line plots with CI ribbons for script 02
-- Performance curves for final test
+- Bar charts with 95% CI for resize size sweep (script 00)
+- Line plots with CI ribbons for learning rate sweep (script 01)
+- Performance curves for final test (script 02)
 """
 
 import sys
@@ -64,42 +64,42 @@ def load_and_aggregate_results(results_dir: str, group_by: List[str]) -> Dict[tu
     return grouped
 
 
-def make_image_size_figure(results_dir: str, output_path: str):
-    """Create bar chart for image size sweep results"""
-    print("Creating image size figure...")
+def make_resize_figure(results_dir: str, output_path: str):
+    """Create bar chart for resize size sweep results"""
+    print("Creating resize size figure...")
     
-    # Load and group results by crop_size
-    grouped = load_and_aggregate_results(results_dir, ['crop_size'])
+    # Load and group results by resize_size
+    grouped = load_and_aggregate_results(results_dir, ['resize_size'])
     
     if not grouped:
         print(f"No results found in {results_dir}")
         return
     
     # Extract data for plotting
-    crop_sizes = []
+    resize_sizes = []
     f1_means = []
     f1_cis = []
     
-    for (crop_size,), results in sorted(grouped.items()):
-        if crop_size is None:
+    for (resize_size,), results in sorted(grouped.items()):
+        if resize_size is None:
             continue
         
         f1_scores = [r['final_val_f1'] for r in results]
         mean, ci, _ = calculate_confidence_interval(f1_scores)
         
-        crop_sizes.append(crop_size)
+        resize_sizes.append(resize_size)
         f1_means.append(mean)
         f1_cis.append(ci)
     
     # Create figure
     plt.figure(figsize=(12, 8))
-    bars = plt.bar(range(len(crop_sizes)), f1_means, yerr=f1_cis, 
+    bars = plt.bar(range(len(resize_sizes)), f1_means, yerr=f1_cis, 
                    capsize=5, alpha=0.7, color='steelblue')
     
-    plt.xlabel('Center Crop Size', fontsize=14)
+    plt.xlabel('Resize Size', fontsize=14)
     plt.ylabel('Validation F1 Score', fontsize=14)
-    plt.title('Image Size Sweep: Effect of Center Crop Size on Performance', fontsize=16)
-    plt.xticks(range(len(crop_sizes)), crop_sizes)
+    plt.title('Resize Size Sweep: Effect of Image Resize Size on Performance', fontsize=16)
+    plt.xticks(range(len(resize_sizes)), resize_sizes)
     plt.grid(axis='y', alpha=0.3)
     
     # Add value labels on bars
@@ -111,82 +111,8 @@ def make_image_size_figure(results_dir: str, output_path: str):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"✓ Image size figure saved to: {output_path}")
+    print(f"✓ Resize size figure saved to: {output_path}")
 
-
-def make_augmentation_figure(results_dir: str, output_path: str):
-    """Create bar charts for augmentation sweep results"""
-    print("Creating augmentation figure...")
-    
-    # Load all results
-    results = load_results(results_dir)
-    
-    if not results:
-        print(f"No results found in {results_dir}")
-        return
-    
-    # Create subplots for different augmentation types
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
-    
-    augmentation_params = [
-        ('max_zoom', 'Max Zoom Factor'),
-        ('h_flip_p', 'Horizontal Flip Probability'),
-        ('grayscale_p', 'Grayscale Probability'),
-        ('blur_p', 'Blur Probability'),
-        ('cutmix_p', 'CutMix Probability')
-    ]
-    
-    for idx, (param, title) in enumerate(augmentation_params):
-        if idx >= len(axes):
-            break
-        
-        ax = axes[idx]
-        
-        # Group by this parameter
-        grouped = load_and_aggregate_results(results_dir, [param])
-        
-        # Extract data
-        param_values = []
-        f1_means = []
-        f1_cis = []
-        
-        for (param_val,), param_results in sorted(grouped.items()):
-            if param_val is None:
-                continue
-            
-            f1_scores = [r['final_val_f1'] for r in param_results]
-            mean, ci, _ = calculate_confidence_interval(f1_scores)
-            
-            param_values.append(param_val)
-            f1_means.append(mean)
-            f1_cis.append(ci)
-        
-        # Create bar chart
-        bars = ax.bar(range(len(param_values)), f1_means, yerr=f1_cis, 
-                     capsize=3, alpha=0.7, color='darkgreen')
-        
-        ax.set_xlabel(f'{title}', fontsize=12)
-        ax.set_ylabel('Validation F1 Score', fontsize=12)
-        ax.set_title(f'Effect of {title}', fontsize=13)
-        ax.set_xticks(range(len(param_values)))
-        ax.set_xticklabels([f'{v:.2f}' if isinstance(v, float) else str(v) for v in param_values])
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bar, mean, ci in zip(bars, f1_means, f1_cis):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + ci + 0.002,
-                   f'{mean:.3f}', ha='center', va='bottom', fontsize=9)
-    
-    # Remove unused subplots
-    for idx in range(len(augmentation_params), len(axes)):
-        fig.delaxes(axes[idx])
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"✓ Augmentation figure saved to: {output_path}")
 
 
 def make_learning_rate_figure(results_dir: str, output_path: str):
@@ -385,8 +311,8 @@ def main():
                        default='figures',
                        help='Output directory for figures')
     parser.add_argument('--experiments', nargs='+',
-                       choices=['00_image_size', '01_augmentations', '02_learning_rate', '03_test'],
-                       default=['00_image_size', '01_augmentations', '02_learning_rate', '03_test'],
+                       choices=['00_resize', '01_learning_rate', '02_test'],
+                       default=['00_resize', '01_learning_rate', '02_test'],
                        help='Which experiments to create figures for')
     
     args = parser.parse_args()
@@ -403,24 +329,19 @@ def main():
     sns.set_palette("husl")
     
     # Generate figures for each experiment
-    if '00_image_size' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '00_image_size')
-        output_path = os.path.join(args.output_dir, '00_image_size_results.png')
-        make_image_size_figure(results_dir, output_path)
+    if '00_resize' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '00_resize')
+        output_path = os.path.join(args.output_dir, '00_resize_results.png')
+        make_resize_figure(results_dir, output_path)
     
-    if '01_augmentations' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '01_augmentations')
-        output_path = os.path.join(args.output_dir, '01_augmentation_results.png')
-        make_augmentation_figure(results_dir, output_path)
-    
-    if '02_learning_rate' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '02_learning_rate')
-        output_path = os.path.join(args.output_dir, '02_learning_rate_results.png')
+    if '01_learning_rate' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '01_learning_rate')
+        output_path = os.path.join(args.output_dir, '01_learning_rate_results.png')
         make_learning_rate_figure(results_dir, output_path)
     
-    if '03_test' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '03_test')
-        output_path = os.path.join(args.output_dir, '03_final_performance.png')
+    if '02_test' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '02_test')
+        output_path = os.path.join(args.output_dir, '02_final_performance.png')
         make_final_performance_figure(results_dir, output_path)
     
     print(f"\n✓ All figures generated successfully!")
