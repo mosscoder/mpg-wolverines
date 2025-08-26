@@ -333,7 +333,7 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Val samples: {len(val_samples)}")
     
     # Preprocess images (resize to optimal size from pelage workflow)  
-    resize_size = 512  # Use reasonable default, could load from pelage results
+    resize_size = 728  # Use reasonable default, could load from pelage results
     print(f"Preprocessing images to {resize_size}x{resize_size}...")
     
     # Create temporary HF-like dataset for preprocessing
