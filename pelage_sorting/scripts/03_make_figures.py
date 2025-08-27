@@ -182,14 +182,49 @@ def make_learning_rate_figure(results_dir: str, output_path: str):
     ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     ax1.grid(alpha=0.3)
     
-    # Plot 2: Best F1 score for each learning rate
+    # Plot 2: Best F1 score for each learning rate (proper cross-validation)
     lrs = []
     best_f1_means = []
     best_f1_cis = []
     
     for lr, lr_results in sorted(lr_groups.items()):
-        best_f1s = [r['best_val_f1'] for r in lr_results]
-        mean, ci, _ = calculate_confidence_interval(best_f1s)
+        # Collect validation histories for this learning rate
+        all_val_histories = []
+        for result in lr_results:
+            if 'val_history' in result and result['val_history']:
+                val_f1s = [epoch['f1_score'] for epoch in result['val_history']]
+                all_val_histories.append(val_f1s)
+        
+        if not all_val_histories:
+            continue
+        
+        # Find max epochs across all folds
+        max_epochs = max(len(history) for history in all_val_histories)
+        
+        # Compute mean F1 at each epoch across folds
+        epoch_mean_f1s = []
+        for epoch_idx in range(max_epochs):
+            fold_f1s = []
+            for history in all_val_histories:
+                if epoch_idx < len(history):
+                    fold_f1s.append(history[epoch_idx])
+                else:
+                    fold_f1s.append(history[-1])  # Use last value if history is shorter
+            epoch_mean_f1s.append(np.mean(fold_f1s))
+        
+        # Find the epoch with best mean F1 across folds
+        best_cv_f1 = max(epoch_mean_f1s)
+        best_epoch_idx = epoch_mean_f1s.index(best_cv_f1)
+        
+        # Calculate confidence interval for the best epoch
+        best_epoch_f1s = []
+        for history in all_val_histories:
+            if best_epoch_idx < len(history):
+                best_epoch_f1s.append(history[best_epoch_idx])
+            else:
+                best_epoch_f1s.append(history[-1])
+        
+        mean, ci, _ = calculate_confidence_interval(best_epoch_f1s)
         
         lrs.append(lr)
         best_f1_means.append(mean)

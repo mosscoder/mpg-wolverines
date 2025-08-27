@@ -29,44 +29,85 @@ from utils.training import (
 
 def get_optimal_params_from_experiments():
     """
-    Load optimal parameters from all previous experiments.
+    Load optimal parameters from all previous experiments using proper cross-validation.
     """
     import json
     import glob
+    import numpy as np
+    from collections import defaultdict
     
     # Get best resize size from script 00
     best_resize = get_best_resize_size()
     
-    # Get best learning rate from script 01
+    # Get best learning rate and optimal epochs from script 01 (proper cross-validation)
     best_lr = 0.001  # Default fallback
     optimal_epochs = 30  # Default fallback
     results_pattern = "results/01_learning_rate/*.json"
     result_files = glob.glob(results_pattern)
     
     if result_files:
-        best_f1 = 0
+        # Group results by learning rate
+        lr_groups = defaultdict(list)
+        
         for file_path in result_files:
             try:
                 with open(file_path, 'r') as f:
                     result = json.load(f)
-                f1_score = result.get('best_val_f1', 0)
-                if f1_score > best_f1:
-                    best_f1 = f1_score
-                    best_lr = result['learning_rate']
-                    # Find optimal epoch (where best F1 was achieved)
-                    if 'val_history' in result:
-                        val_f1s = [epoch.get('f1_score', 0) for epoch in result['val_history']]
-                        optimal_epochs = val_f1s.index(max(val_f1s)) + 1 if val_f1s else 30
+                lr = result.get('learning_rate')
+                if lr is not None and 'val_history' in result:
+                    lr_groups[lr].append(result)
             except (json.JSONDecodeError, KeyError):
                 continue
-        print(f"Best learning rate from script 01: {best_lr} (F1: {best_f1:.4f})")
-        print(f"Optimal epochs: {optimal_epochs}")
+        
+        # Find best learning rate using proper cross-validation
+        best_cv_f1 = 0
+        best_cv_epochs = 30
+        
+        for lr, lr_results in lr_groups.items():
+            # Collect validation histories for this learning rate
+            all_val_histories = []
+            for result in lr_results:
+                if 'val_history' in result and result['val_history']:
+                    val_f1s = [epoch.get('f1_score', 0) for epoch in result['val_history']]
+                    all_val_histories.append(val_f1s)
+            
+            if not all_val_histories:
+                continue
+            
+            # Find max epochs across all folds
+            max_epochs = max(len(history) for history in all_val_histories)
+            
+            # Compute mean F1 at each epoch across folds
+            epoch_mean_f1s = []
+            for epoch_idx in range(max_epochs):
+                fold_f1s = []
+                for history in all_val_histories:
+                    if epoch_idx < len(history):
+                        fold_f1s.append(history[epoch_idx])
+                    else:
+                        fold_f1s.append(history[-1])  # Use last value if shorter
+                epoch_mean_f1s.append(np.mean(fold_f1s))
+            
+            # Find the epoch with best mean F1 across folds
+            lr_best_f1 = max(epoch_mean_f1s)
+            lr_best_epoch = epoch_mean_f1s.index(lr_best_f1) + 1  # Convert to 1-indexed
+            
+            # Track overall best across learning rates
+            if lr_best_f1 > best_cv_f1:
+                best_cv_f1 = lr_best_f1
+                best_lr = lr
+                optimal_epochs = lr_best_epoch
+        
+        print(f"Best learning rate from cross-validation: {best_lr} (F1: {best_cv_f1:.4f})")
+        print(f"Optimal epochs from cross-validation: {optimal_epochs}")
+    else:
+        print("No learning rate results found, using defaults")
     
     optimal_params = {
         # From script 00
         'resize_size': best_resize,
         
-        # From script 01
+        # From script 01 (cross-validated)
         'learning_rate': best_lr,
         'optimal_epochs': optimal_epochs,
         
@@ -79,8 +120,8 @@ def get_optimal_params_from_experiments():
     print("=" * 60)
     print("OPTIMAL PARAMETERS FROM PREVIOUS EXPERIMENTS:")
     print(f"Resize size (from 00): {best_resize}")
-    print(f"Learning rate (from 01): {best_lr}")
-    print(f"Optimal epochs: {optimal_epochs}")
+    print(f"Learning rate (from 01, CV): {best_lr}")
+    print(f"Optimal epochs (from CV): {optimal_epochs}")
     print("=" * 60)
     
     return optimal_params
