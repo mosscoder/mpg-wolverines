@@ -240,10 +240,6 @@ def make_learning_rate_figure(results_dir: str, output_path: str):
     ax2.set_xticklabels([f'{lr:.0e}' for lr in lrs], rotation=45)
     ax2.grid(alpha=0.3)
     
-    # Add value labels
-    for i, (mean, ci) in enumerate(zip(best_f1_means, best_f1_cis)):
-        ax2.text(i, mean + ci + 0.005, f'{mean:.3f}', 
-                ha='center', va='bottom', fontsize=9)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
