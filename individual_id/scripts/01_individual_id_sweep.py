@@ -128,15 +128,17 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
             print(f"Error: {ind_id} has only {len(invisible_indices)} invisible, need {total_invisible_needed}")
             continue
         
-        # Sample visible indices
+        # Sample visible indices - validation FIRST for consistency
         random.shuffle(visible_indices)
-        train_visible = visible_indices[:train_visible_needed]
-        val_visible = visible_indices[train_visible_needed:train_visible_needed + val_visible_needed]
+        val_visible = visible_indices[:val_visible_needed]  # Always take first 32 for val
+        remaining_visible = visible_indices[val_visible_needed:]  # Rest available for training
+        train_visible = remaining_visible[:train_visible_needed]  # Take what's needed for training
         
-        # Sample invisible indices
+        # Sample invisible indices - validation FIRST for consistency
         random.shuffle(invisible_indices)
-        train_invisible = invisible_indices[:train_invisible_needed]
-        val_invisible = invisible_indices[train_invisible_needed:train_invisible_needed + val_invisible_needed]
+        val_invisible = invisible_indices[:val_invisible_needed]  # Always take first 32 for val
+        remaining_invisible = invisible_indices[val_invisible_needed:]  # Rest available for training
+        train_invisible = remaining_invisible[:train_invisible_needed]  # Take what's needed for training
         
         # Combine train and val indices
         train_indices_ind = train_visible + train_invisible
