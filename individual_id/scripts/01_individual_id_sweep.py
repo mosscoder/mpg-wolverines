@@ -108,19 +108,25 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
             # Use any samples regardless of label
             available_indices = all_indices
         
-        # Need 32 for training + 32 for validation = 64 total per individual
-        total_needed = 64
+        # Need sample_size for training + 32 for validation per individual
+        train_needed = sample_size
+        val_needed = 32
+        total_needed = train_needed + val_needed
+        
         if len(available_indices) < total_needed:
             print(f"Warning: {ind_id} has only {len(available_indices)} available samples, need {total_needed}")
-            # Use all available indices
+            if len(available_indices) < val_needed:
+                print(f"Error: {ind_id} has insufficient samples for validation (need {val_needed})")
+                continue
+            # Use available indices: allocate validation first, then training
             shuffled_indices = random.sample(available_indices, len(available_indices))
+            val_indices_ind = shuffled_indices[-val_needed:]  # Take last 32 for validation
+            train_indices_ind = shuffled_indices[:-val_needed]  # Use remaining for training
         else:
-            # Sample 64 total indices
+            # Sample total needed indices
             shuffled_indices = random.sample(available_indices, total_needed)
-        
-        # Split: first 32 for training, next 32 for validation
-        train_indices_ind = shuffled_indices[:32]
-        val_indices_ind = shuffled_indices[32:64] if len(shuffled_indices) >= 64 else shuffled_indices[len(train_indices_ind):]
+            train_indices_ind = shuffled_indices[:train_needed]
+            val_indices_ind = shuffled_indices[train_needed:train_needed + val_needed]
         
         # Add to train/val index lists
         train_indices.extend(train_indices_ind)
@@ -259,8 +265,8 @@ class MultiClassModelTrainer:
                 best_val_acc = val_acc
                 best_epoch = epoch + 1
             
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1:2d}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}")
+            if verbose:
+                print(f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Best={best_val_acc:.4f} @ep{best_epoch}")
         
         # Final evaluation
         final_val_loss, final_val_acc, final_preds, final_labels, final_report = self.validate_epoch(val_loader, num_classes)
@@ -271,8 +277,9 @@ class MultiClassModelTrainer:
             'best_epoch': best_epoch,
             'final_val_accuracy': final_val_acc,
             'final_val_loss': final_val_loss,
-            'final_predictions': final_preds,
-            'final_labels': final_labels,
+            # Remove large numpy arrays that cause JSON serialization issues
+            # 'final_predictions': final_preds,  # Too large for JSON
+            # 'final_labels': final_labels,      # Too large for JSON
             'final_classification_report': final_report,
             'confusion_matrix': confusion_matrix(final_labels, final_preds).tolist()
         }
