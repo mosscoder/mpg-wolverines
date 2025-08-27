@@ -106,6 +106,48 @@ def create_compatibility_figure(matrix_df, sample_sizes, individual_stats, outpu
     print(f"\n✓ Pelage sample count figure saved to: {figure_path}")
     return figure_path
 
+def save_feasible_individuals(individual_stats, output_dir):
+    """Save list of individuals with sufficient pelage samples for experiments"""
+    
+    # Find individuals with at least 64 pelage samples (32 train + 32 val)
+    feasible_pelage_64 = []
+    for ind_id, stats in individual_stats.items():
+        if stats['label_1_samples'] >= 64:
+            feasible_pelage_64.append((ind_id, stats['label_1_samples']))
+    
+    # Sort by pelage count (descending) and take top 3
+    feasible_pelage_64.sort(key=lambda x: x[1], reverse=True)
+    top_3_individuals = [x[0] for x in feasible_pelage_64[:3]]
+    
+    # Create configuration for script 01
+    config = {
+        'feasible_individuals_pelage_64': top_3_individuals,
+        'individual_pelage_counts': {
+            ind: individual_stats[ind]['label_1_samples'] 
+            for ind in top_3_individuals
+        },
+        'individual_total_counts': {
+            ind: individual_stats[ind]['total_samples'] 
+            for ind in top_3_individuals
+        },
+        'selection_criteria': {
+            'min_pelage_samples': 64,
+            'reason': '32 samples for training + 32 for validation',
+            'approach': 'top_3_by_pelage_count'
+        }
+    }
+    
+    # Save to JSON
+    output_path = os.path.join(output_dir, 'feasible_individuals.json')
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"\n✓ Feasible individuals saved to: {output_path}")
+    print(f"Selected individuals: {', '.join(top_3_individuals)}")
+    
+    return output_path
+
 def analyze_individuals(args):
     """Analyze individual wolverine data by date and label"""
     
@@ -213,6 +255,9 @@ def analyze_individuals(args):
     
     # Create and save compatibility matrix figure
     figure_path = create_compatibility_figure(matrix_df, sample_sizes, individual_stats, args.output_dir)
+    
+    # Save feasible individuals for script 01
+    feasible_individuals_path = save_feasible_individuals(individual_stats, args.output_dir)
     
     print("\\nCompatibility matrix for pelage-only classification:")
     print("(1 = sufficient pelage samples, 0 = insufficient)")

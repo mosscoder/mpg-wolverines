@@ -64,40 +64,22 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     else:
         return all_combinations[start_idx:total_combinations]
 
-def get_feasible_individuals(dataset, min_sample_size=64):
-    """Get the 3 selected individuals with sufficient samples for experiments"""
+
+def load_feasible_individuals(results_dir='results'):
+    """Load pre-computed feasible individuals from script 00"""
+    import json
     
-    # Use only the 3 selected individuals: BDF10-M6, HLC20-H3, and Turk
-    selected_individuals = ['BDF10-M6', 'HLC20-H3', 'Turk']
+    config_path = os.path.join(results_dir, 'feasible_individuals.json')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Feasible individuals config not found at {config_path}. Run script 00 first.")
     
-    # Convert dataset to analyze individual counts
-    individual_counts = defaultdict(lambda: {'total': 0, 'label_0': 0, 'label_1': 0})
+    with open(config_path, 'r') as f:
+        config = json.load(f)
     
-    for item in dataset:
-        ind_id = item['id']
-        individual_counts[ind_id]['total'] += 1
-        if item['label'] == 0:
-            individual_counts[ind_id]['label_0'] += 1
-        else:
-            individual_counts[ind_id]['label_1'] += 1
+    feasible_ids = config['feasible_individuals_pelage_64']
+    print(f"Loaded feasible individuals: {', '.join(feasible_ids)}")
     
-    # Verify the selected individuals have sufficient samples
-    feasible_individuals = []
-    for ind_id in selected_individuals:
-        if ind_id in individual_counts:
-            counts = individual_counts[ind_id]
-            # Need at least 64 total samples (32 train + 32 val) and sufficient pelage for experiments
-            if counts['total'] >= 64 and counts['label_1'] >= 32:
-                feasible_individuals.append(ind_id)
-                print(f"{ind_id}: {counts['total']} total, {counts['label_1']} pelage - ✓ feasible")
-            else:
-                print(f"{ind_id}: {counts['total']} total, {counts['label_1']} pelage - ✗ insufficient")
-        else:
-            print(f"{ind_id}: not found in dataset")
-    
-    print(f"Selected {len(feasible_individuals)} individuals: {feasible_individuals}")
-    
-    return feasible_individuals, individual_counts
+    return config
 
 def create_individual_dataset(dataset, individual_ids, sample_size, approach, seed):
     """Create train/val dataset views for individual ID classification with 32+32 split"""
@@ -328,17 +310,45 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print("Loading dataset...")
     train_dataset, _ = load_wolverines_dataset()
     print(f"Training dataset: {len(train_dataset)} samples (training set only)")
+
+    # Load pre-computed feasible individuals
+    try:
+        feasible_config = load_feasible_individuals(args.output_dir)
+        feasible_individuals = feasible_config['feasible_individuals_pelage_64']
+        individual_counts = {
+            ind_id: {'label_1': feasible_config['individual_pelage_counts'][ind_id],
+                    'total': feasible_config['individual_total_counts'][ind_id]}
+            for ind_id in feasible_individuals
+        }
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("Please run 00_count_individuals.py first to generate feasible individuals.")
+        return None
     
-    # Get feasible individuals
-    feasible_individuals, individual_counts = get_feasible_individuals(train_dataset, sample_size)
+    # Filter dataset to only feasible individuals - MASSIVE memory reduction!
+    feasible_ids_set = set(feasible_individuals)
+    print(f"Filtering dataset to {len(feasible_individuals)} individuals...")
+    
+    if approach == 'pelage_only':
+        # Filter to pelage samples only
+        filtered_dataset = train_dataset.filter(
+            lambda x: x['id'] in feasible_ids_set and x['label'] == 1
+        )
+    else:  # random_sample 
+        # Filter to any samples from feasible individuals
+        filtered_dataset = train_dataset.filter(
+            lambda x: x['id'] in feasible_ids_set
+        )
+    
+    print(f"Filtered dataset: {len(filtered_dataset)} samples (down from {len(train_dataset)})")
     
     if len(feasible_individuals) < 3:
         print(f"Error: Only {len(feasible_individuals)} feasible individuals, need at least 3")
         return None
     
-    # Create individual dataset with fixed 32+32 train/val split
+    # Create individual dataset with fixed 32+32 train/val split from filtered data
     ind_train_dataset, ind_val_dataset, individual_to_class = create_individual_dataset(
-        train_dataset, feasible_individuals, sample_size, approach, seed
+        filtered_dataset, feasible_individuals, sample_size, approach, seed
     )
     
     num_classes = len(feasible_individuals)
