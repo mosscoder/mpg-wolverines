@@ -24,7 +24,7 @@ wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolve
 sys.path.append(wolverines_root)
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders, WolverinesDataset
-from utils.preprocessing import get_standard_transform
+from utils.preprocessing import get_standard_transform, get_center_crop_and_aspect_resize_transform, get_height_crop_and_resize_transform
 from utils.models import create_model
 from utils.training import check_result_exists
 
@@ -33,31 +33,27 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     
     # Experimental parameters - focused on 3 individuals with max 32 samples
     sample_sizes = [2, 4, 8, 16, 32]
-    approaches = ['pelage_only', 'random_sample']
+    approaches = ['pelage_center_crop', 'pelage_base', 'random']
     seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
-    # Generate all combinations: 5 sizes × 2 approaches × 8 seeds = 80 total
+    # Generate all combinations: 5 sizes × 3 approaches × 8 seeds = 120 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 80 total
+    total_combinations = len(all_combinations)  # 120 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 80 combinations across 24 jobs
-    # Jobs 0-7: 4 configs each (32 configs)
-    # Jobs 8-23: 3 configs each (48 configs)
-    if job_idx < 8:
-        start_idx = job_idx * 4
-        end_idx = start_idx + 4
-    else:
-        start_idx = 32 + (job_idx - 8) * 3
-        end_idx = start_idx + 3
+    # Distribute 120 combinations across 24 jobs
+    # Each job gets 5 configs (24 * 5 = 120)
+    configs_per_job = 5
+    start_idx = job_idx * configs_per_job
+    end_idx = start_idx + configs_per_job
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]
@@ -100,11 +96,11 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     for ind_id in individual_ids:
         all_indices = individual_indices[ind_id]
         
-        if approach == 'pelage_only':
+        if approach in ['pelage_center_crop', 'pelage_base']:
             # Use only samples with label=1 (pelage visible)
             pelage_indices = [i for i in all_indices if dataset[i]['label'] == 1]
             available_indices = pelage_indices
-        else:  # random_sample
+        else:  # random
             # Use any samples regardless of label
             available_indices = all_indices
         
@@ -330,12 +326,12 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     feasible_ids_set = set(feasible_individuals)
     print(f"Filtering dataset to {len(feasible_individuals)} individuals...")
     
-    if approach == 'pelage_only':
+    if approach in ['pelage_center_crop', 'pelage_base']:
         # Filter to pelage samples only
         filtered_dataset = train_dataset.filter(
             lambda x: x['id'] in feasible_ids_set and x['label'] == 1
         )
-    else:  # random_sample 
+    else:  # random
         # Filter to any samples from feasible individuals
         filtered_dataset = train_dataset.filter(
             lambda x: x['id'] in feasible_ids_set
@@ -358,10 +354,19 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Train samples: {len(ind_train_dataset)}")
     print(f"Val samples: {len(ind_val_dataset)}")
     
-    # Create transforms with resize for individual ID
-    resize_size = 728  # Use fixed size for individual ID
-    transform = get_standard_transform(resize_size=resize_size)
+    # Create transforms based on approach
     batch_size = 16
+    
+    if approach == 'pelage_center_crop':
+        # Center crop to 728x1280, then resize to 416x728 (preserving aspect ratio)
+        transform = get_center_crop_and_aspect_resize_transform(
+            crop_width=728, crop_height=1280, resize_height=728
+        )
+        resize_size = "416x728"  # For logging
+    else:
+        # pelage_base and random: Height crop to 1280px, then resize to 728x728 square
+        transform = get_height_crop_and_resize_transform(height=1280, resize=728)
+        resize_size = "728x728"  # For logging
     
     # Use standard WolverinesDataset - same as pelage_sorting!
     train_loader, val_loader = create_dataloaders(
@@ -422,6 +427,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'val_history': trainer.val_history,
         'experimental_params': {
             'resize_size': resize_size,
+            'approach_details': {
+                'pelage_center_crop': '728x1280 center crop → 416x728 resize',
+                'pelage_base': '1280px height crop → 728x728 square resize', 
+                'random': '1280px height crop → 728x728 square resize'
+            }[approach],
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
