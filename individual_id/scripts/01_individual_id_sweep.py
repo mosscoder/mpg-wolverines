@@ -149,21 +149,35 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     print(f"Total: {len(train_indices)} train + {len(val_indices)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
     
-    # Create dataset views with individual class mapping
+    # Create lightweight dataset views - no .map() calls to avoid memory duplication
     train_dataset = dataset.select(train_indices)
     val_dataset = dataset.select(val_indices)
     
-    # Add individual class labels to datasets
-    def add_individual_class(example, idx):
-        original_idx = train_indices[idx] if idx < len(train_indices) else val_indices[idx - len(train_indices)]
-        ind_id = dataset[original_idx]['id']
-        example['individual_class'] = individual_to_class[ind_id]
-        return example
-    
-    train_dataset = train_dataset.map(lambda x, idx: add_individual_class(x, idx), with_indices=True)
-    val_dataset = val_dataset.map(lambda x, idx: add_individual_class(x, idx + len(train_indices)), with_indices=True)
-    
     return train_dataset, val_dataset, individual_to_class
+
+class IndividualDataset:
+    """Memory-efficient dataset for individual identification that computes labels on-demand"""
+    
+    def __init__(self, hf_dataset, individual_to_class, transform=None):
+        self.hf_dataset = hf_dataset
+        self.individual_to_class = individual_to_class
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.hf_dataset)
+    
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        image = item['image']  # PIL Image from HuggingFace dataset
+        
+        # Compute individual class from ID on-demand
+        ind_id = item['id']
+        individual_class = self.individual_to_class[ind_id]
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, individual_class
 
 class MultiClassModelTrainer:
     """Trainer for multi-class individual identification"""
@@ -338,9 +352,9 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     transform = get_standard_transform(resize_size=resize_size)
     batch_size = 16
     
-    # Create custom WolverinesDataset with individual_class as label
-    train_pytorch_dataset = WolverinesDataset(ind_train_dataset, transform, label_key='individual_class')
-    val_pytorch_dataset = WolverinesDataset(ind_val_dataset, transform, label_key='individual_class')
+    # Create memory-efficient datasets that compute individual classes on-demand
+    train_pytorch_dataset = IndividualDataset(ind_train_dataset, individual_to_class, transform)
+    val_pytorch_dataset = IndividualDataset(ind_val_dataset, individual_to_class, transform)
     
     # Create dataloaders
     from torch.utils.data import DataLoader
