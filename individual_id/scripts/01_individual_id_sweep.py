@@ -131,35 +131,25 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     print(f"Total: {len(train_indices)} train + {len(val_indices)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
     
-    # Create lightweight dataset views - no .map() calls to avoid memory duplication
+    # Create lightweight dataset views
     train_dataset = dataset.select(train_indices)
     val_dataset = dataset.select(val_indices)
     
-    return train_dataset, val_dataset, individual_to_class
+    # Use HuggingFace native tools: class_encode_column + rename
+    # This automatically maps the 3 unique IDs to integers 0, 1, 2
+    train_dataset = train_dataset.class_encode_column('id')
+    train_dataset = train_dataset.rename_column('id', 'label')
+    
+    val_dataset = val_dataset.class_encode_column('id')
+    val_dataset = val_dataset.rename_column('id', 'label')
+    
+    # Extract the label mapping for reference
+    # The class_encode_column creates a ClassLabel feature with the mapping
+    label_names = train_dataset.features['label'].names
+    label2id = {name: i for i, name in enumerate(label_names)}
+    
+    return train_dataset, val_dataset, label2id
 
-class IndividualDataset:
-    """Memory-efficient dataset for individual identification that computes labels on-demand"""
-    
-    def __init__(self, hf_dataset, individual_to_class, transform=None):
-        self.hf_dataset = hf_dataset
-        self.individual_to_class = individual_to_class
-        self.transform = transform
-    
-    def __len__(self):
-        return len(self.hf_dataset)
-    
-    def __getitem__(self, idx):
-        item = self.hf_dataset[idx]
-        image = item['image']  # PIL Image from HuggingFace dataset
-        
-        # Compute individual class from ID on-demand
-        ind_id = item['id']
-        individual_class = self.individual_to_class[ind_id]
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, individual_class
 
 class MultiClassModelTrainer:
     """Trainer for multi-class individual identification"""
@@ -362,16 +352,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     transform = get_standard_transform(resize_size=resize_size)
     batch_size = 16
     
-    # Create memory-efficient datasets that compute individual classes on-demand
-    train_pytorch_dataset = IndividualDataset(ind_train_dataset, individual_to_class, transform)
-    val_pytorch_dataset = IndividualDataset(ind_val_dataset, individual_to_class, transform)
-    
-    # Create dataloaders
-    from torch.utils.data import DataLoader
-    train_loader = DataLoader(train_pytorch_dataset, batch_size=batch_size, shuffle=True, 
-                             num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_pytorch_dataset, batch_size=batch_size, shuffle=False,
-                           num_workers=0, pin_memory=True)
+    # Use standard WolverinesDataset - same as pelage_sorting!
+    train_loader, val_loader = create_dataloaders(
+        ind_train_dataset, ind_val_dataset,
+        transform, transform, batch_size
+    )
     
     # Create model (modify for multi-class)
     device = "cuda" if args.device == "gpu" else "cpu"
