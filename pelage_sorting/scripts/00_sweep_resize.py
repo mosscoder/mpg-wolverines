@@ -20,7 +20,7 @@ from utils.dataset import (
     load_wolverines_dataset, create_stratified_train_val_split,
     create_dataloaders, set_all_seeds
 )
-from utils.preprocessing import preprocess_dataset, get_standard_transform
+from utils.preprocessing import get_standard_transform
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, save_results, check_result_exists, 
@@ -104,32 +104,28 @@ def train_single_config(params: dict, seed: int, args: argparse.Namespace) -> di
         print(f"  - Missing authentication token")
         return None
     
-    # Preprocess images using preprocessing utility
-    print(f"Preprocessing images to {params['resize_size']}x{params['resize_size']}...")
-    dataset = preprocess_dataset(dataset, params['resize_size'])
+    # Dataset will be processed lazily in transforms
     
     # Create non-overlapping stratified train/val split (10% each per class)
     try:
-        train_images, train_labels, val_images, val_labels = create_stratified_train_val_split(
+        train_dataset, val_dataset = create_stratified_train_val_split(
             dataset,
             train_percentage=params['dataset_sample'],  # 10%
             val_percentage=params['dataset_sample'],     # 10%
             seed=seed
         )
-        print(f"✓ Train samples: {len(train_images)}, Val samples: {len(val_images)}")
+        print(f"✓ Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     except Exception as e:
         print(f"✗ ERROR: Failed to create train/val split: {e}")
         return None
     
-    # Create transforms (simple: already resized, just normalize)
-    transform = get_standard_transform()
-    train_transform = transform
-    val_transform = transform
+    # Create transforms with resize and normalization
+    transform = get_standard_transform(resize_size=params['resize_size'])
     
     # Create dataloaders
     train_loader, val_loader = create_dataloaders(
-        train_images, train_labels, val_images, val_labels,
-        train_transform, val_transform, params['batch_size']
+        train_dataset, val_dataset,
+        transform, transform, params['batch_size']
     )
     
     # Create model

@@ -8,19 +8,20 @@ from sklearn.model_selection import KFold
 
 
 class WolverinesDataset(Dataset):
-    """Dataset class for wolverines images with labels"""
+    """Memory-efficient dataset class that works with HuggingFace datasets"""
     
-    def __init__(self, images: List[Any], labels: List[int], transform=None):
-        self.images = images
-        self.labels = labels
+    def __init__(self, hf_dataset, transform=None, label_key='label'):
+        self.hf_dataset = hf_dataset
         self.transform = transform
+        self.label_key = label_key
     
     def __len__(self):
-        return len(self.images)
+        return len(self.hf_dataset)
     
     def __getitem__(self, idx):
-        image = self.images[idx]
-        label = self.labels[idx]
+        item = self.hf_dataset[idx]
+        image = item['image']  # PIL Image from HuggingFace dataset
+        label = item[self.label_key]
         
         if self.transform:
             image = self.transform(image)
@@ -69,7 +70,7 @@ def create_stratified_train_val_split(dataset,
                                       val_percentage: float = 0.1,
                                       seed: int = 42):
     """
-    Create non-overlapping stratified train/val splits.
+    Create non-overlapping stratified train/val splits using dataset views.
     
     Args:
         dataset: HuggingFace dataset
@@ -78,7 +79,7 @@ def create_stratified_train_val_split(dataset,
         seed: Random seed for reproducibility
         
     Returns:
-        train_images, train_labels, val_images, val_labels
+        train_dataset, val_dataset (HuggingFace dataset views)
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -89,8 +90,8 @@ def create_stratified_train_val_split(dataset,
         label = item['label']
         label_to_indices[label].append(idx)
     
-    train_images, train_labels = [], []
-    val_images, val_labels = [], []
+    train_indices = []
+    val_indices = []
     
     for label in [0, 1]:
         indices = label_to_indices[label]
@@ -105,20 +106,14 @@ def create_stratified_train_val_split(dataset,
         selected_indices = indices[:total_needed]
         
         # Split into non-overlapping train and val sets
-        train_indices = selected_indices[:train_size]
-        val_indices = selected_indices[train_size:train_size + val_size]
-        
-        # Add to train set
-        for idx in train_indices:
-            train_images.append(dataset[idx]['image'])
-            train_labels.append(label)
-        
-        # Add to val set
-        for idx in val_indices:
-            val_images.append(dataset[idx]['image'])
-            val_labels.append(label)
+        train_indices.extend(selected_indices[:train_size])
+        val_indices.extend(selected_indices[train_size:train_size + val_size])
     
-    return train_images, train_labels, val_images, val_labels
+    # Create dataset views using HuggingFace .select() - memory efficient!
+    train_dataset = dataset.select(train_indices)
+    val_dataset = dataset.select(val_indices)
+    
+    return train_dataset, val_dataset
 
 
 
@@ -165,16 +160,16 @@ def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
     return fold_datasets
 
 
-def create_dataloaders(train_images, train_labels, val_images, val_labels, 
+def create_dataloaders(train_dataset, val_dataset, 
                       transform_train, transform_val, batch_size: int = 32):
-    """Create train and validation dataloaders"""
+    """Create train and validation dataloaders from HuggingFace datasets"""
     
-    train_dataset = WolverinesDataset(train_images, train_labels, transform_train)
-    val_dataset = WolverinesDataset(val_images, val_labels, transform_val)
+    train_pytorch_dataset = WolverinesDataset(train_dataset, transform_train)
+    val_pytorch_dataset = WolverinesDataset(val_dataset, transform_val)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+    train_loader = DataLoader(train_pytorch_dataset, batch_size=batch_size, shuffle=True, 
                              num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+    val_loader = DataLoader(val_pytorch_dataset, batch_size=batch_size, shuffle=False,
                            num_workers=0, pin_memory=True)
     
     return train_loader, val_loader

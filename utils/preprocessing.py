@@ -3,42 +3,23 @@ Image preprocessing utilities for the wolverines workflow.
 Handles standardized resizing and transforms after script 00 determines optimal size.
 """
 
-def preprocess_dataset(dataset, resize_size):
-    """
-    Preprocess HuggingFace dataset by resizing images.
-    
-    Args:
-        dataset: HuggingFace dataset with 'image' field
-        resize_size: Target size for resize (width, height)
-        
-    Returns:
-        Preprocessed dataset with resized images
-    """
-    def preprocess_batch(batch):
-        """Preprocess images: resize only"""
-        from PIL import Image
-        images = [img.resize((resize_size, resize_size), Image.LANCZOS) for img in batch['image']]
-        batch['image'] = images
-        return batch
-    
-    return dataset.map(
-        preprocess_batch,
-        batched=True,
-        batch_size=32,
-        desc=f"Resizing images to {resize_size}x{resize_size}"
-    )
 
 
-def get_standard_transform():
+def get_standard_transform(resize_size=512):
     """
-    Get standard normalization transform for preprocessed images.
+    Get standard transform pipeline with resize and normalization.
     Uses ImageNet normalization constants.
     
+    Args:
+        resize_size: Target size for resize (width, height)
+    
     Returns:
-        torchvision.transforms.Compose with ToTensor + Normalize
+        torchvision.transforms.Compose with Resize + ToTensor + Normalize
     """
     from torchvision import transforms
+    from PIL import Image
     return transforms.Compose([
+        transforms.Resize((resize_size, resize_size), interpolation=Image.LANCZOS),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])

@@ -24,7 +24,7 @@ wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolve
 sys.path.append(wolverines_root)
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders, WolverinesDataset
-from utils.preprocessing import preprocess_dataset, get_standard_transform
+from utils.preprocessing import get_standard_transform
 from utils.models import create_model
 from utils.training import check_result_exists
 
@@ -100,66 +100,70 @@ def get_feasible_individuals(dataset, min_sample_size=64):
     return feasible_individuals, individual_counts
 
 def create_individual_dataset(dataset, individual_ids, sample_size, approach, seed):
-    """Create train/val datasets for individual ID classification with 32+32 split"""
+    """Create train/val dataset views for individual ID classification with 32+32 split"""
     
     set_all_seeds(seed)
     
-    # Group samples by individual
-    individual_samples = defaultdict(list)
+    # Group indices by individual
+    individual_indices = defaultdict(list)
     for i, item in enumerate(dataset):
         if item['id'] in individual_ids:
-            individual_samples[item['id']].append((i, item))
+            individual_indices[item['id']].append(i)
     
-    # Create train and val sets separately
-    train_samples = []
-    val_samples = []
+    # Create train and val index lists
+    train_indices = []
+    val_indices = []
     individual_to_class = {ind_id: i for i, ind_id in enumerate(sorted(individual_ids))}
     
     for ind_id in individual_ids:
-        all_samples = individual_samples[ind_id]
+        all_indices = individual_indices[ind_id]
         
         if approach == 'pelage_only':
             # Use only samples with label=1 (pelage visible)
-            pelage_samples = [(i, item) for i, item in all_samples if item['label'] == 1]
-            available_samples = pelage_samples
+            pelage_indices = [i for i in all_indices if dataset[i]['label'] == 1]
+            available_indices = pelage_indices
         else:  # random_sample
             # Use any samples regardless of label
-            available_samples = all_samples
+            available_indices = all_indices
         
         # Need 32 for training + 32 for validation = 64 total per individual
         total_needed = 64
-        if len(available_samples) < total_needed:
-            print(f"Warning: {ind_id} has only {len(available_samples)} available samples, need {total_needed}")
-            # Use all available samples
-            shuffled_samples = random.sample(available_samples, len(available_samples))
+        if len(available_indices) < total_needed:
+            print(f"Warning: {ind_id} has only {len(available_indices)} available samples, need {total_needed}")
+            # Use all available indices
+            shuffled_indices = random.sample(available_indices, len(available_indices))
         else:
-            # Sample 64 total samples
-            shuffled_samples = random.sample(available_samples, total_needed)
+            # Sample 64 total indices
+            shuffled_indices = random.sample(available_indices, total_needed)
         
         # Split: first 32 for training, next 32 for validation
-        train_samples_ind = shuffled_samples[:32]
-        val_samples_ind = shuffled_samples[32:64] if len(shuffled_samples) >= 64 else shuffled_samples[len(train_samples_ind):]
+        train_indices_ind = shuffled_indices[:32]
+        val_indices_ind = shuffled_indices[32:64] if len(shuffled_indices) >= 64 else shuffled_indices[len(train_indices_ind):]
         
-        # Add to train set with class labels
-        for orig_idx, item in train_samples_ind:
-            new_item = item.copy()
-            new_item['individual_class'] = individual_to_class[ind_id]
-            new_item['original_idx'] = orig_idx
-            train_samples.append(new_item)
+        # Add to train/val index lists
+        train_indices.extend(train_indices_ind)
+        val_indices.extend(val_indices_ind)
         
-        # Add to val set with class labels  
-        for orig_idx, item in val_samples_ind:
-            new_item = item.copy()
-            new_item['individual_class'] = individual_to_class[ind_id]
-            new_item['original_idx'] = orig_idx
-            val_samples.append(new_item)
-        
-        print(f"{ind_id}: {len(train_samples_ind)} train + {len(val_samples_ind)} val samples")
+        print(f"{ind_id}: {len(train_indices_ind)} train + {len(val_indices_ind)} val samples")
     
-    print(f"Total: {len(train_samples)} train + {len(val_samples)} val samples")
+    print(f"Total: {len(train_indices)} train + {len(val_indices)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
     
-    return train_samples, val_samples, individual_to_class
+    # Create dataset views with individual class mapping
+    train_dataset = dataset.select(train_indices)
+    val_dataset = dataset.select(val_indices)
+    
+    # Add individual class labels to datasets
+    def add_individual_class(example, idx):
+        original_idx = train_indices[idx] if idx < len(train_indices) else val_indices[idx - len(train_indices)]
+        ind_id = dataset[original_idx]['id']
+        example['individual_class'] = individual_to_class[ind_id]
+        return example
+    
+    train_dataset = train_dataset.map(lambda x, idx: add_individual_class(x, idx), with_indices=True)
+    val_dataset = val_dataset.map(lambda x, idx: add_individual_class(x, idx + len(train_indices)), with_indices=True)
+    
+    return train_dataset, val_dataset, individual_to_class
 
 class MultiClassModelTrainer:
     """Trainer for multi-class individual identification"""
@@ -311,44 +315,39 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     train_dataset, _ = load_wolverines_dataset()
     print(f"Training dataset: {len(train_dataset)} samples (training set only)")
     
-    # Preprocess dataset once (resize images)
-    resize_size = 728  # Use fixed size for individual ID
-    print(f"Preprocessing dataset to {resize_size}x{resize_size}...")
-    preprocessed_dataset = preprocess_dataset(train_dataset, resize_size)
-    
     # Get feasible individuals
-    feasible_individuals, individual_counts = get_feasible_individuals(preprocessed_dataset, sample_size)
+    feasible_individuals, individual_counts = get_feasible_individuals(train_dataset, sample_size)
     
     if len(feasible_individuals) < 3:
         print(f"Error: Only {len(feasible_individuals)} feasible individuals, need at least 3")
         return None
     
     # Create individual dataset with fixed 32+32 train/val split
-    train_samples, val_samples, individual_to_class = create_individual_dataset(
-        preprocessed_dataset, feasible_individuals, sample_size, approach, seed
+    ind_train_dataset, ind_val_dataset, individual_to_class = create_individual_dataset(
+        train_dataset, feasible_individuals, sample_size, approach, seed
     )
     
     num_classes = len(feasible_individuals)
     print(f"Multi-class problem: {num_classes} individuals (classes)")
     
-    print(f"Train samples: {len(train_samples)}")
-    print(f"Val samples: {len(val_samples)}")
+    print(f"Train samples: {len(ind_train_dataset)}")
+    print(f"Val samples: {len(ind_val_dataset)}")
     
-    # Extract images and labels for shared dataloader utility
-    train_images = [s['image'] for s in train_samples]
-    train_labels = [s['individual_class'] for s in train_samples]
-    val_images = [s['image'] for s in val_samples]
-    val_labels = [s['individual_class'] for s in val_samples]
-    
-    # Create transforms
-    transform = get_standard_transform()
+    # Create transforms with resize for individual ID
+    resize_size = 728  # Use fixed size for individual ID
+    transform = get_standard_transform(resize_size=resize_size)
     batch_size = 16
     
-    # Use shared dataloader utility
-    train_loader, val_loader = create_dataloaders(
-        train_images, train_labels, val_images, val_labels,
-        transform, transform, batch_size
-    )
+    # Create custom WolverinesDataset with individual_class as label
+    train_pytorch_dataset = WolverinesDataset(ind_train_dataset, transform, label_key='individual_class')
+    val_pytorch_dataset = WolverinesDataset(ind_val_dataset, transform, label_key='individual_class')
+    
+    # Create dataloaders
+    from torch.utils.data import DataLoader
+    train_loader = DataLoader(train_pytorch_dataset, batch_size=batch_size, shuffle=True, 
+                             num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_pytorch_dataset, batch_size=batch_size, shuffle=False,
+                           num_workers=0, pin_memory=True)
     
     # Create model (modify for multi-class)
     device = "cuda" if args.device == "gpu" else "cpu"
@@ -391,11 +390,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'individual_to_class': individual_to_class,
         'individual_counts': {ind_id: individual_counts[ind_id] for ind_id in feasible_individuals},
         'dataset_stats': {
-            'total_samples_used': len(train_samples) + len(val_samples),
-            'train_samples': len(train_samples),
-            'val_samples': len(val_samples),
+            'total_samples_used': len(ind_train_dataset) + len(ind_val_dataset),
+            'train_samples': len(ind_train_dataset),
+            'val_samples': len(ind_val_dataset),
             'samples_per_individual': sample_size,
-            'actual_samples_per_class': (len(train_samples) + len(val_samples)) // len(feasible_individuals)
+            'actual_samples_per_class': (len(ind_train_dataset) + len(ind_val_dataset)) // len(feasible_individuals)
         },
         'training_time': training_time,
         'performance': results,

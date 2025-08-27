@@ -20,7 +20,7 @@ sys.path.append(wolverines_root)
 from utils.dataset import (
     load_wolverines_dataset, create_dataloaders, set_all_seeds
 )
-from utils.preprocessing import get_best_resize_size, get_standard_transform, preprocess_dataset
+from utils.preprocessing import get_best_resize_size, get_standard_transform
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, check_result_exists
@@ -127,16 +127,6 @@ def get_optimal_params_from_experiments():
     return optimal_params
 
 
-def convert_dataset_to_lists(dataset):
-    """Convert HuggingFace dataset to lists of images and labels"""
-    images = []
-    labels = []
-    
-    for item in dataset:
-        images.append(item['image'])
-        labels.append(item['label'])
-    
-    return images, labels
 
 
 def train_final_model(args: argparse.Namespace) -> dict:
@@ -165,29 +155,24 @@ def train_final_model(args: argparse.Namespace) -> dict:
     print("Loading full datasets...")
     train_dataset, test_dataset = load_wolverines_dataset()
     
-    # Preprocess datasets (resize images)
-    print(f"Preprocessing images to {optimal_params['resize_size']}x{optimal_params['resize_size']}...")
-    train_dataset = preprocess_dataset(train_dataset, optimal_params['resize_size'])
-    test_dataset = preprocess_dataset(test_dataset, optimal_params['resize_size'])
+    # Dataset will be processed lazily in transforms
     
-    # Convert to lists
-    train_images, train_labels = convert_dataset_to_lists(train_dataset)
-    test_images, test_labels = convert_dataset_to_lists(test_dataset)
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Test samples: {len(test_dataset)}")
     
-    print(f"Train samples: {len(train_images)}")
-    print(f"Test samples: {len(test_images)}")
+    # Calculate label distributions from datasets
+    train_labels = [item['label'] for item in train_dataset]
+    test_labels = [item['label'] for item in test_dataset]
     print(f"Train label distribution: {[train_labels.count(0), train_labels.count(1)]}")
     print(f"Test label distribution: {[test_labels.count(0), test_labels.count(1)]}")
     
-    # Create transforms (simple: just normalize)
-    transform = get_standard_transform()
-    train_transform = transform
-    test_transform = transform
+    # Create transforms with resize and normalization
+    transform = get_standard_transform(resize_size=optimal_params['resize_size'])
     
     # Create dataloaders
     train_loader, test_loader = create_dataloaders(
-        train_images, train_labels, test_images, test_labels,
-        train_transform, test_transform, optimal_params['batch_size']
+        train_dataset, test_dataset,
+        transform, transform, optimal_params['batch_size']
     )
     
     # Create model
