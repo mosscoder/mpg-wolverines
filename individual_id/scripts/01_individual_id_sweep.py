@@ -141,6 +141,10 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     train_dataset = dataset.select(train_indices)
     val_dataset = dataset.select(val_indices)
     
+    # Drop the original 'label' column first (pelage visibility 0/1)
+    train_dataset = train_dataset.remove_columns(['label'])
+    val_dataset = val_dataset.remove_columns(['label'])
+    
     # Use HuggingFace native tools: class_encode_column + rename
     # This automatically maps the 3 unique IDs to integers 0, 1, 2
     train_dataset = train_dataset.class_encode_column('id')
