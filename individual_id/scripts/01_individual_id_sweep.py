@@ -203,7 +203,12 @@ class MultiClassModelTrainer:
         correct = 0
         total = 0
         
-        for batch_images, batch_labels in train_loader:
+        for batch_data in train_loader:
+            if len(batch_data) == 3:  # Has pelage info
+                batch_images, batch_labels, _ = batch_data  # Ignore pelage in training
+            else:
+                batch_images, batch_labels = batch_data
+                
             batch_images = batch_images.to(self.device)
             batch_labels = batch_labels.to(self.device)
             
