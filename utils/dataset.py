@@ -26,6 +26,11 @@ class WolverinesDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
+        # Check if pelage information is available
+        if 'pelage' in item:
+            pelage = item['pelage']
+            return image, label, pelage
+        
         return image, label
 
 

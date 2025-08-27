@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Script 02: Plot Individual ID Results
-Creates line plots with 95% CI ribbons comparing pelage_only vs random_sample approaches.
-Analyzes best cross-validated epoch across 8 seeds for each configuration.
+Creates bar charts with color-alpha design comparing pelage ratio training approaches.
+Analyzes performance across overall, visible, and invisible validation sets.
 """
 
 import os
@@ -49,8 +49,8 @@ def load_results(results_dir):
     print(f"Successfully loaded {len(results)} results")
     return results
 
-def find_best_epochs(results):
-    """Find best epoch for each configuration across seeds"""
+def extract_pelage_metrics(results):
+    """Extract overall, visible, and invisible pelage metrics from results"""
     
     # Group results by (sample_size, approach)
     grouped = defaultdict(list)
@@ -58,159 +58,206 @@ def find_best_epochs(results):
         key = (result['sample_size'], result['approach'])
         grouped[key].append(result)
     
-    best_epochs = {}
+    metrics = {}
     performance_data = []
     
     for (sample_size, approach), group_results in grouped.items():
-        if len(group_results) < 8:
+        if len(group_results) < 5:
             print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, approach={approach}")
         
-        # Check if we have val_history for epoch analysis
-        if 'val_history' in group_results[0] and group_results[0]['val_history']:
-            # Method 1: Find best epoch across all seeds using epoch-wise data
-            all_epoch_accuracies = []
+        # Extract three types of validation metrics
+        overall_accs = []
+        visible_accs = []
+        invisible_accs = []
+        
+        for result in group_results:
+            # Overall accuracy from performance
+            if 'performance' in result and 'final_val_accuracy' in result['performance']:
+                overall_accs.append(result['performance']['final_val_accuracy'])
             
-            for result in group_results:
-                val_history = result['val_history']
-                if val_history:
-                    epoch_accs = [epoch_data['accuracy'] for epoch_data in val_history]
-                    all_epoch_accuracies.append(epoch_accs)
+            # Pelage-specific accuracies from final metrics
+            if 'performance' in result and 'final_pelage_metrics' in result['performance']:
+                pelage_metrics = result['performance']['final_pelage_metrics']
+                
+                if 'visible' in pelage_metrics:
+                    visible_accs.append(pelage_metrics['visible']['accuracy'])
+                
+                if 'invisible' in pelage_metrics:
+                    invisible_accs.append(pelage_metrics['invisible']['accuracy'])
+        
+        # Store metrics for each validation type
+        config_key = (sample_size, approach)
+        
+        if overall_accs:
+            metrics[(config_key, 'overall')] = {
+                'accuracies': overall_accs,
+                'mean_accuracy': np.mean(overall_accs),
+                'std_accuracy': np.std(overall_accs, ddof=1),
+                'n_seeds': len(overall_accs)
+            }
             
-            if all_epoch_accuracies:
-                # Find epoch with highest mean accuracy across seeds
-                min_epochs = min(len(accs) for accs in all_epoch_accuracies)
-                mean_accuracies = []
-                for epoch in range(min_epochs):
-                    epoch_values = [accs[epoch] for accs in all_epoch_accuracies]
-                    mean_accuracies.append(np.mean(epoch_values))
-                
-                best_epoch_idx = np.argmax(mean_accuracies)
-                best_epoch = best_epoch_idx + 1  # Convert to 1-indexed
-                
-                # Get accuracies at best epoch for all seeds
-                best_epoch_accuracies = [accs[best_epoch_idx] for accs in all_epoch_accuracies]
-                
-                print(f"samples={sample_size}, approach={approach}: Best epoch {best_epoch}, "
-                      f"mean acc={np.mean(best_epoch_accuracies):.4f}")
-                
-                best_epochs[(sample_size, approach)] = {
-                    'best_epoch': best_epoch,
-                    'accuracies': best_epoch_accuracies,
-                    'mean_accuracy': np.mean(best_epoch_accuracies),
-                    'std_accuracy': np.std(best_epoch_accuracies, ddof=1),
-                    'n_seeds': len(best_epoch_accuracies)
-                }
-                
-                # Store for plotting
-                for acc in best_epoch_accuracies:
-                    performance_data.append({
-                        'sample_size': sample_size,
-                        'approach': approach,
-                        'accuracy': acc,
-                        'best_epoch': best_epoch
-                    })
-        else:
-            # Method 2: Use best_val_accuracy from performance dict
-            print(f"No val_history found for samples={sample_size}, approach={approach}, using best_val_accuracy")
-            accuracies = []
-            epochs = []
+            # Add to performance data
+            for acc in overall_accs:
+                performance_data.append({
+                    'sample_size': sample_size,
+                    'approach': approach,
+                    'val_type': 'overall',
+                    'accuracy': acc
+                })
+        
+        if visible_accs:
+            metrics[(config_key, 'visible')] = {
+                'accuracies': visible_accs,
+                'mean_accuracy': np.mean(visible_accs),
+                'std_accuracy': np.std(visible_accs, ddof=1),
+                'n_seeds': len(visible_accs)
+            }
             
-            for result in group_results:
-                if 'performance' in result and 'best_val_accuracy' in result['performance']:
-                    accuracies.append(result['performance']['best_val_accuracy'])
-                    epochs.append(result['performance'].get('best_epoch', 'unknown'))
-                
-            if accuracies:
-                best_epochs[(sample_size, approach)] = {
-                    'best_epoch': 'mixed',  # Different epochs per seed
-                    'accuracies': accuracies,
-                    'mean_accuracy': np.mean(accuracies),
-                    'std_accuracy': np.std(accuracies, ddof=1),
-                    'n_seeds': len(accuracies),
-                    'epochs': epochs
-                }
-                
-                # Store for plotting
-                for acc in accuracies:
-                    performance_data.append({
-                        'sample_size': sample_size,
-                        'approach': approach,
-                        'accuracy': acc,
-                        'best_epoch': 'mixed'
-                    })
+            # Add to performance data
+            for acc in visible_accs:
+                performance_data.append({
+                    'sample_size': sample_size,
+                    'approach': approach,
+                    'val_type': 'visible',
+                    'accuracy': acc
+                })
+        
+        if invisible_accs:
+            metrics[(config_key, 'invisible')] = {
+                'accuracies': invisible_accs,
+                'mean_accuracy': np.mean(invisible_accs),
+                'std_accuracy': np.std(invisible_accs, ddof=1),
+                'n_seeds': len(invisible_accs)
+            }
+            
+            # Add to performance data
+            for acc in invisible_accs:
+                performance_data.append({
+                    'sample_size': sample_size,
+                    'approach': approach,
+                    'val_type': 'invisible',
+                    'accuracy': acc
+                })
+        
+        print(f"samples={sample_size}, approach={approach}: "
+              f"Overall={np.mean(overall_accs):.4f}, "
+              f"Visible={np.mean(visible_accs) if visible_accs else 'N/A':.4f}, "
+              f"Invisible={np.mean(invisible_accs) if invisible_accs else 'N/A':.4f}")
     
-    return best_epochs, pd.DataFrame(performance_data)
+    return metrics, pd.DataFrame(performance_data)
 
-def plot_results(best_epochs, performance_df, output_path):
-    """Create line plot with 95% CI ribbons"""
+def plot_results(metrics, performance_df, output_path):
+    """Create bar chart with color-alpha design"""
     
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(16, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage_only', 'random_sample']
-    colors = {'pelage_only': '#1f77b4', 'random_sample': '#ff7f0e'}
+    approaches = ['pelage_ratio_0.0', 'pelage_ratio_0.5', 'pelage_ratio_1.0']
+    val_types = ['visible', 'overall', 'invisible']
     
-    for approach in approaches:
-        means = []
-        lower_cis = []
-        upper_cis = []
+    # Colors for training approaches (input)
+    colors = {
+        'pelage_ratio_0.0': '#e74c3c',    # Red - invisible only training
+        'pelage_ratio_0.5': '#f39c12',    # Orange - balanced training
+        'pelage_ratio_1.0': '#27ae60'     # Green - visible only training
+    }
+    
+    # Alpha values for validation sets
+    alphas = {
+        'visible': 1.0,      # Full opacity - visible validation
+        'overall': 0.7,      # Medium opacity - overall validation
+        'invisible': 0.4     # Low opacity - invisible validation
+    }
+    
+    # Bar width and positioning
+    n_groups = len(sample_sizes)
+    n_approaches = len(approaches) 
+    n_val_types = len(val_types)
+    total_bars = n_approaches * n_val_types
+    
+    bar_width = 0.08
+    group_width = total_bars * bar_width
+    group_spacing = 0.3
+    
+    x_positions = np.arange(n_groups) * (group_width + group_spacing)
+    
+    # Plot bars
+    legend_handles = []
+    legend_labels = []
+    
+    for i, sample_size in enumerate(sample_sizes):
+        base_x = x_positions[i]
+        bar_idx = 0
         
-        for sample_size in sample_sizes:
-            key = (sample_size, approach)
-            if key in best_epochs:
-                data = best_epochs[key]
-                mean_acc = data['mean_accuracy']
-                accuracies = data['accuracies']
+        for approach in approaches:
+            for val_type in val_types:
+                key = ((sample_size, approach), val_type)
                 
-                # Calculate 95% confidence interval
-                if len(accuracies) > 1:
-                    sem = stats.sem(accuracies)  # Standard error of the mean
-                    ci = stats.t.interval(0.95, len(accuracies)-1, loc=mean_acc, scale=sem)
-                    lower_ci, upper_ci = ci
-                else:
-                    lower_ci = upper_ci = mean_acc
+                if key in metrics:
+                    data = metrics[key]
+                    mean_acc = data['mean_accuracy']
+                    accuracies = data['accuracies']
+                    
+                    # Calculate 95% confidence interval
+                    if len(accuracies) > 1:
+                        sem = stats.sem(accuracies)
+                        ci_range = stats.t.ppf(0.975, len(accuracies)-1) * sem
+                    else:
+                        ci_range = 0
+                    
+                    # Plot bar
+                    x_pos = base_x + bar_idx * bar_width
+                    bar = ax.bar(x_pos, mean_acc, bar_width, 
+                               color=colors[approach], alpha=alphas[val_type],
+                               edgecolor='black', linewidth=0.5)
+                    
+                    # Add error bar
+                    ax.errorbar(x_pos, mean_acc, yerr=ci_range, fmt='none', 
+                              color='black', capsize=3, linewidth=1)
+                    
+                    # Add to legend (only once per combination)
+                    if i == 0:  # Only add legend items from first sample size
+                        approach_label = approach.replace('pelage_ratio_', '').replace('_', '.')
+                        val_label = val_type.title()
+                        label = f"Train {approach_label} / Val {val_label}"
+                        legend_handles.append(bar[0])
+                        legend_labels.append(label)
                 
-                means.append(mean_acc)
-                lower_cis.append(lower_ci)
-                upper_cis.append(upper_ci)
-            else:
-                # Fill with NaN if missing
-                means.append(np.nan)
-                lower_cis.append(np.nan)
-                upper_cis.append(np.nan)
-        
-        # Plot line and confidence interval
-        plt.plot(sample_sizes, means, 'o-', color=colors[approach], 
-                label=approach.replace('_', ' ').title(), linewidth=2, markersize=6)
-        plt.fill_between(sample_sizes, lower_cis, upper_cis, 
-                        color=colors[approach], alpha=0.2)
+                bar_idx += 1
     
-    plt.xlabel('Samples per Individual (Training)', fontsize=12)
-    plt.ylabel('Best Validation Accuracy', fontsize=12)
-    plt.title('Individual ID Classification Performance\n(95% Confidence Intervals, n=8 seeds)', fontsize=14)
-    plt.legend(fontsize=11)
-    plt.grid(True, alpha=0.3)
-    plt.ylim(0, 1)
+    # Styling
+    ax.set_xlabel('Training Samples per Individual', fontsize=14)
+    ax.set_ylabel('Validation Accuracy', fontsize=14)
+    ax.set_title('Individual ID Performance by Training and Validation Pelage Visibility\n'
+                'Color = Training Ratio, Transparency = Validation Type (95% CI, n=5 seeds)', 
+                fontsize=16)
     
-    # Set x-axis ticks
-    plt.xticks(sample_sizes)
+    # Set x-axis labels
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(sample_sizes)
+    
+    # Add legend
+    ax.legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Grid and limits
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_ylim(0, 1)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Figure saved to: {output_path}")
 
-def print_summary_table(best_epochs):
+def print_summary_table(metrics):
     """Print summary table of results"""
     
-    print("\n" + "="*80)
+    print("\n" + "="*90)
     print("SUMMARY TABLE")
-    print("="*80)
-    print(f"{'Config':<25} {'Best Epoch':<12} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3}")
-    print("-"*80)
+    print("="*90)
+    print(f"{'Config':<30} {'Val Type':<12} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3}")
+    print("-"*90)
     
-    for (sample_size, approach), data in sorted(best_epochs.items()):
-        config = f"{sample_size} {approach}"
-        best_epoch = data['best_epoch']
+    for ((sample_size, approach), val_type), data in sorted(metrics.items()):
+        config = f"{sample_size} {approach.replace('pelage_ratio_', '')}"
         mean_acc = data['mean_accuracy']
         std_acc = data['std_accuracy']
         n_seeds = data['n_seeds']
@@ -223,7 +270,7 @@ def print_summary_table(best_epochs):
         else:
             ci_str = "N/A"
         
-        print(f"{config:<25} {str(best_epoch):<12} {mean_acc:.4f}{'':>4} {std_acc:.4f}{'':>4} "
+        print(f"{config:<30} {val_type:<12} {mean_acc:.4f}{'':>4} {std_acc:.4f}{'':>4} "
               f"{ci_str:<15} {n_seeds:<3}")
 
 def main():
@@ -240,7 +287,7 @@ def main():
     output_path = os.path.join(args.output_dir, 'individual_id_performance.png')
     
     print("="*60)
-    print("Individual ID Results Analysis")
+    print("Individual ID Pelage Ratio Analysis")
     print("="*60)
     
     # Load results
@@ -248,18 +295,18 @@ def main():
     if not results:
         return
     
-    # Find best epochs and create performance dataframe
-    best_epochs, performance_df = find_best_epochs(results)
+    # Extract pelage metrics and create performance dataframe
+    metrics, performance_df = extract_pelage_metrics(results)
     
-    if not best_epochs:
+    if not metrics:
         print("No valid results found")
         return
     
     # Create plot
-    plot_results(best_epochs, performance_df, output_path)
+    plot_results(metrics, performance_df, output_path)
     
     # Print summary table
-    print_summary_table(best_epochs)
+    print_summary_table(metrics)
     
     print(f"\nAnalysis complete! Figure saved to: {output_path}")
 

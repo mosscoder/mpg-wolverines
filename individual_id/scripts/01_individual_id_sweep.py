@@ -24,36 +24,42 @@ wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolve
 sys.path.append(wolverines_root)
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders, WolverinesDataset
-from utils.preprocessing import get_standard_transform, get_center_crop_and_aspect_resize_transform, get_height_crop_and_resize_transform
+from utils.preprocessing import get_height_crop_and_resize_transform
 from utils.models import create_model
 from utils.training import check_result_exists
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - focused on 3 individuals with max 32 samples
+    # Experimental parameters - pelage ratio experiments
     sample_sizes = [2, 4, 8, 16, 32]
-    approaches = ['pelage_center_crop', 'pelage_base', 'random']
-    seeds = [0, 1, 2, 3, 4, 5, 6, 7]
+    approaches = ['pelage_ratio_0.0', 'pelage_ratio_0.5', 'pelage_ratio_1.0']
+    seeds = [0, 1, 2, 3, 4]
     
-    # Generate all combinations: 5 sizes × 3 approaches × 8 seeds = 120 total
+    # Generate all combinations: 5 sizes × 3 ratios × 5 seeds = 75 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 120 total
+    total_combinations = len(all_combinations)  # 75 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 120 combinations across 24 jobs
-    # Each job gets 5 configs (24 * 5 = 120)
-    configs_per_job = 5
-    start_idx = job_idx * configs_per_job
-    end_idx = start_idx + configs_per_job
+    # Distribute 75 combinations across 24 jobs
+    # Jobs 0-2: 4 configs each (12 total)
+    # Jobs 3-23: 3 configs each (63 total)
+    if job_idx < 3:
+        configs_per_job = 4
+        start_idx = job_idx * 4
+        end_idx = start_idx + 4
+    else:
+        configs_per_job = 3
+        start_idx = 12 + (job_idx - 3) * 3
+        end_idx = start_idx + 3
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]
@@ -78,15 +84,21 @@ def load_feasible_individuals(results_dir='results'):
     return config
 
 def create_individual_dataset(dataset, individual_ids, sample_size, approach, seed):
-    """Create train/val dataset views for individual ID classification with 32+32 split"""
+    """Create train/val dataset views for individual ID classification with pelage ratio control"""
     
     set_all_seeds(seed)
     
-    # Group indices by individual
-    individual_indices = defaultdict(list)
+    # Extract pelage ratio from approach name
+    pelage_ratio = float(approach.split('_')[-1])  # e.g., 'pelage_ratio_0.5' -> 0.5
+    
+    # Group indices by individual and label
+    individual_indices = defaultdict(lambda: {'visible': [], 'invisible': []})
     for i, item in enumerate(dataset):
         if item['id'] in individual_ids:
-            individual_indices[item['id']].append(i)
+            if item['label'] == 1:
+                individual_indices[item['id']]['visible'].append(i)
+            else:
+                individual_indices[item['id']]['invisible'].append(i)
     
     # Create train and val index lists
     train_indices = []
@@ -94,41 +106,47 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     individual_to_class = {ind_id: i for i, ind_id in enumerate(sorted(individual_ids))}
     
     for ind_id in individual_ids:
-        all_indices = individual_indices[ind_id]
+        visible_indices = individual_indices[ind_id]['visible']
+        invisible_indices = individual_indices[ind_id]['invisible']
         
-        if approach in ['pelage_center_crop', 'pelage_base']:
-            # Use only samples with label=1 (pelage visible)
-            pelage_indices = [i for i in all_indices if dataset[i]['label'] == 1]
-            available_indices = pelage_indices
-        else:  # random
-            # Use any samples regardless of label
-            available_indices = all_indices
+        # Validation: ALWAYS 32 visible + 32 invisible per individual (fixed)
+        val_visible_needed = 32
+        val_invisible_needed = 32
         
-        # Need sample_size for training + 32 for validation per individual
-        train_needed = sample_size
-        val_needed = 32
-        total_needed = train_needed + val_needed
+        # Training: Allocate based on pelage_ratio
+        train_visible_needed = int(sample_size * pelage_ratio)
+        train_invisible_needed = sample_size - train_visible_needed
         
-        if len(available_indices) < total_needed:
-            print(f"Warning: {ind_id} has only {len(available_indices)} available samples, need {total_needed}")
-            if len(available_indices) < val_needed:
-                print(f"Error: {ind_id} has insufficient samples for validation (need {val_needed})")
-                continue
-            # Use available indices: allocate validation first, then training
-            shuffled_indices = random.sample(available_indices, len(available_indices))
-            val_indices_ind = shuffled_indices[-val_needed:]  # Take last 32 for validation
-            train_indices_ind = shuffled_indices[:-val_needed]  # Use remaining for training
-        else:
-            # Sample total needed indices
-            shuffled_indices = random.sample(available_indices, total_needed)
-            train_indices_ind = shuffled_indices[:train_needed]
-            val_indices_ind = shuffled_indices[train_needed:train_needed + val_needed]
+        # Check if we have enough samples
+        total_visible_needed = train_visible_needed + val_visible_needed
+        total_invisible_needed = train_invisible_needed + val_invisible_needed
         
-        # Add to train/val index lists
+        if len(visible_indices) < total_visible_needed:
+            print(f"Error: {ind_id} has only {len(visible_indices)} visible, need {total_visible_needed}")
+            continue
+        if len(invisible_indices) < total_invisible_needed:
+            print(f"Error: {ind_id} has only {len(invisible_indices)} invisible, need {total_invisible_needed}")
+            continue
+        
+        # Sample visible indices
+        random.shuffle(visible_indices)
+        train_visible = visible_indices[:train_visible_needed]
+        val_visible = visible_indices[train_visible_needed:train_visible_needed + val_visible_needed]
+        
+        # Sample invisible indices
+        random.shuffle(invisible_indices)
+        train_invisible = invisible_indices[:train_invisible_needed]
+        val_invisible = invisible_indices[train_invisible_needed:train_invisible_needed + val_invisible_needed]
+        
+        # Combine train and val indices
+        train_indices_ind = train_visible + train_invisible
+        val_indices_ind = val_visible + val_invisible
+        
+        # Add to master lists
         train_indices.extend(train_indices_ind)
         val_indices.extend(val_indices_ind)
         
-        print(f"{ind_id}: {len(train_indices_ind)} train + {len(val_indices_ind)} val samples")
+        print(f"{ind_id}: {len(train_indices_ind)} train ({len(train_visible)}v, {len(train_invisible)}i) + {len(val_indices_ind)} val (32v, 32i)")
     
     print(f"Total: {len(train_indices)} train + {len(val_indices)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
@@ -137,9 +155,9 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     train_dataset = dataset.select(train_indices)
     val_dataset = dataset.select(val_indices)
     
-    # Drop the original 'label' column first (pelage visibility 0/1)
-    train_dataset = train_dataset.remove_columns(['label'])
-    val_dataset = val_dataset.remove_columns(['label'])
+    # Preserve pelage visibility by renaming 'label' to 'pelage'
+    train_dataset = train_dataset.rename_column('label', 'pelage')
+    val_dataset = val_dataset.rename_column('label', 'pelage')
     
     # Use HuggingFace native tools: class_encode_column + rename
     # This automatically maps the 3 unique IDs to integers 0, 1, 2
@@ -205,14 +223,23 @@ class MultiClassModelTrainer:
         return avg_loss, accuracy
     
     def validate_epoch(self, val_loader, num_classes):
-        """Validate for one epoch"""
+        """Validate for one epoch with separate pelage metrics"""
         self.model.eval()
         total_loss = 0
         all_predictions = []
         all_labels = []
+        all_pelage = []
         
         with torch.no_grad():
-            for batch_images, batch_labels in val_loader:
+            for batch_data in val_loader:
+                if len(batch_data) == 3:  # Has pelage info
+                    batch_images, batch_labels, batch_pelage = batch_data
+                    all_pelage.extend(batch_pelage.cpu().numpy())
+                else:
+                    batch_images, batch_labels = batch_data
+                    # Fill with -1 if no pelage info available
+                    all_pelage.extend([-1] * len(batch_labels))
+                
                 batch_images = batch_images.to(self.device)
                 batch_labels = batch_labels.to(self.device)
                 
@@ -226,25 +253,55 @@ class MultiClassModelTrainer:
                 all_labels.extend(batch_labels.cpu().numpy())
         
         avg_loss = total_loss / len(val_loader)
-        accuracy = sum(p == l for p, l in zip(all_predictions, all_labels)) / len(all_labels)
         
-        # Calculate per-class metrics
-        report = classification_report(all_labels, all_predictions, output_dict=True, zero_division=0)
+        # Convert to numpy arrays for easier indexing
+        all_predictions = np.array(all_predictions)
+        all_labels = np.array(all_labels)
+        all_pelage = np.array(all_pelage)
         
-        return avg_loss, accuracy, all_predictions, all_labels, report
+        # Overall accuracy
+        overall_accuracy = sum(p == l for p, l in zip(all_predictions, all_labels)) / len(all_labels)
+        
+        # Overall classification report
+        overall_report = classification_report(all_labels, all_predictions, output_dict=True, zero_division=0)
+        
+        # Separate metrics by pelage visibility if pelage info available
+        pelage_metrics = {}
+        if len(all_pelage) > 0 and not all(p == -1 for p in all_pelage):
+            visible_mask = all_pelage == 1
+            invisible_mask = all_pelage == 0
+            
+            if np.sum(visible_mask) > 0:
+                visible_acc = sum(all_predictions[visible_mask] == all_labels[visible_mask]) / np.sum(visible_mask)
+                visible_report = classification_report(all_labels[visible_mask], all_predictions[visible_mask], 
+                                                     output_dict=True, zero_division=0)
+                pelage_metrics['visible'] = {
+                    'accuracy': visible_acc,
+                    'count': int(np.sum(visible_mask)),
+                    'classification_report': visible_report
+                }
+            
+            if np.sum(invisible_mask) > 0:
+                invisible_acc = sum(all_predictions[invisible_mask] == all_labels[invisible_mask]) / np.sum(invisible_mask)
+                invisible_report = classification_report(all_labels[invisible_mask], all_predictions[invisible_mask],
+                                                       output_dict=True, zero_division=0)
+                pelage_metrics['invisible'] = {
+                    'accuracy': invisible_acc,
+                    'count': int(np.sum(invisible_mask)),
+                    'classification_report': invisible_report
+                }
+        
+        return avg_loss, overall_accuracy, all_predictions, all_labels, overall_report, pelage_metrics
     
     def train(self, train_loader, val_loader, num_classes, epochs=30, verbose=True):
         """Train the model"""
-        
-        best_val_acc = 0
-        best_epoch = 0
         
         for epoch in range(epochs):
             # Training
             train_loss, train_acc = self.train_epoch(train_loader)
             
             # Validation  
-            val_loss, val_acc, val_preds, val_labels, val_report = self.validate_epoch(val_loader, num_classes)
+            val_loss, val_acc, val_preds, val_labels, val_report, pelage_metrics = self.validate_epoch(val_loader, num_classes)
             
             # Save history
             self.train_history.append({
@@ -257,30 +314,32 @@ class MultiClassModelTrainer:
                 'epoch': epoch + 1,
                 'loss': val_loss,
                 'accuracy': val_acc,
-                'classification_report': val_report
+                'classification_report': val_report,
+                'pelage_metrics': pelage_metrics
             })
             
-            # Track best model
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_epoch = epoch + 1
-            
             if verbose:
-                print(f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Best={best_val_acc:.4f} @ep{best_epoch}")
+                # Enhanced display with pelage metrics
+                msg = f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}"
+                if pelage_metrics:
+                    if 'visible' in pelage_metrics:
+                        msg += f", Vis={pelage_metrics['visible']['accuracy']:.4f}"
+                    if 'invisible' in pelage_metrics:
+                        msg += f", Inv={pelage_metrics['invisible']['accuracy']:.4f}"
+                print(msg)
         
         # Final evaluation
-        final_val_loss, final_val_acc, final_preds, final_labels, final_report = self.validate_epoch(val_loader, num_classes)
+        final_val_loss, final_val_acc, final_preds, final_labels, final_report, final_pelage_metrics = self.validate_epoch(val_loader, num_classes)
         
         results = {
             'epochs_trained': epochs,
-            'best_val_accuracy': best_val_acc,
-            'best_epoch': best_epoch,
             'final_val_accuracy': final_val_acc,
             'final_val_loss': final_val_loss,
             # Remove large numpy arrays that cause JSON serialization issues
             # 'final_predictions': final_preds,  # Too large for JSON
             # 'final_labels': final_labels,      # Too large for JSON
             'final_classification_report': final_report,
+            'final_pelage_metrics': final_pelage_metrics,
             'confusion_matrix': confusion_matrix(final_labels, final_preds).tolist()
         }
         
@@ -326,16 +385,10 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     feasible_ids_set = set(feasible_individuals)
     print(f"Filtering dataset to {len(feasible_individuals)} individuals...")
     
-    if approach in ['pelage_center_crop', 'pelage_base']:
-        # Filter to pelage samples only
-        filtered_dataset = train_dataset.filter(
-            lambda x: x['id'] in feasible_ids_set and x['label'] == 1
-        )
-    else:  # random
-        # Filter to any samples from feasible individuals
-        filtered_dataset = train_dataset.filter(
-            lambda x: x['id'] in feasible_ids_set
-        )
+    # Filter to feasible individuals only (need both visible and invisible samples)
+    filtered_dataset = train_dataset.filter(
+        lambda x: x['id'] in feasible_ids_set
+    )
     
     print(f"Filtered dataset: {len(filtered_dataset)} samples (down from {len(train_dataset)})")
     
@@ -354,19 +407,10 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Train samples: {len(ind_train_dataset)}")
     print(f"Val samples: {len(ind_val_dataset)}")
     
-    # Create transforms based on approach
+    # Create transforms - single pipeline for all approaches
     batch_size = 16
-    
-    if approach == 'pelage_center_crop':
-        # Center crop to 728x1280, then resize to 416x728 (preserving aspect ratio)
-        transform = get_center_crop_and_aspect_resize_transform(
-            crop_width=728, crop_height=1280, resize_height=728
-        )
-        resize_size = "416x728"  # For logging
-    else:
-        # pelage_base and random: Height crop to 1280px, then resize to 728x728 square
-        transform = get_height_crop_and_resize_transform(height=1280, resize=728)
-        resize_size = "728x728"  # For logging
+    transform = get_height_crop_and_resize_transform(height=1280, resize=728)
+    resize_size = "728x728"
     
     # Use standard WolverinesDataset - same as pelage_sorting!
     train_loader, val_loader = create_dataloaders(
@@ -427,11 +471,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'val_history': trainer.val_history,
         'experimental_params': {
             'resize_size': resize_size,
-            'approach_details': {
-                'pelage_center_crop': '728x1280 center crop → 416x728 resize',
-                'pelage_base': '1280px height crop → 728x728 square resize', 
-                'random': '1280px height crop → 728x728 square resize'
-            }[approach],
+            'pelage_ratio': float(approach.split('_')[-1]),
+            'approach_details': f'Pelage ratio: {approach.split("_")[-1]} (1280px height crop → 728x728 square resize)',
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
@@ -445,8 +486,19 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         json.dump(final_results, f, indent=2)
     
     print(f"✓ Saved results to: {filename}")
-    print(f"  Best validation accuracy: {results['best_val_accuracy']:.4f}")
     print(f"  Final validation accuracy: {results['final_val_accuracy']:.4f}")
+    
+    # Show pelage-specific performance if available
+    if final_pelage_metrics:
+        if 'visible' in final_pelage_metrics:
+            vis_acc = final_pelage_metrics['visible']['accuracy']
+            vis_count = final_pelage_metrics['visible']['count']
+            print(f"  Final visible accuracy: {vis_acc:.4f} (n={vis_count})")
+        if 'invisible' in final_pelage_metrics:
+            inv_acc = final_pelage_metrics['invisible']['accuracy']
+            inv_count = final_pelage_metrics['invisible']['count']
+            print(f"  Final invisible accuracy: {inv_acc:.4f} (n={inv_count})")
+    
     print(f"  Training time: {training_time/60:.1f} minutes")
     
     return final_results
@@ -497,10 +549,10 @@ def main():
     print(f"Successfully processed {len(results_summary)} configurations")
     
     if results_summary:
-        avg_acc = sum(r['performance']['best_val_accuracy'] for r in results_summary) / len(results_summary)
-        best_acc = max(r['performance']['best_val_accuracy'] for r in results_summary)
-        print(f"Average best validation accuracy: {avg_acc:.4f}")
-        print(f"Best validation accuracy: {best_acc:.4f}")
+        avg_acc = sum(r['performance']['final_val_accuracy'] for r in results_summary) / len(results_summary)
+        best_acc = max(r['performance']['final_val_accuracy'] for r in results_summary)
+        print(f"Average final validation accuracy: {avg_acc:.4f}")
+        print(f"Best final validation accuracy: {best_acc:.4f}")
         print(f"Results saved to: {args.output_dir}")
 
 if __name__ == "__main__":

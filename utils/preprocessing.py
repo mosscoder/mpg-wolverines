@@ -74,41 +74,6 @@ def get_best_resize_size(results_dir='results/00_resize', default=512):
     return best_resize
 
 
-def get_center_crop_and_aspect_resize_transform(crop_width=728, crop_height=1280, resize_height=728):
-    """
-    Get transform with center crop to specified dimensions, then aspect-preserving resize.
-    
-    For pelage_center_crop approach:
-    1. Center crop to crop_width x crop_height (728x1280)
-    2. Resize height to resize_height, preserve aspect ratio
-    3. Final size: (416x728) where 416 = 728 * (728/1280) rounded to nearest 16
-    
-    Args:
-        crop_width: Target crop width
-        crop_height: Target crop height
-        resize_height: Target final height
-    
-    Returns:
-        torchvision.transforms.Compose with CenterCrop + Resize + ToTensor + Normalize
-    """
-    from torchvision import transforms
-    from PIL import Image
-    
-    # Calculate aspect-preserving width, rounded to nearest 16
-    aspect_ratio = crop_width / crop_height
-    final_width = int(resize_height * aspect_ratio)
-    # Round to nearest multiple of 16 for model compatibility
-    final_width = ((final_width + 8) // 16) * 16
-    
-    print(f"Center crop transform: {crop_width}x{crop_height} → {final_width}x{resize_height}")
-    
-    return transforms.Compose([
-        transforms.CenterCrop((crop_height, crop_width)),  # PIL uses (height, width)
-        transforms.Resize((resize_height, final_width), interpolation=Image.LANCZOS),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
 
 def get_height_crop_and_resize_transform(height=1280, resize=728):
     """
