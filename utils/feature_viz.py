@@ -12,6 +12,74 @@ from PIL import Image
 import os
 
 
+def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32, baseline='zeros'):
+    """Compute integrated gradients for patch tokens to show importance
+    
+    Args:
+        model: WolverinesModel with backbone and classifier
+        image_tensor: Input image [1, 3, H, W]
+        class_id: Target class to compute gradients for
+        device: Device to run on
+        steps: Number of integration steps
+        baseline: Type of baseline ('zeros' or 'mean')
+        
+    Returns:
+        ig: Integrated gradients per patch token [P, D]
+        per_patch: Relevance score per patch [P]
+    """
+    image_tensor = image_tensor.to(device)
+    
+    # Get patch tokens from forward pass
+    with torch.no_grad():
+        out = model.backbone(image_tensor)
+        tokens = out.last_hidden_state.squeeze(0)  # [num_tokens, D]
+        
+        # Determine number of special tokens (CLS + register tokens)
+        num_patches = (image_tensor.shape[-1] // 16) * (image_tensor.shape[-2] // 16)
+        num_tokens = tokens.shape[0]
+        num_special = num_tokens - num_patches
+        
+        patches = tokens[num_special:].detach()  # [P, D] - skip CLS and register tokens
+    
+    # Create baseline
+    if baseline == 'zeros':
+        base = torch.zeros_like(patches)
+    elif baseline == 'mean':
+        base = patches.mean(dim=0, keepdim=True).expand_as(patches)
+    else:
+        base = torch.zeros_like(patches)
+    
+    # Accumulate gradients
+    total = torch.zeros_like(patches)
+    
+    for alpha in torch.linspace(0, 1, steps, device=device):
+        # Interpolate between baseline and actual patches
+        x = (base + alpha * (patches - base)).detach().requires_grad_(True)
+        
+        # Create modified tokens with interpolated patches
+        with torch.no_grad():
+            out = model.backbone(image_tensor)
+            toks = out.last_hidden_state.squeeze(0).detach()  # [num_tokens, D]
+        
+        # Replace patch tokens with interpolated values
+        toks = toks.clone()
+        toks[num_special:] = x
+        
+        # Get CLS token and compute logit
+        cls = toks[0].unsqueeze(0)  # [1, D]
+        logit = model.classifier(cls)[0, class_id]  # Scalar
+        
+        # Compute gradient
+        (grad,) = torch.autograd.grad(logit, x, retain_graph=False)
+        total += grad
+    
+    # Compute integrated gradients
+    ig = (patches - base) * (total / steps)  # [P, D]
+    per_patch = ig.sum(dim=1)  # [P] - relevance per patch
+    
+    return ig, per_patch
+
+
 def extract_top_features(linear_weights, top_k=3):
     """Extract top K most important features globally across all classes
     
@@ -217,6 +285,119 @@ def prepare_image_for_display(image_tensor, denormalize=True):
     display_array = np.clip(display_array, 0, 1)
     
     return display_array
+
+
+def create_integrated_gradients_grid(selected_images, individual_ids, model, transform, 
+                                    device, output_path, patch_grid_size=(45, 45),
+                                    figsize=(20, 4), colormap='RdBu_r', steps=32):
+    """Create visualization grid using integrated gradients to show patch importance
+    
+    Args:
+        selected_images: Dict mapping individual_id -> image info
+        individual_ids: List of individual IDs
+        model: Trained model with backbone and classifier
+        transform: Image transform
+        device: Device for computation
+        output_path: Path to save visualization
+        patch_grid_size: Grid size for patches
+        figsize: Figure size per row
+        colormap: Colormap for gradients (RdBu_r shows positive/negative)
+        steps: Integration steps for IG
+    """
+    import matplotlib.patches as mpatches
+    
+    n_individuals = len([ind for ind in individual_ids if ind in selected_images])
+    n_cols = 5  # Original, IG heatmap, Top positive patches, Top negative patches, Overlay
+    
+    fig_height = figsize[1] * n_individuals
+    fig = plt.figure(figsize=(figsize[0], fig_height))
+    gs = gridspec.GridSpec(n_individuals, n_cols, figure=fig, hspace=0.3, wspace=0.1)
+    
+    # Map individual IDs to class indices
+    id_to_class = {ind_id: i for i, ind_id in enumerate(individual_ids)}
+    
+    row = 0
+    for ind_id in individual_ids:
+        if ind_id not in selected_images:
+            print(f"Skipping {ind_id} - no test image")
+            continue
+        
+        image_info = selected_images[ind_id]
+        pil_image = image_info['image']
+        class_id = id_to_class[ind_id]
+        
+        print(f"Processing {ind_id} (class {class_id})...")
+        
+        # Get original dimensions
+        original_width, original_height = pil_image.size
+        
+        # Apply transform and compute integrated gradients
+        image_tensor = transform(pil_image).unsqueeze(0)  # [1, 3, H, W]
+        ig, per_patch = integrated_gradients_patches(model, image_tensor, class_id, device, steps=steps)
+        
+        # Reshape per_patch to spatial grid
+        relevance_map = per_patch.cpu().numpy().reshape(patch_grid_size)
+        
+        # Prepare displays
+        display_image = np.array(pil_image) / 255.0
+        
+        # Column 0: Original Image
+        ax_orig = fig.add_subplot(gs[row, 0])
+        ax_orig.imshow(display_image)
+        ax_orig.set_title(f'{ind_id}\nOriginal Image', fontsize=12, pad=10)
+        ax_orig.axis('off')
+        
+        # Column 1: IG Heatmap (native resolution)
+        ax_ig = fig.add_subplot(gs[row, 1])
+        vmax = max(abs(relevance_map.min()), abs(relevance_map.max()))
+        im = ax_ig.imshow(relevance_map, cmap=colormap, vmin=-vmax, vmax=vmax,
+                         aspect='auto', interpolation='nearest')
+        ax_ig.set_title('Integrated Gradients\n(Patch Importance)', fontsize=12, pad=10)
+        ax_ig.axis('off')
+        plt.colorbar(im, ax=ax_ig, fraction=0.046, pad=0.04)
+        
+        # Column 2: Top positive patches
+        ax_pos = fig.add_subplot(gs[row, 2])
+        pos_mask = np.where(relevance_map > 0, relevance_map, 0)
+        im_pos = ax_pos.imshow(pos_mask, cmap='Reds', vmin=0, vmax=vmax,
+                              aspect='auto', interpolation='nearest')
+        ax_pos.set_title('Positive\nContributions', fontsize=12, pad=10)
+        ax_pos.axis('off')
+        plt.colorbar(im_pos, ax=ax_pos, fraction=0.046, pad=0.04)
+        
+        # Column 3: Top negative patches
+        ax_neg = fig.add_subplot(gs[row, 3])
+        neg_mask = np.where(relevance_map < 0, -relevance_map, 0)
+        im_neg = ax_neg.imshow(neg_mask, cmap='Blues', vmin=0, vmax=vmax,
+                              aspect='auto', interpolation='nearest')
+        ax_neg.set_title('Negative\nContributions', fontsize=12, pad=10)
+        ax_neg.axis('off')
+        plt.colorbar(im_neg, ax=ax_neg, fraction=0.046, pad=0.04)
+        
+        # Column 4: Overlay on original (upsampled heatmap)
+        ax_overlay = fig.add_subplot(gs[row, 4])
+        ax_overlay.imshow(display_image)
+        
+        # Upsample relevance map to match image size
+        relevance_tensor = torch.from_numpy(relevance_map).float().unsqueeze(0).unsqueeze(0)
+        upsampled = F.interpolate(relevance_tensor, size=(original_height, original_width), 
+                                mode='bilinear', align_corners=False)
+        upsampled_relevance = upsampled[0, 0].numpy()
+        
+        # Overlay with transparency
+        im_overlay = ax_overlay.imshow(upsampled_relevance, cmap=colormap, vmin=-vmax, vmax=vmax,
+                                      alpha=0.5, interpolation='bilinear')
+        ax_overlay.set_title('IG Overlay\non Original', fontsize=12, pad=10)
+        ax_overlay.axis('off')
+        
+        row += 1
+    
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"✓ Integrated gradients visualization saved to: {output_path}")
 
 
 def create_feature_visualization_grid(selected_images, individual_ids, top_feature_indices, 

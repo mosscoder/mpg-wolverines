@@ -25,7 +25,8 @@ from utils.individual_id import get_qualified_individuals, select_test_images_pe
 from utils.feature_viz import (
     extract_top_features, 
     extract_dinov3_patch_features, 
-    create_feature_visualization_grid
+    create_feature_visualization_grid,
+    create_integrated_gradients_grid
 )
 
 
@@ -73,9 +74,8 @@ def main():
     
     model.eval()
     
-    # Extract top features using shared utility
-    print("Extracting most important features...")
-    top_feature_indices, top_feature_values = extract_top_features(linear_weights, top_k=3)
+    # Note: Using integrated gradients approach instead of static feature importance
+    print("Using integrated gradients to compute patch importance...")
     
     # Load test dataset
     print("Loading test dataset...")
@@ -95,31 +95,27 @@ def main():
     # Create transform
     transform = get_height_crop_and_resize_transform(height=1280, resize=728)
     
-    # Create visualization using shared utility
-    print("Creating visualization grid...")
-    create_feature_visualization_grid(
+    # Create integrated gradients visualization
+    print("Creating integrated gradients visualization...")
+    create_integrated_gradients_grid(
         selected_images=selected_images,
         individual_ids=individual_ids,
-        top_feature_indices=top_feature_indices,
         model=model,
         transform=transform,
         device=device,
         output_path=args.output_path,
         patch_grid_size=(45, 45),  # For 728x728 images with 16x16 patches
-        target_size=(728, 728),
-        figsize=(25, 4),  # Wider figure for 5 columns
-        maintain_aspect_ratio=True
+        figsize=(25, 4),  # Wide figure for 5 columns
+        steps=32
     )
     
     # Print summary
     print("\nVisualization Summary:")
     print(f"Individuals: {len(individual_ids)}")
-    print(f"Top features: {top_feature_indices}")
+    print(f"Method: Integrated Gradients (patch importance)")
     print(f"Output: {args.output_path}")
-    
-    print("\nFeature importance values:")
-    for i, (idx, val) in enumerate(zip(top_feature_indices, top_feature_values)):
-        print(f"  Feature {idx}: {val:.4f}")
+    print(f"Integration steps: 32")
+    print("Visualization shows which patches help identify each wolverine")
 
 if __name__ == "__main__":
     main()
