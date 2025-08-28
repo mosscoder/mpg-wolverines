@@ -184,14 +184,18 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
             invisible_mask = all_pelage == 0
             
             if np.sum(visible_mask) > 0:
-                visible_acc = sum(val_preds[visible_mask] == val_labels[visible_mask]) / np.sum(visible_mask)
+                val_preds_arr = np.array(val_preds)
+                val_labels_arr = np.array(val_labels)
+                visible_acc = sum(val_preds_arr[visible_mask] == val_labels_arr[visible_mask]) / np.sum(visible_mask)
                 pelage_metrics['visible'] = {
                     'accuracy': visible_acc,
                     'count': int(np.sum(visible_mask))
                 }
             
             if np.sum(invisible_mask) > 0:
-                invisible_acc = sum(val_preds[invisible_mask] == val_labels[invisible_mask]) / np.sum(invisible_mask)
+                val_preds_arr = np.array(val_preds)
+                val_labels_arr = np.array(val_labels)
+                invisible_acc = sum(val_preds_arr[invisible_mask] == val_labels_arr[invisible_mask]) / np.sum(invisible_mask)
                 pelage_metrics['invisible'] = {
                     'accuracy': invisible_acc,
                     'count': int(np.sum(invisible_mask))
