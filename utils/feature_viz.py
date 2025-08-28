@@ -81,11 +81,12 @@ def get_patch_size_from_model(backbone):
     return 16  # Default for DINOv3-B/16
 
 
-def attention_rollout(attentions, add_residual=True):
+def attention_rollout(attentions, num_special=None, add_residual=True):
     """Compute attention rollout for quick patch importance
     
     Args:
         attentions: List of attention matrices from transformer layers
+        num_special: Number of special tokens (CLS + register). Auto-detected if None.
         add_residual: Add residual connections
         
     Returns:
@@ -108,12 +109,17 @@ def attention_rollout(attentions, add_residual=True):
     for A in mats[1:]:
         R = A @ R
     
+    # Auto-detect num_special if not provided
+    if num_special is None:
+        # Assume 1 CLS token if not specified
+        num_special = 1
+    
     # Return CLS attention to patches (skip special tokens)
-    return R[:, 0, 1:]  # [B, P]
+    return R[:, 0, num_special:]  # [B, P]
 
 
-def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32, baseline='zeros', patch_grid_size=None):
-    """Compute integrated gradients for patch tokens with correct gradient flow
+def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32, baseline='zeros', patch_grid_size=None, batch_size=8):
+    """Compute integrated gradients for patch tokens with correct gradient flow and batching
     
     Args:
         model: WolverinesModel with backbone and classifier
@@ -123,6 +129,7 @@ def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32
         steps: Integration steps
         baseline: Baseline type ('zeros' or 'mean')
         patch_grid_size: Optional (H_p, W_p) if known
+        batch_size: Number of alpha values to process in parallel
         
     Returns:
         ig: Integrated gradients [P, D] - feature-level attributions
@@ -168,22 +175,31 @@ def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32
     else:
         base = torch.zeros_like(patches)
     
-    # Accumulate gradients with proper hook injection
+    # Batched IG computation for speed
     total = torch.zeros_like(patches)
+    alphas = torch.linspace(0, 1, steps, device=device)
     
-    for alpha in torch.linspace(0, 1, steps, device=device):
-        x = (base + alpha * (patches - base)).detach().requires_grad_(True)
+    for i in range(0, steps, batch_size):
+        batch_alphas = alphas[i:i+batch_size]  # [batch_size]
+        batch_grads = []
         
-        # CRITICAL FIX: Inject x at embedding stage so transformer recomputes CLS
-        with replace_patch_tokens_hook(emb_module, x, num_special):
-            out = model.backbone(image_tensor, output_attentions=False, output_hidden_states=False)
-            tokens_new = out.last_hidden_state.squeeze(0)  # [T, D]
-            cls = tokens_new[0]  # CLS now depends on x through attention
-            logit = model.classifier(cls.unsqueeze(0))[0, class_id]
+        for alpha in batch_alphas:
+            x = (base + alpha * (patches - base)).detach().requires_grad_(True)
+            
+            # CRITICAL FIX: Inject x at embedding stage so transformer recomputes CLS
+            with replace_patch_tokens_hook(emb_module, x, num_special):
+                out = model.backbone(image_tensor, output_attentions=False, output_hidden_states=False)
+                tokens_new = out.last_hidden_state.squeeze(0)  # [T, D]
+                cls = tokens_new[0]  # CLS now depends on x through attention
+                logit = model.classifier(cls.unsqueeze(0))[0, class_id]
+            
+            # Compute gradient
+            (grad,) = torch.autograd.grad(logit, x, retain_graph=False)
+            batch_grads.append(grad)
         
-        # Compute gradient
-        (grad,) = torch.autograd.grad(logit, x, retain_graph=False)
-        total += grad
+        # Accumulate batch gradients
+        for grad in batch_grads:
+            total += grad
     
     # Integrated gradients - preserve feature-level information
     ig = (patches - base) * (total / steps)  # [P, D]
@@ -216,14 +232,14 @@ def extract_top_features(linear_weights, top_k=3):
     return top_feature_indices.cpu().numpy(), top_feature_values.cpu().numpy()
 
 
-def extract_dinov3_patch_features(model, image_tensor, device, expected_patches=None):
+def extract_dinov3_patch_features(model, image_tensor, device, patch_grid_size=None):
     """Extract DINOv3 patch features for visualization
     
     Args:
         model: DINOv3 model with backbone attribute
         image_tensor: Input image tensor [1, 3, H, W]
         device: Device to run inference on
-        expected_patches: Expected number of patches (for validation)
+        patch_grid_size: Optional (H_p, W_p) if known
         
     Returns:
         Numpy array of patch features [num_patches, num_features]
@@ -237,22 +253,25 @@ def extract_dinov3_patch_features(model, image_tensor, device, expected_patches=
         
         print(f"DINOv3 output shape: {all_features.shape}")
         
-        # Calculate expected patches if not provided
-        if expected_patches is None:
-            # For square images with 16x16 patches
-            img_size = image_tensor.shape[-1]  # Assume square
-            expected_patches = (img_size // 16) * (img_size // 16)
+        # Calculate patch grid from image dimensions
+        if patch_grid_size is None:
+            patch_size = get_patch_size_from_model(model.backbone)
+            H_img, W_img = image_tensor.shape[-2:]
+            H_p = H_img // patch_size
+            W_p = W_img // patch_size
+            expected_patches = H_p * W_p
+            print(f"Inferred patch grid: {H_p}×{W_p} = {expected_patches} patches")
+        else:
+            H_p, W_p = patch_grid_size
+            expected_patches = H_p * W_p
         
         num_tokens = all_features.shape[1]
-        extra_tokens = num_tokens - expected_patches
+        num_special = get_num_special_tokens(model.backbone, num_tokens, (H_p, W_p))
         
-        print(f"Expected patches: {expected_patches}, Got tokens: {num_tokens}, Extra tokens: {extra_tokens}")
+        print(f"Tokens: {num_tokens} total, {num_special} special, {expected_patches} patches")
         
-        # Extract patch tokens only (skip CLS/register tokens at beginning)
-        if extra_tokens > 0:
-            patch_features = all_features[:, extra_tokens:, :]  # [1, num_patches, num_features]
-        else:
-            patch_features = all_features
+        # Extract patch tokens only (skip special tokens at beginning)
+        patch_features = all_features[:, num_special:, :]  # [1, num_patches, num_features]
         
         print(f"Patch features shape: {patch_features.shape}")
         
@@ -638,6 +657,150 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
     plt.close()
     
     print(f"✓ Visualization saved to: {output_path}")
+
+
+def rank_features_by_dataset(model, dataset_samples, individual_ids, transform, device, top_k=10, max_samples=50):
+    """Rank features by mean |IG| across dataset samples
+    
+    Args:
+        model: Trained model
+        dataset_samples: List of (image, ind_id) tuples from dataset
+        individual_ids: List of individual IDs for class mapping
+        transform: Image transform
+        device: Device for computation
+        top_k: Number of top features to return
+        max_samples: Maximum samples to process per individual
+        
+    Returns:
+        Dict with dataset-aware feature rankings
+    """
+    id_to_class = {ind_id: i for i, ind_id in enumerate(individual_ids)}
+    
+    # Collect IG attributions across dataset
+    all_igs = []
+    
+    for i, (image, ind_id) in enumerate(dataset_samples[:max_samples]):
+        if ind_id not in id_to_class:
+            continue
+            
+        class_id = id_to_class[ind_id]
+        image_tensor = transform(image).unsqueeze(0)
+        
+        # Compute IG
+        ig, _, _ = integrated_gradients_patches(model, image_tensor, class_id, device, steps=16)  # Fewer steps for speed
+        all_igs.append(torch.abs(ig))  # [P, D]
+    
+    if not all_igs:
+        print("No valid samples found for feature ranking")
+        return {}
+    
+    # Stack and compute mean absolute IG across all samples and patches
+    stacked_igs = torch.stack(all_igs)  # [N, P, D]
+    mean_ig = stacked_igs.mean(dim=(0, 1))  # [D] - mean across samples and patches
+    
+    # Get top features
+    top_indices = torch.argsort(mean_ig, descending=True)[:top_k]
+    
+    rankings = {
+        'top_features_dataset': top_indices.cpu().numpy(),
+        'mean_ig_scores': mean_ig[top_indices].cpu().numpy(),
+        'samples_processed': len(all_igs)
+    }
+    
+    print(f"Dataset-aware ranking from {len(all_igs)} samples:")
+    for i, (idx, score) in enumerate(zip(top_indices, mean_ig[top_indices])):
+        print(f"  {i+1}. Feature {idx.item()}: mean |IG| {score.item():.4f}")
+    
+    return rankings
+
+
+def mask_patches(patches, mask_indices, mask_value=0):
+    """Mask specific patches for faithfulness evaluation
+    
+    Args:
+        patches: Patch tokens [P, D]
+        mask_indices: Indices of patches to mask
+        mask_value: Value to set masked patches to
+        
+    Returns:
+        Masked patch tokens
+    """
+    masked = patches.clone()
+    masked[mask_indices] = mask_value
+    return masked
+
+
+def evaluate_faithfulness(model, image_tensor, class_id, device, ig_per_patch, patch_grid_size, 
+                         percentiles=[10, 30, 50, 70, 90], mask_value=0):
+    """Evaluate faithfulness by masking patches and measuring accuracy drop
+    
+    Args:
+        model: Trained model
+        image_tensor: Input image [1, 3, H, W]
+        class_id: Target class ID
+        device: Device
+        ig_per_patch: IG importance per patch [P]
+        patch_grid_size: (H_p, W_p) grid size
+        percentiles: Percentiles of patches to mask (most important first)
+        mask_value: Value to set masked patches to
+        
+    Returns:
+        Dict with faithfulness evaluation results
+    """
+    image_tensor = image_tensor.to(device)
+    model.eval()
+    
+    # Get embeddings module and reference tokens
+    emb_module = _find_embeddings_module(model.backbone)
+    
+    with torch.no_grad():
+        out = model.backbone(image_tensor, output_attentions=False, output_hidden_states=False)
+        tokens = out.last_hidden_state.squeeze(0)  # [T, D]
+    
+    T, D = tokens.shape
+    H_p, W_p = patch_grid_size
+    P = H_p * W_p
+    num_special = get_num_special_tokens(model.backbone, T, patch_grid_size)
+    
+    patches = tokens[num_special:].detach()  # [P, D]
+    
+    # Get baseline accuracy
+    with torch.no_grad():
+        baseline_out = model.backbone(image_tensor)
+        baseline_cls = baseline_out.last_hidden_state[0, 0]  # CLS token
+        baseline_logits = model.classifier(baseline_cls.unsqueeze(0))
+        baseline_prob = torch.softmax(baseline_logits, dim=1)[0, class_id].item()
+    
+    # Rank patches by importance (descending)
+    ig_abs = torch.abs(ig_per_patch)
+    sorted_indices = torch.argsort(ig_abs, descending=True)
+    
+    faithfulness_results = {'baseline_prob': baseline_prob, 'masked_results': []}
+    
+    for percentile in percentiles:
+        # Determine how many patches to mask
+        num_to_mask = int((percentile / 100.0) * P)
+        mask_indices = sorted_indices[:num_to_mask]
+        
+        # Mask patches
+        masked_patches = mask_patches(patches, mask_indices, mask_value)
+        
+        # Evaluate with masked patches
+        with torch.no_grad():
+            with replace_patch_tokens_hook(emb_module, masked_patches, num_special):
+                out = model.backbone(image_tensor)
+                cls = out.last_hidden_state[0, 0]
+                logits = model.classifier(cls.unsqueeze(0))
+                masked_prob = torch.softmax(logits, dim=1)[0, class_id].item()
+        
+        faithfulness_results['masked_results'].append({
+            'percentile': percentile,
+            'num_masked': num_to_mask,
+            'probability': masked_prob,
+            'drop': baseline_prob - masked_prob
+        })
+    
+    return faithfulness_results
 
 
 def create_feature_importance_summary(linear_weights, individual_ids, top_k=10):
