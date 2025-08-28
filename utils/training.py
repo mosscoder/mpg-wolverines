@@ -211,5 +211,191 @@ def create_result_filename(params: Dict[str, Any], seed: int) -> str:
     return f"{param_str}_seed={seed}.json"
 
 
+class MultiClassTrainer:
+    """Base trainer class for multi-class individual identification"""
+    
+    def __init__(self, model, device, learning_rate=0.001, weight_decay=0.01):
+        self.model = model
+        self.device = device
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        
+        # Setup optimizer and loss
+        self.optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate, 
+            weight_decay=weight_decay
+        )
+        self.criterion = torch.nn.CrossEntropyLoss()
+        
+        # Training history
+        self.train_history = []
+        self.val_history = []
+    
+    def train_epoch(self, train_loader):
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        for batch_data in train_loader:
+            if len(batch_data) == 3:  # Has pelage info
+                batch_images, batch_labels, _ = batch_data
+            else:
+                batch_images, batch_labels = batch_data
+                
+            batch_images = batch_images.to(self.device)
+            batch_labels = batch_labels.to(self.device)
+            
+            self.optimizer.zero_grad()
+            outputs = self.model(batch_images)
+            loss = self.criterion(outputs, batch_labels)
+            loss.backward()
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += batch_labels.size(0)
+            correct += predicted.eq(batch_labels).sum().item()
+        
+        avg_loss = total_loss / len(train_loader)
+        accuracy = correct / total
+        return avg_loss, accuracy
+    
+    def validate_epoch(self, val_loader):
+        """Validate for one epoch"""
+        self.model.eval()
+        total_loss = 0
+        all_predictions = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for batch_data in val_loader:
+                if len(batch_data) == 3:
+                    batch_images, batch_labels, _ = batch_data
+                else:
+                    batch_images, batch_labels = batch_data
+                
+                batch_images = batch_images.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+                
+                outputs = self.model(batch_images)
+                loss = self.criterion(outputs, batch_labels)
+                
+                total_loss += loss.item()
+                _, predicted = outputs.max(1)
+                
+                all_predictions.extend(predicted.cpu().numpy())
+                all_labels.extend(batch_labels.cpu().numpy())
+        
+        avg_loss = total_loss / len(val_loader)
+        accuracy = sum(p == l for p, l in zip(all_predictions, all_labels)) / len(all_labels)
+        
+        return avg_loss, accuracy, all_predictions, all_labels
 
 
+class CVTrainer(MultiClassTrainer):
+    """Cross-validation trainer for hyperparameter optimization"""
+    
+    def validate_epoch_with_f1(self, val_loader):
+        """Validate epoch and return F1 score for optimization"""
+        from sklearn.metrics import f1_score
+        
+        avg_loss, accuracy, predictions, labels = self.validate_epoch(val_loader)
+        f1 = f1_score(labels, predictions, average='weighted', zero_division=0)
+        
+        return avg_loss, accuracy, f1, predictions, labels
+    
+    def train_cv_fold(self, train_loader, val_loader, epochs=50, verbose=True):
+        """Train one cross-validation fold"""
+        epoch_results = []
+        
+        for epoch in range(epochs):
+            # Training
+            train_loss, train_acc = self.train_epoch(train_loader)
+            
+            # Validation with F1 score
+            val_loss, val_acc, val_f1, _, _ = self.validate_epoch_with_f1(val_loader)
+            
+            epoch_result = {
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_accuracy': train_acc,
+                'val_loss': val_loss,
+                'val_accuracy': val_acc,
+                'val_f1': val_f1
+            }
+            epoch_results.append(epoch_result)
+            
+            if verbose and (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val F1={val_f1:.4f}")
+        
+        return epoch_results
+
+
+class FinalTrainer(MultiClassTrainer):
+    """Final model trainer with evaluation capabilities"""
+    
+    def evaluate(self, test_loader, individual_ids):
+        """Comprehensive evaluation on test set"""
+        from sklearn.metrics import f1_score, classification_report, confusion_matrix
+        
+        all_predictions = []
+        all_labels = []
+        
+        self.model.eval()
+        with torch.no_grad():
+            for batch_data in test_loader:
+                if len(batch_data) == 3:
+                    batch_images, batch_labels, _ = batch_data
+                else:
+                    batch_images, batch_labels = batch_data
+                
+                batch_images = batch_images.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+                
+                outputs = self.model(batch_images)
+                _, predicted = outputs.max(1)
+                
+                all_predictions.extend(predicted.cpu().numpy())
+                all_labels.extend(batch_labels.cpu().numpy())
+        
+        # Calculate comprehensive metrics
+        accuracy = sum(p == l for p, l in zip(all_predictions, all_labels)) / len(all_labels)
+        f1 = f1_score(all_labels, all_predictions, average='weighted', zero_division=0)
+        
+        # Classification report with individual names
+        report = classification_report(all_labels, all_predictions, 
+                                     target_names=individual_ids,
+                                     output_dict=True, zero_division=0)
+        
+        # Confusion matrix
+        conf_matrix = confusion_matrix(all_labels, all_predictions)
+        
+        return {
+            'accuracy': accuracy,
+            'f1_score': f1,
+            'classification_report': report,
+            'confusion_matrix': conf_matrix.tolist(),
+            'predictions': all_predictions,
+            'true_labels': all_labels
+        }
+    
+    def train_final(self, train_loader, epochs, verbose=True):
+        """Train final model for specified epochs"""
+        
+        for epoch in range(epochs):
+            train_loss, train_acc = self.train_epoch(train_loader)
+            
+            self.train_history.append({
+                'epoch': epoch + 1,
+                'loss': train_loss,
+                'accuracy': train_acc
+            })
+            
+            if verbose and (epoch + 1) % 10 == 0:
+                print(f"Epoch {epoch+1:2d}/{epochs}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f}")
+        
+        print(f"Final training accuracy: {train_acc:.4f}")
+        return train_acc
