@@ -147,7 +147,7 @@ def extract_pelage_metrics(results):
 def plot_results(metrics, performance_df, output_path):
     """Create bar chart with color-alpha design"""
     
-    fig, ax = plt.subplots(figsize=(16, 10))
+    fig, ax = plt.subplots(figsize=(12, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
     approaches = ['pelage', 'random']
