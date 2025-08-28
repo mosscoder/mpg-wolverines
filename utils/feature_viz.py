@@ -10,36 +10,155 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from PIL import Image
 import os
+from contextlib import contextmanager
 
 
-def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32, baseline='zeros'):
-    """Compute integrated gradients for patch tokens to show importance
+def _find_embeddings_module(backbone):
+    """Find embeddings module in DINOv3 backbone"""
+    # Try common paths for DINOv3/HF ViT
+    for path in [
+        "embeddings",
+        "vit.embeddings", 
+        "model.embeddings",
+    ]:
+        mod = backbone
+        ok = True
+        for p in path.split("."):
+            if not hasattr(mod, p):
+                ok = False
+                break
+            mod = getattr(mod, p)
+        if ok:
+            return mod
+    raise AttributeError("Could not locate embeddings module on backbone")
+
+
+@contextmanager
+def replace_patch_tokens_hook(emb_module, x_tokens, num_special):
+    """Replace patch tokens during forward pass via hook
+    
+    Args:
+        emb_module: Embeddings module to hook
+        x_tokens: Interpolated patch tokens [P, D]
+        num_special: Number of special tokens (CLS + register)
+    """
+    def hook_fn(module, input, output):
+        # output shape: [B, T, D] where T = num_special + P
+        return torch.cat([
+            output[:, :num_special, :],  # Keep CLS + register tokens
+            x_tokens.unsqueeze(0)        # Replace patch tokens
+        ], dim=1)
+    
+    handle = emb_module.register_forward_hook(hook_fn)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
+def get_num_special_tokens(backbone, total_tokens, patch_grid_size=None):
+    """Determine number of special tokens (CLS + register)"""
+    # Try to get from config
+    config = getattr(backbone, 'config', None)
+    if config:
+        num_register = getattr(config, 'num_register_tokens', 0)
+        return 1 + int(num_register)  # 1 for CLS + registers
+    
+    # Fallback: infer from grid
+    if patch_grid_size is not None:
+        H_p, W_p = patch_grid_size
+        return total_tokens - (H_p * W_p)
+    
+    # Default: assume 1 CLS token only
+    return 1
+
+
+def get_patch_size_from_model(backbone):
+    """Get patch size from model config"""
+    config = getattr(backbone, 'config', None)
+    if config and hasattr(config, 'patch_size'):
+        return config.patch_size
+    return 16  # Default for DINOv3-B/16
+
+
+def attention_rollout(attentions, add_residual=True):
+    """Compute attention rollout for quick patch importance
+    
+    Args:
+        attentions: List of attention matrices from transformer layers
+        add_residual: Add residual connections
+        
+    Returns:
+        Attention flow from CLS to patches [P]
+    """
+    B, _, T, _ = attentions[0].shape
+    eye = torch.eye(T, device=attentions[0].device).unsqueeze(0).unsqueeze(0)
+    
+    # Average across heads and apply residual
+    mats = []
+    for A in attentions:
+        A = A.mean(1)  # [B, T, T]
+        if add_residual:
+            A = A + eye
+        A = A / A.sum(-1, keepdim=True)
+        mats.append(A)
+    
+    # Chain attention across layers
+    R = mats[0]
+    for A in mats[1:]:
+        R = A @ R
+    
+    # Return CLS attention to patches (skip special tokens)
+    return R[:, 0, 1:]  # [B, P]
+
+
+def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32, baseline='zeros', patch_grid_size=None):
+    """Compute integrated gradients for patch tokens with correct gradient flow
     
     Args:
         model: WolverinesModel with backbone and classifier
         image_tensor: Input image [1, 3, H, W]
-        class_id: Target class to compute gradients for
-        device: Device to run on
-        steps: Number of integration steps
-        baseline: Type of baseline ('zeros' or 'mean')
+        class_id: Target class ID
+        device: Device for computation
+        steps: Integration steps
+        baseline: Baseline type ('zeros' or 'mean')
+        patch_grid_size: Optional (H_p, W_p) if known
         
     Returns:
-        ig: Integrated gradients per patch token [P, D]
-        per_patch: Relevance score per patch [P]
+        ig: Integrated gradients [P, D] - feature-level attributions
+        per_patch: Relevance per patch [P] - summed across features
+        patch_grid: Inferred (H_p, W_p) grid size
     """
     image_tensor = image_tensor.to(device)
+    model.eval()
     
-    # Get patch tokens from forward pass
+    # Get embeddings module
+    emb_module = _find_embeddings_module(model.backbone)
+    
+    # Get reference tokens to determine structure
     with torch.no_grad():
-        out = model.backbone(image_tensor)
-        tokens = out.last_hidden_state.squeeze(0)  # [num_tokens, D]
-        
-        # Determine number of special tokens (CLS + register tokens)
-        num_patches = (image_tensor.shape[-1] // 16) * (image_tensor.shape[-2] // 16)
-        num_tokens = tokens.shape[0]
-        num_special = num_tokens - num_patches
-        
-        patches = tokens[num_special:].detach()  # [P, D] - skip CLS and register tokens
+        out = model.backbone(image_tensor, output_attentions=False, output_hidden_states=False)
+        tokens = out.last_hidden_state.squeeze(0)  # [T, D]
+    
+    T, D = tokens.shape
+    
+    # Determine patch grid and special tokens
+    if patch_grid_size is None:
+        patch_size = get_patch_size_from_model(model.backbone)
+        H_img, W_img = image_tensor.shape[-2:]
+        H_p = H_img // patch_size
+        W_p = W_img // patch_size
+        patch_grid_size = (H_p, W_p)
+    else:
+        H_p, W_p = patch_grid_size
+    
+    P = H_p * W_p
+    num_special = get_num_special_tokens(model.backbone, T, patch_grid_size)
+    
+    print(f"Token structure: {T} total, {num_special} special, {P} patches, grid {H_p}×{W_p}")
+    
+    # Extract patch tokens
+    patches = tokens[num_special:].detach()  # [P, D]
     
     # Create baseline
     if baseline == 'zeros':
@@ -49,35 +168,28 @@ def integrated_gradients_patches(model, image_tensor, class_id, device, steps=32
     else:
         base = torch.zeros_like(patches)
     
-    # Accumulate gradients
+    # Accumulate gradients with proper hook injection
     total = torch.zeros_like(patches)
     
     for alpha in torch.linspace(0, 1, steps, device=device):
-        # Interpolate between baseline and actual patches
         x = (base + alpha * (patches - base)).detach().requires_grad_(True)
         
-        # Create modified tokens with interpolated patches
-        with torch.no_grad():
-            out = model.backbone(image_tensor)
-            toks = out.last_hidden_state.squeeze(0).detach()  # [num_tokens, D]
-        
-        # Replace patch tokens with interpolated values
-        toks = toks.clone()
-        toks[num_special:] = x
-        
-        # Get CLS token and compute logit
-        cls = toks[0].unsqueeze(0)  # [1, D]
-        logit = model.classifier(cls)[0, class_id]  # Scalar
+        # CRITICAL FIX: Inject x at embedding stage so transformer recomputes CLS
+        with replace_patch_tokens_hook(emb_module, x, num_special):
+            out = model.backbone(image_tensor, output_attentions=False, output_hidden_states=False)
+            tokens_new = out.last_hidden_state.squeeze(0)  # [T, D]
+            cls = tokens_new[0]  # CLS now depends on x through attention
+            logit = model.classifier(cls.unsqueeze(0))[0, class_id]
         
         # Compute gradient
         (grad,) = torch.autograd.grad(logit, x, retain_graph=False)
         total += grad
     
-    # Compute integrated gradients
+    # Integrated gradients - preserve feature-level information
     ig = (patches - base) * (total / steps)  # [P, D]
-    per_patch = ig.sum(dim=1)  # [P] - relevance per patch
+    per_patch = ig.sum(dim=1)  # [P]
     
-    return ig, per_patch
+    return ig, per_patch, patch_grid_size
 
 
 def extract_top_features(linear_weights, top_k=3):
@@ -333,10 +445,28 @@ def create_integrated_gradients_grid(selected_images, individual_ids, model, tra
         
         # Apply transform and compute integrated gradients
         image_tensor = transform(pil_image).unsqueeze(0)  # [1, 3, H, W]
-        ig, per_patch = integrated_gradients_patches(model, image_tensor, class_id, device, steps=steps)
+        ig, per_patch, inferred_grid = integrated_gradients_patches(
+            model, image_tensor, class_id, device, steps=steps, patch_grid_size=patch_grid_size
+        )
+        
+        # Use inferred grid if available
+        actual_grid = inferred_grid if inferred_grid else patch_grid_size
         
         # Reshape per_patch to spatial grid
-        relevance_map = per_patch.cpu().numpy().reshape(patch_grid_size)
+        relevance_map = per_patch.cpu().numpy().reshape(actual_grid)
+        
+        # Extract top 3 features by variance across patches for this image
+        ig_np = ig.cpu().numpy()  # [P, D]
+        feature_variance = np.var(ig_np, axis=0)  # [D] - variance per feature
+        top_feature_idx = np.argsort(feature_variance)[::-1][:3]  # Top 3 features
+        
+        # Create feature-specific maps for RGB composite
+        feature_maps_rgb = []
+        for feat_idx in top_feature_idx:
+            feat_map = ig_np[:, feat_idx].reshape(actual_grid)  # [H_p, W_p]
+            feature_maps_rgb.append(feat_map)
+        
+        print(f"  Top IG features: {top_feature_idx} (variance: {feature_variance[top_feature_idx]})")
         
         # Prepare displays
         display_image = np.array(pil_image) / 255.0
@@ -347,46 +477,45 @@ def create_integrated_gradients_grid(selected_images, individual_ids, model, tra
         ax_orig.set_title(f'{ind_id}\nOriginal Image', fontsize=12, pad=10)
         ax_orig.axis('off')
         
-        # Column 1: IG Heatmap (native resolution)
-        ax_ig = fig.add_subplot(gs[row, 1])
+        # Column 1: Feature-RGB Composite from top 3 IG features
+        ax_rgb_feat = fig.add_subplot(gs[row, 1])
+        rgb_composite = create_rgb_composite(feature_maps_rgb)
+        ax_rgb_feat.imshow(rgb_composite, aspect='auto', interpolation='nearest')
+        ax_rgb_feat.set_title(f'Feature RGB\nF{top_feature_idx[0]}-F{top_feature_idx[1]}-F{top_feature_idx[2]}', 
+                             fontsize=12, pad=10)
+        ax_rgb_feat.axis('off')
+        
+        # Column 2: IG Heatmap (summed across features)
+        ax_ig = fig.add_subplot(gs[row, 2])
         vmax = max(abs(relevance_map.min()), abs(relevance_map.max()))
-        im = ax_ig.imshow(relevance_map, cmap=colormap, vmin=-vmax, vmax=vmax,
+        im = ax_ig.imshow(relevance_map, cmap='PRGn', vmin=-vmax, vmax=vmax,
                          aspect='auto', interpolation='nearest')
-        ax_ig.set_title('Integrated Gradients\n(Patch Importance)', fontsize=12, pad=10)
+        ax_ig.set_title('Summed IG\n(All Features)', fontsize=12, pad=10)
         ax_ig.axis('off')
         plt.colorbar(im, ax=ax_ig, fraction=0.046, pad=0.04)
         
-        # Column 2: Top positive patches
-        ax_pos = fig.add_subplot(gs[row, 2])
+        # Column 3: Top positive patches
+        ax_pos = fig.add_subplot(gs[row, 3])
         pos_mask = np.where(relevance_map > 0, relevance_map, 0)
-        im_pos = ax_pos.imshow(pos_mask, cmap='Reds', vmin=0, vmax=vmax,
+        im_pos = ax_pos.imshow(pos_mask, cmap='viridis', vmin=0, vmax=vmax,
                               aspect='auto', interpolation='nearest')
         ax_pos.set_title('Positive\nContributions', fontsize=12, pad=10)
         ax_pos.axis('off')
         plt.colorbar(im_pos, ax=ax_pos, fraction=0.046, pad=0.04)
         
-        # Column 3: Top negative patches
-        ax_neg = fig.add_subplot(gs[row, 3])
-        neg_mask = np.where(relevance_map < 0, -relevance_map, 0)
-        im_neg = ax_neg.imshow(neg_mask, cmap='Blues', vmin=0, vmax=vmax,
-                              aspect='auto', interpolation='nearest')
-        ax_neg.set_title('Negative\nContributions', fontsize=12, pad=10)
-        ax_neg.axis('off')
-        plt.colorbar(im_neg, ax=ax_neg, fraction=0.046, pad=0.04)
-        
         # Column 4: Overlay on original (upsampled heatmap)
         ax_overlay = fig.add_subplot(gs[row, 4])
         ax_overlay.imshow(display_image)
         
-        # Upsample relevance map to match image size
+        # Upsample relevance map to match image size using nearest neighbor
         relevance_tensor = torch.from_numpy(relevance_map).float().unsqueeze(0).unsqueeze(0)
         upsampled = F.interpolate(relevance_tensor, size=(original_height, original_width), 
-                                mode='bilinear', align_corners=False)
+                                mode='nearest')
         upsampled_relevance = upsampled[0, 0].numpy()
         
         # Overlay with transparency
-        im_overlay = ax_overlay.imshow(upsampled_relevance, cmap=colormap, vmin=-vmax, vmax=vmax,
-                                      alpha=0.5, interpolation='bilinear')
+        im_overlay = ax_overlay.imshow(upsampled_relevance, cmap='PRGn', vmin=-vmax, vmax=vmax,
+                                      alpha=0.6, interpolation='nearest')
         ax_overlay.set_title('IG Overlay\non Original', fontsize=12, pad=10)
         ax_overlay.axis('off')
         
