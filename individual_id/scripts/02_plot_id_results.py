@@ -202,7 +202,7 @@ def plot_results(metrics, performance_df, output_path):
             if approach == 'pelage':
                 legend_labels.append("Pelage clearly visible")
             else:
-                legend_labels.append("Pelage absent")
+                legend_labels.append("Pelage obscured or absent")
     
     # Styling
     ax.set_xlabel('Image Count per Individual', fontsize=14)
