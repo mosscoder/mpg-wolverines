@@ -79,7 +79,7 @@ def extract_dinov3_patch_features(model, image_tensor, device, expected_patches=
         return patch_features[0].cpu().numpy()  # [num_patches, num_features]
 
 
-def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size, target_size=None, original_size=None):
+def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size, target_size=None, original_size=None, interpolate=True):
     """Create spatial visualization of feature activations
     
     Args:
@@ -88,17 +88,12 @@ def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size
         patch_grid_size: Tuple of (height, width) for patch grid (e.g., (45, 45))
         target_size: Target size for upsampled visualizations (for backward compatibility)
         original_size: Original image size to maintain aspect ratio (height, width)
+        interpolate: Whether to interpolate patches to larger size (False = native resolution)
         
     Returns:
-        List of upsampled feature maps
+        List of feature maps (either upsampled or native resolution)
     """
     feature_maps = []
-    
-    # Use original size if provided, otherwise fall back to target_size
-    if original_size is not None:
-        upsample_size = original_size
-    else:
-        upsample_size = target_size or (728, 728)
     
     for feature_idx in feature_indices:
         # Get feature activations for all patches
@@ -107,14 +102,24 @@ def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size
         # Reshape to spatial grid
         feature_map = feature_activations.reshape(patch_grid_size)  # [grid_h, grid_w]
         
-        # Convert to tensor for upsampling
-        feature_tensor = torch.from_numpy(feature_map).float().unsqueeze(0).unsqueeze(0)  # [1, 1, grid_h, grid_w]
-        
-        # Upsample to target size maintaining aspect ratio
-        upsampled = F.interpolate(feature_tensor, size=upsample_size, mode='bilinear', align_corners=False)
-        upsampled_map = upsampled[0, 0].numpy()  # [target_h, target_w]
-        
-        feature_maps.append(upsampled_map)
+        if interpolate:
+            # Use original size if provided, otherwise fall back to target_size
+            if original_size is not None:
+                upsample_size = original_size
+            else:
+                upsample_size = target_size or (728, 728)
+            
+            # Convert to tensor for upsampling
+            feature_tensor = torch.from_numpy(feature_map).float().unsqueeze(0).unsqueeze(0)  # [1, 1, grid_h, grid_w]
+            
+            # Upsample to target size maintaining aspect ratio
+            upsampled = F.interpolate(feature_tensor, size=upsample_size, mode='bilinear', align_corners=False)
+            upsampled_map = upsampled[0, 0].numpy()  # [target_h, target_w]
+            
+            feature_maps.append(upsampled_map)
+        else:
+            # Keep native patch resolution for crisp visualization
+            feature_maps.append(feature_map)
     
     return feature_maps
 
@@ -268,13 +273,13 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
         else:
             upsample_size = target_size
         
-        # Create feature visualizations
+        # Create feature visualizations (without interpolation for crisp patches)
         feature_maps = create_spatial_feature_maps(patch_features, top_feature_indices, 
                                                  patch_grid_size, target_size=target_size, 
-                                                 original_size=upsample_size)
+                                                 original_size=upsample_size, interpolate=False)
         
-        # Prepare RGB display
-        display_image = prepare_image_for_display(transform(pil_image))
+        # Prepare RGB display - show original image in native aspect ratio
+        display_image = np.array(pil_image) / 255.0  # Convert to [0,1] range
         
         # Column 0: RGB Image
         ax_rgb = fig.add_subplot(gs[row, 0])
@@ -289,8 +294,9 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
             # Normalize feature map
             normalized_map = normalize_feature_map(feature_map)
             
-            # Display with colormap
-            im = ax_feat.imshow(normalized_map, cmap=colormap, vmin=0, vmax=1, aspect='auto')
+            # Display with colormap (use nearest neighbor for crisp patches)
+            im = ax_feat.imshow(normalized_map, cmap=colormap, vmin=0, vmax=1, 
+                               aspect='auto', interpolation='nearest')
             ax_feat.set_title(f'Feature {feature_idx}\nActivation Map', fontsize=12, pad=10)
             ax_feat.axis('off')
             
@@ -304,8 +310,8 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
             # Create RGB composite
             rgb_composite = create_rgb_composite(feature_maps)
             
-            # Display composite
-            ax_composite.imshow(rgb_composite, aspect='auto')
+            # Display composite (use nearest neighbor for crisp patches)
+            ax_composite.imshow(rgb_composite, aspect='auto', interpolation='nearest')
             ax_composite.set_title(f'RGB Composite\nF{top_feature_indices[0]}-F{top_feature_indices[1]}-F{top_feature_indices[2]}', 
                                  fontsize=12, pad=10)
             ax_composite.axis('off')
