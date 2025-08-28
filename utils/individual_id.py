@@ -312,8 +312,8 @@ def select_test_images_per_individual(test_dataset, individual_ids, seed=42):
         
         if individual_samples:
             # Randomly select one image
-            idx, sample = np.random.choice(len(individual_samples), 1)[0]
-            idx, sample = individual_samples[idx]
+            random_idx = np.random.choice(len(individual_samples))
+            idx, sample = individual_samples[random_idx]
             selected_images[ind_id] = {
                 'index': idx,
                 'image': sample['image'],
