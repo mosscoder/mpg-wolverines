@@ -205,14 +205,11 @@ def plot_results(metrics, performance_df, output_path):
                 legend_labels.append("Random")
     
     # Styling
-    ax.set_xlabel('Training Samples per Individual', fontsize=14)
-    ax.set_ylabel('Validation Accuracy', fontsize=14)
+    ax.set_xlabel('Image Count per Individual', fontsize=14)
+    ax.set_ylabel('Validation Accuracy Score', fontsize=14)
     
     # Set explicit x-axis ticks for all sample sizes
     ax.set_xticks([2, 4, 8, 16, 32])
-    ax.set_title('Individual ID Performance: Pelage vs Random Training', 
-                fontsize=16)
-    
     # Add legend with title
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
     legend.set_title("Training image quality:", prop={'weight': 'bold'})
