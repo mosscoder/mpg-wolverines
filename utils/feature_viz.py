@@ -487,13 +487,13 @@ def create_integrated_gradients_grid(selected_images, individual_ids, model, tra
         
         print(f"  Top IG features: {top_feature_idx} (variance: {feature_variance[top_feature_idx]})")
         
-        # Prepare displays
-        display_image = np.array(pil_image) / 255.0
+        # Prepare displays - use the transformed (height-cropped) image
+        display_image = prepare_image_for_display(image_tensor, denormalize=True)
         
-        # Column 0: Original Image
+        # Column 0: Processed Image (height-cropped and resized)
         ax_orig = fig.add_subplot(gs[row, 0])
         ax_orig.imshow(display_image)
-        ax_orig.set_title(f'{ind_id}\nOriginal Image', fontsize=12, pad=10)
+        ax_orig.set_title(f'{ind_id}\nProcessed Image', fontsize=12, pad=10)
         ax_orig.axis('off')
         
         # Column 1: Feature-RGB Composite from top 3 IG features
@@ -526,9 +526,10 @@ def create_integrated_gradients_grid(selected_images, individual_ids, model, tra
         ax_overlay = fig.add_subplot(gs[row, 4])
         ax_overlay.imshow(display_image)
         
-        # Upsample relevance map to match image size using nearest neighbor
+        # Upsample relevance map to match processed image size using nearest neighbor
+        processed_height, processed_width = display_image.shape[:2]
         relevance_tensor = torch.from_numpy(relevance_map).float().unsqueeze(0).unsqueeze(0)
-        upsampled = F.interpolate(relevance_tensor, size=(original_height, original_width), 
+        upsampled = F.interpolate(relevance_tensor, size=(processed_height, processed_width), 
                                 mode='nearest')
         upsampled_relevance = upsampled[0, 0].numpy()
         
