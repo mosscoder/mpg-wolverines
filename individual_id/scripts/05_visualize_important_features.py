@@ -106,7 +106,9 @@ def main():
         device=device,
         output_path=args.output_path,
         patch_grid_size=(45, 45),  # For 728x728 images with 16x16 patches
-        target_size=(728, 728)
+        target_size=(728, 728),
+        figsize=(25, 4),  # Wider figure for 5 columns
+        maintain_aspect_ratio=True
     )
     
     # Print summary

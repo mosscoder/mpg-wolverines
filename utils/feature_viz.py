@@ -79,19 +79,26 @@ def extract_dinov3_patch_features(model, image_tensor, device, expected_patches=
         return patch_features[0].cpu().numpy()  # [num_patches, num_features]
 
 
-def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size, target_size=(728, 728)):
+def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size, target_size=None, original_size=None):
     """Create spatial visualization of feature activations
     
     Args:
         patch_features: Patch features array [num_patches, num_features]  
         feature_indices: Indices of features to visualize
         patch_grid_size: Tuple of (height, width) for patch grid (e.g., (45, 45))
-        target_size: Target size for upsampled visualizations
+        target_size: Target size for upsampled visualizations (for backward compatibility)
+        original_size: Original image size to maintain aspect ratio (height, width)
         
     Returns:
         List of upsampled feature maps
     """
     feature_maps = []
+    
+    # Use original size if provided, otherwise fall back to target_size
+    if original_size is not None:
+        upsample_size = original_size
+    else:
+        upsample_size = target_size or (728, 728)
     
     for feature_idx in feature_indices:
         # Get feature activations for all patches
@@ -103,13 +110,37 @@ def create_spatial_feature_maps(patch_features, feature_indices, patch_grid_size
         # Convert to tensor for upsampling
         feature_tensor = torch.from_numpy(feature_map).float().unsqueeze(0).unsqueeze(0)  # [1, 1, grid_h, grid_w]
         
-        # Upsample to target size
-        upsampled = F.interpolate(feature_tensor, size=target_size, mode='bilinear', align_corners=False)
+        # Upsample to target size maintaining aspect ratio
+        upsampled = F.interpolate(feature_tensor, size=upsample_size, mode='bilinear', align_corners=False)
         upsampled_map = upsampled[0, 0].numpy()  # [target_h, target_w]
         
         feature_maps.append(upsampled_map)
     
     return feature_maps
+
+
+def create_rgb_composite(feature_maps):
+    """Create RGB composite from 3 feature maps
+    
+    Args:
+        feature_maps: List of 3 normalized feature maps [H, W]
+        
+    Returns:
+        RGB composite array [H, W, 3]
+    """
+    if len(feature_maps) != 3:
+        raise ValueError("Need exactly 3 feature maps for RGB composite")
+    
+    # Normalize each feature map independently
+    normalized_features = []
+    for feature_map in feature_maps:
+        normalized = normalize_feature_map(feature_map, method='percentile')
+        normalized_features.append(normalized)
+    
+    # Stack as RGB channels
+    rgb_composite = np.stack(normalized_features, axis=-1)  # [H, W, 3]
+    
+    return rgb_composite
 
 
 def normalize_feature_map(feature_map, method='percentile', percentile_range=(5, 95)):
@@ -186,7 +217,7 @@ def prepare_image_for_display(image_tensor, denormalize=True):
 def create_feature_visualization_grid(selected_images, individual_ids, top_feature_indices, 
                                     model, transform, device, output_path,
                                     patch_grid_size=(45, 45), target_size=(728, 728),
-                                    figsize=(16, 4), colormap='viridis'):
+                                    figsize=(20, 4), colormap='viridis', maintain_aspect_ratio=True):
     """Create comprehensive feature visualization grid
     
     Args:
@@ -198,12 +229,13 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
         device: Device for inference
         output_path: Path to save visualization
         patch_grid_size: Grid size for patches (height, width)
-        target_size: Target size for upsampled visualizations
+        target_size: Target size for upsampled visualizations (fallback)
         figsize: Figure size per row
         colormap: Matplotlib colormap for feature visualizations
+        maintain_aspect_ratio: Whether to preserve original image aspect ratio
     """
     n_individuals = len([ind for ind in individual_ids if ind in selected_images])
-    n_cols = 4  # RGB + 3 features
+    n_cols = 5  # RGB + 3 features + RGB composite
     
     # Adjust figure size based on number of individuals
     fig_height = figsize[1] * n_individuals
@@ -222,13 +254,24 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
         
         print(f"Processing {ind_id}...")
         
+        # Get original image dimensions for aspect ratio preservation
+        original_width, original_height = pil_image.size
+        
         # Apply transform and extract features
         image_tensor = transform(pil_image).unsqueeze(0)  # [1, 3, H, W]
         patch_features = extract_dinov3_patch_features(model, image_tensor, device)
         
+        # Determine upsampling size
+        if maintain_aspect_ratio:
+            # Use original aspect ratio
+            upsample_size = (original_height, original_width)
+        else:
+            upsample_size = target_size
+        
         # Create feature visualizations
         feature_maps = create_spatial_feature_maps(patch_features, top_feature_indices, 
-                                                 patch_grid_size, target_size)
+                                                 patch_grid_size, target_size=target_size, 
+                                                 original_size=upsample_size)
         
         # Prepare RGB display
         display_image = prepare_image_for_display(transform(pil_image))
@@ -247,12 +290,25 @@ def create_feature_visualization_grid(selected_images, individual_ids, top_featu
             normalized_map = normalize_feature_map(feature_map)
             
             # Display with colormap
-            im = ax_feat.imshow(normalized_map, cmap=colormap, vmin=0, vmax=1)
+            im = ax_feat.imshow(normalized_map, cmap=colormap, vmin=0, vmax=1, aspect='auto')
             ax_feat.set_title(f'Feature {feature_idx}\nActivation Map', fontsize=12, pad=10)
             ax_feat.axis('off')
             
             # Add colorbar
             plt.colorbar(im, ax=ax_feat, fraction=0.046, pad=0.04)
+        
+        # Column 4: RGB Composite
+        if len(feature_maps) == 3:
+            ax_composite = fig.add_subplot(gs[row, 4])
+            
+            # Create RGB composite
+            rgb_composite = create_rgb_composite(feature_maps)
+            
+            # Display composite
+            ax_composite.imshow(rgb_composite, aspect='auto')
+            ax_composite.set_title(f'RGB Composite\nF{top_feature_indices[0]}-F{top_feature_indices[1]}-F{top_feature_indices[2]}', 
+                                 fontsize=12, pad=10)
+            ax_composite.axis('off')
         
         row += 1
     
