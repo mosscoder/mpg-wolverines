@@ -62,7 +62,7 @@ def extract_pelage_metrics(results):
     performance_data = []
     
     for (sample_size, approach), group_results in grouped.items():
-        if len(group_results) < 5:
+        if len(group_results) < 8:
             print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, approach={approach}")
         
         # Extract three types of validation metrics
@@ -158,23 +158,17 @@ def plot_results(metrics, performance_df, output_path):
         'random': '#3498db'      # Blue - random sampling training
     }
     
-    # Bar width and positioning
-    n_groups = len(sample_sizes)
-    n_approaches = len(approaches) 
-    
-    bar_width = 0.35
-    group_spacing = 0.8
-    
-    x_positions = np.arange(n_groups) * group_spacing
-    
-    # Plot bars
+    # Plot lines with confidence interval ribbons
     legend_handles = []
     legend_labels = []
     
-    for i, sample_size in enumerate(sample_sizes):
-        base_x = x_positions[i]
+    for approach in approaches:
+        x_vals = []
+        y_vals = []
+        ci_lower = []
+        ci_upper = []
         
-        for j, approach in enumerate(approaches):
+        for sample_size in sample_sizes:
             # Use overall accuracy since validation matches training condition
             key = ((sample_size, approach), 'overall')
             
@@ -190,21 +184,25 @@ def plot_results(metrics, performance_df, output_path):
                 else:
                     ci_range = 0
                 
-                # Plot bar
-                x_pos = base_x + (j - 0.5) * bar_width
-                bar = ax.bar(x_pos, mean_acc, bar_width, 
-                           color=colors[approach],
-                           edgecolor='black', linewidth=0.5, alpha=0.8)
-                
-                # Add error bar
-                ax.errorbar(x_pos, mean_acc, yerr=ci_range, fmt='none', 
-                          color='black', capsize=3, linewidth=1)
-                
-                # Add to legend (only once per approach)
-                if i == 0:  # Only add legend items from first sample size
-                    label = f"{approach.title()} Training"
-                    legend_handles.append(bar[0])
-                    legend_labels.append(label)
+                x_vals.append(sample_size)
+                y_vals.append(mean_acc)
+                ci_lower.append(mean_acc - ci_range)
+                ci_upper.append(mean_acc + ci_range)
+        
+        if x_vals:  # Only plot if we have data
+            # Plot main line
+            line = ax.plot(x_vals, y_vals, color=colors[approach], linewidth=2.5, 
+                          marker='o', markersize=8, label=approach)[0]
+            
+            # Add confidence interval ribbon
+            ax.fill_between(x_vals, ci_lower, ci_upper, 
+                           color=colors[approach], alpha=0.2)
+            
+            legend_handles.append(line)
+            if approach == 'pelage':
+                legend_labels.append("Pelage clearly visible")
+            else:
+                legend_labels.append("Random")
     
     # Styling
     ax.set_xlabel('Training Samples per Individual', fontsize=14)
@@ -213,22 +211,12 @@ def plot_results(metrics, performance_df, output_path):
                 'Validation matches training condition (95% CI, n=8 seeds)', 
                 fontsize=16)
     
-    # Set x-axis labels
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(sample_sizes)
+    # Add legend with title
+    legend = ax.legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left')
+    legend.set_title("Training image quality:", prop={'weight': 'bold'})
     
-    # Add legend
-    ax.legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # Dynamic y-axis limits and gridlines
-    all_accuracies = []
-    for key, data in metrics.items():
-        all_accuracies.extend(data['accuracies'])
-    
-    min_acc = min(all_accuracies) if all_accuracies else 0
-    y_min = max(0, min_acc - 0.02)  # 0.02 below min, but not below 0
-    
-    ax.set_ylim(y_min, 1)
+    # Set fixed y-axis limits and gridlines
+    ax.set_ylim(0.3, 1)
     
     # Add horizontal gridlines every 0.1
     y_ticks = np.arange(0, 1.1, 0.1)
@@ -242,28 +230,30 @@ def plot_results(metrics, performance_df, output_path):
 def print_summary_table(metrics):
     """Print summary table of results"""
     
-    print("\n" + "="*90)
+    print("\n" + "="*80)
     print("SUMMARY TABLE")
-    print("="*90)
-    print(f"{'Config':<30} {'Val Type':<12} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3}")
-    print("-"*90)
+    print("="*80)
+    print(f"{'Config':<25} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3}")
+    print("-"*80)
     
+    # Only show overall metrics (no val_type separation)
     for ((sample_size, approach), val_type), data in sorted(metrics.items()):
-        config = f"{sample_size} {approach}"
-        mean_acc = data['mean_accuracy']
-        std_acc = data['std_accuracy']
-        n_seeds = data['n_seeds']
-        
-        # Calculate 95% CI
-        if n_seeds > 1:
-            sem = std_acc / np.sqrt(n_seeds)
-            ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
-            ci_str = f"±{ci_range:.3f}"
-        else:
-            ci_str = "N/A"
-        
-        print(f"{config:<30} {val_type:<12} {mean_acc:.4f}{'':>4} {std_acc:.4f}{'':>4} "
-              f"{ci_str:<15} {n_seeds:<3}")
+        if val_type == 'overall':  # Only show overall results
+            config = f"{sample_size} {approach}"
+            mean_acc = data['mean_accuracy']
+            std_acc = data['std_accuracy']
+            n_seeds = data['n_seeds']
+            
+            # Calculate 95% CI
+            if n_seeds > 1:
+                sem = std_acc / np.sqrt(n_seeds)
+                ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
+                ci_str = f"±{ci_range:.3f}"
+            else:
+                ci_str = "N/A"
+            
+            print(f"{config:<25} {mean_acc:.4f}{'':>4} {std_acc:.4f}{'':>4} "
+                  f"{ci_str:<15} {n_seeds:<3}")
 
 def main():
     parser = argparse.ArgumentParser(description='Plot Individual ID results')
