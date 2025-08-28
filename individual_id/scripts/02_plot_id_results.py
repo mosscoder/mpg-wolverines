@@ -140,9 +140,7 @@ def extract_pelage_metrics(results):
                 })
         
         print(f"samples={sample_size}, approach={approach}: "
-              f"Overall={np.mean(overall_accs):.4f}, "
-              f"Visible={np.mean(visible_accs) if visible_accs else 'N/A':.4f}, "
-              f"Invisible={np.mean(invisible_accs) if invisible_accs else 'N/A':.4f}")
+              f"Accuracy={np.mean(overall_accs):.4f} (n={len(overall_accs)} seeds)")
     
     return metrics, pd.DataFrame(performance_data)
 
@@ -152,34 +150,22 @@ def plot_results(metrics, performance_df, output_path):
     fig, ax = plt.subplots(figsize=(16, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage_ratio_0.0', 'pelage_ratio_0.5', 'pelage_ratio_1.0']
-    val_types = ['visible', 'overall', 'invisible']
+    approaches = ['pelage', 'random']
     
-    # Colors for training approaches (input)
+    # Colors for training approaches
     colors = {
-        'pelage_ratio_0.0': '#e74c3c',    # Red - invisible only training
-        'pelage_ratio_0.5': '#f39c12',    # Orange - balanced training
-        'pelage_ratio_1.0': '#27ae60'     # Green - visible only training
-    }
-    
-    # Alpha values for validation sets
-    alphas = {
-        'visible': 1.0,      # Full opacity - visible validation
-        'overall': 0.7,      # Medium opacity - overall validation
-        'invisible': 0.4     # Low opacity - invisible validation
+        'pelage': '#27ae60',     # Green - pelage only training
+        'random': '#3498db'      # Blue - random sampling training
     }
     
     # Bar width and positioning
     n_groups = len(sample_sizes)
     n_approaches = len(approaches) 
-    n_val_types = len(val_types)
-    total_bars = n_approaches * n_val_types
     
-    bar_width = 0.08
-    group_width = total_bars * bar_width
-    group_spacing = 0.3
+    bar_width = 0.35
+    group_spacing = 0.8
     
-    x_positions = np.arange(n_groups) * (group_width + group_spacing)
+    x_positions = np.arange(n_groups) * group_spacing
     
     # Plot bars
     legend_handles = []
@@ -187,49 +173,44 @@ def plot_results(metrics, performance_df, output_path):
     
     for i, sample_size in enumerate(sample_sizes):
         base_x = x_positions[i]
-        bar_idx = 0
         
-        for approach in approaches:
-            for val_type in val_types:
-                key = ((sample_size, approach), val_type)
+        for j, approach in enumerate(approaches):
+            # Use overall accuracy since validation matches training condition
+            key = ((sample_size, approach), 'overall')
+            
+            if key in metrics:
+                data = metrics[key]
+                mean_acc = data['mean_accuracy']
+                accuracies = data['accuracies']
                 
-                if key in metrics:
-                    data = metrics[key]
-                    mean_acc = data['mean_accuracy']
-                    accuracies = data['accuracies']
-                    
-                    # Calculate 95% confidence interval
-                    if len(accuracies) > 1:
-                        sem = stats.sem(accuracies)
-                        ci_range = stats.t.ppf(0.975, len(accuracies)-1) * sem
-                    else:
-                        ci_range = 0
-                    
-                    # Plot bar
-                    x_pos = base_x + bar_idx * bar_width
-                    bar = ax.bar(x_pos, mean_acc, bar_width, 
-                               color=colors[approach], alpha=alphas[val_type],
-                               edgecolor='black', linewidth=0.5)
-                    
-                    # Add error bar
-                    ax.errorbar(x_pos, mean_acc, yerr=ci_range, fmt='none', 
-                              color='black', capsize=3, linewidth=1)
-                    
-                    # Add to legend (only once per combination)
-                    if i == 0:  # Only add legend items from first sample size
-                        approach_label = approach.replace('pelage_ratio_', '').replace('_', '.')
-                        val_label = val_type.title()
-                        label = f"Train {approach_label} / Val {val_label}"
-                        legend_handles.append(bar[0])
-                        legend_labels.append(label)
+                # Calculate 95% confidence interval
+                if len(accuracies) > 1:
+                    sem = stats.sem(accuracies)
+                    ci_range = stats.t.ppf(0.975, len(accuracies)-1) * sem
+                else:
+                    ci_range = 0
                 
-                bar_idx += 1
+                # Plot bar
+                x_pos = base_x + (j - 0.5) * bar_width
+                bar = ax.bar(x_pos, mean_acc, bar_width, 
+                           color=colors[approach],
+                           edgecolor='black', linewidth=0.5, alpha=0.8)
+                
+                # Add error bar
+                ax.errorbar(x_pos, mean_acc, yerr=ci_range, fmt='none', 
+                          color='black', capsize=3, linewidth=1)
+                
+                # Add to legend (only once per approach)
+                if i == 0:  # Only add legend items from first sample size
+                    label = f"{approach.title()} Training"
+                    legend_handles.append(bar[0])
+                    legend_labels.append(label)
     
     # Styling
     ax.set_xlabel('Training Samples per Individual', fontsize=14)
     ax.set_ylabel('Validation Accuracy', fontsize=14)
-    ax.set_title('Individual ID Performance by Training and Validation Pelage Visibility\n'
-                'Color = Training Ratio, Transparency = Validation Type (95% CI, n=5 seeds)', 
+    ax.set_title('Individual ID Performance: Pelage vs Random Training\n'
+                'Validation matches training condition (95% CI, n=8 seeds)', 
                 fontsize=16)
     
     # Set x-axis labels
@@ -239,9 +220,20 @@ def plot_results(metrics, performance_df, output_path):
     # Add legend
     ax.legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    # Grid and limits
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.set_ylim(0, 1)
+    # Dynamic y-axis limits and gridlines
+    all_accuracies = []
+    for key, data in metrics.items():
+        all_accuracies.extend(data['accuracies'])
+    
+    min_acc = min(all_accuracies) if all_accuracies else 0
+    y_min = max(0, min_acc - 0.02)  # 0.02 below min, but not below 0
+    
+    ax.set_ylim(y_min, 1)
+    
+    # Add horizontal gridlines every 0.1
+    y_ticks = np.arange(0, 1.1, 0.1)
+    ax.set_yticks(y_ticks)
+    ax.grid(True, alpha=0.3, axis='y', color='lightgray')
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -257,7 +249,7 @@ def print_summary_table(metrics):
     print("-"*90)
     
     for ((sample_size, approach), val_type), data in sorted(metrics.items()):
-        config = f"{sample_size} {approach.replace('pelage_ratio_', '')}"
+        config = f"{sample_size} {approach}"
         mean_acc = data['mean_accuracy']
         std_acc = data['std_accuracy']
         n_seeds = data['n_seeds']

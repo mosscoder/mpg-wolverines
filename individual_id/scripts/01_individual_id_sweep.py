@@ -31,34 +31,34 @@ from utils.training import check_result_exists
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - pelage ratio experiments
+    # Experimental parameters - pelage vs random experiments
     sample_sizes = [2, 4, 8, 16, 32]
-    approaches = ['pelage_ratio_0.0', 'pelage_ratio_0.5', 'pelage_ratio_1.0']
-    seeds = [0, 1, 2, 3, 4]
+    approaches = ['pelage', 'random']
+    seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
-    # Generate all combinations: 5 sizes × 3 ratios × 5 seeds = 75 total
+    # Generate all combinations: 5 sizes × 2 approaches × 8 seeds = 80 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 75 total
+    total_combinations = len(all_combinations)  # 80 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 75 combinations across 24 jobs
-    # Jobs 0-2: 4 configs each (12 total)
-    # Jobs 3-23: 3 configs each (63 total)
-    if job_idx < 3:
+    # Distribute 80 combinations across 24 jobs
+    # Jobs 0-7: 4 configs each (32 total)
+    # Jobs 8-23: 3 configs each (48 total)
+    if job_idx < 8:
         configs_per_job = 4
         start_idx = job_idx * 4
         end_idx = start_idx + 4
     else:
         configs_per_job = 3
-        start_idx = 12 + (job_idx - 3) * 3
+        start_idx = 32 + (job_idx - 8) * 3
         end_idx = start_idx + 3
     
     if end_idx <= total_combinations:
@@ -84,12 +84,9 @@ def load_feasible_individuals(results_dir='results'):
     return config
 
 def create_individual_dataset(dataset, individual_ids, sample_size, approach, seed):
-    """Create train/val dataset views for individual ID classification with pelage ratio control"""
+    """Create train/val dataset views for individual ID classification"""
     
     set_all_seeds(seed)
-    
-    # Extract pelage ratio from approach name
-    pelage_ratio = float(approach.split('_')[-1])  # e.g., 'pelage_ratio_0.5' -> 0.5
     
     # Group indices by individual and label
     individual_indices = defaultdict(lambda: {'visible': [], 'invisible': []})
@@ -109,46 +106,52 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
         visible_indices = individual_indices[ind_id]['visible']
         invisible_indices = individual_indices[ind_id]['invisible']
         
-        # Validation: ALWAYS 32 visible + 32 invisible per individual (fixed)
-        val_visible_needed = 32
-        val_invisible_needed = 32
-        
-        # Training: Allocate based on pelage_ratio
-        train_visible_needed = int(sample_size * pelage_ratio)
-        train_invisible_needed = sample_size - train_visible_needed
-        
-        # Check if we have enough samples
-        total_visible_needed = train_visible_needed + val_visible_needed
-        total_invisible_needed = train_invisible_needed + val_invisible_needed
-        
-        if len(visible_indices) < total_visible_needed:
-            print(f"Error: {ind_id} has only {len(visible_indices)} visible, need {total_visible_needed}")
-            continue
-        if len(invisible_indices) < total_invisible_needed:
-            print(f"Error: {ind_id} has only {len(invisible_indices)} invisible, need {total_invisible_needed}")
-            continue
-        
-        # Sample visible indices - validation FIRST for consistency
-        random.shuffle(visible_indices)
-        val_visible = visible_indices[:val_visible_needed]  # Always take first 32 for val
-        remaining_visible = visible_indices[val_visible_needed:]  # Rest available for training
-        train_visible = remaining_visible[:train_visible_needed]  # Take what's needed for training
-        
-        # Sample invisible indices - validation FIRST for consistency
-        random.shuffle(invisible_indices)
-        val_invisible = invisible_indices[:val_invisible_needed]  # Always take first 32 for val
-        remaining_invisible = invisible_indices[val_invisible_needed:]  # Rest available for training
-        train_invisible = remaining_invisible[:train_invisible_needed]  # Take what's needed for training
-        
-        # Combine train and val indices
-        train_indices_ind = train_visible + train_invisible
-        val_indices_ind = val_visible + val_invisible
+        if approach == 'pelage':
+            # Training: use sample_size visible samples
+            # Validation: use 32 visible samples
+            train_needed = sample_size
+            val_needed = 32
+            total_needed = train_needed + val_needed
+            
+            if len(visible_indices) < total_needed:
+                print(f"Error: {ind_id} has only {len(visible_indices)} visible, need {total_needed}")
+                continue
+            
+            # Sample from visible indices only
+            random.shuffle(visible_indices)
+            val_indices_ind = visible_indices[:val_needed]  # First 32 for validation
+            train_indices_ind = visible_indices[val_needed:val_needed + train_needed]  # Next sample_size for training
+            
+            print(f"{ind_id}: {len(train_indices_ind)} train (pelage only) + {len(val_indices_ind)} val (pelage only)")
+            
+        elif approach == 'random':
+            # Training: use sample_size mixed samples  
+            # Validation: use 32 mixed samples (maintaining natural ratio)
+            all_indices = visible_indices + invisible_indices
+            train_needed = sample_size
+            val_needed = 32
+            total_needed = train_needed + val_needed
+            
+            if len(all_indices) < total_needed:
+                print(f"Error: {ind_id} has only {len(all_indices)} total samples, need {total_needed}")
+                continue
+            
+            # Sample from all indices (mixed)
+            random.shuffle(all_indices)
+            val_indices_ind = all_indices[:val_needed]  # First 32 for validation
+            train_indices_ind = all_indices[val_needed:val_needed + train_needed]  # Next sample_size for training
+            
+            # Count visible/invisible for reporting
+            val_visible = sum(1 for idx in val_indices_ind if dataset[idx]['label'] == 1)
+            val_invisible = len(val_indices_ind) - val_visible
+            train_visible = sum(1 for idx in train_indices_ind if dataset[idx]['label'] == 1)
+            train_invisible = len(train_indices_ind) - train_visible
+            
+            print(f"{ind_id}: {len(train_indices_ind)} train ({train_visible}v, {train_invisible}i) + {len(val_indices_ind)} val ({val_visible}v, {val_invisible}i)")
         
         # Add to master lists
         train_indices.extend(train_indices_ind)
         val_indices.extend(val_indices_ind)
-        
-        print(f"{ind_id}: {len(train_indices_ind)} train ({len(train_visible)}v, {len(train_invisible)}i) + {len(val_indices_ind)} val (32v, 32i)")
     
     print(f"Total: {len(train_indices)} train + {len(val_indices)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
@@ -162,7 +165,7 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
     val_dataset = val_dataset.rename_column('label', 'pelage')
     
     # Use HuggingFace native tools: class_encode_column + rename
-    # This automatically maps the 3 unique IDs to integers 0, 1, 2
+    # This automatically maps the unique IDs to integers
     train_dataset = train_dataset.class_encode_column('id')
     train_dataset = train_dataset.rename_column('id', 'label')
     
@@ -442,7 +445,7 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     # Train
     start_time = time.time()
-    epochs = 30  # Reasonable for multi-class with limited samples
+    epochs = 50  # Reasonable for multi-class with limited samples
     
     results = trainer.train(
         train_loader=train_loader,
@@ -478,8 +481,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'val_history': trainer.val_history,
         'experimental_params': {
             'resize_size': resize_size,
-            'pelage_ratio': float(approach.split('_')[-1]),
-            'approach_details': f'Pelage ratio: {approach.split("_")[-1]} (1280px height crop → 728x728 square resize)',
+            'approach': approach,
+            'approach_details': f'Approach: {approach} (1280px height crop → 728x728 square resize)',
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
