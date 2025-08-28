@@ -150,12 +150,12 @@ def plot_results(metrics, performance_df, output_path):
     fig, ax = plt.subplots(figsize=(12, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage', 'random']
+    approaches = ['pelage', 'pelage_abs']
     
     # Colors for training approaches
     colors = {
-        'pelage': '#27ae60',     # Green - pelage only training
-        'random': '#3498db'      # Blue - random sampling training
+        'pelage': '#27ae60',     # Green - pelage visible training
+        'pelage_abs': '#e74c3c'  # Red - pelage absent training
     }
     
     # Plot lines with confidence interval ribbons
@@ -202,7 +202,7 @@ def plot_results(metrics, performance_df, output_path):
             if approach == 'pelage':
                 legend_labels.append("Pelage clearly visible")
             else:
-                legend_labels.append("Random")
+                legend_labels.append("Pelage absent")
     
     # Styling
     ax.set_xlabel('Image Count per Individual', fontsize=14)

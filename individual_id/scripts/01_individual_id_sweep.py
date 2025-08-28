@@ -31,9 +31,9 @@ from utils.training import check_result_exists
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - pelage vs random experiments
+    # Experimental parameters - pelage vs pelage_abs experiments
     sample_sizes = [2, 4, 8, 16, 32]
-    approaches = ['pelage', 'random']
+    approaches = ['pelage', 'pelage_abs']
     seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
     # Generate all combinations: 5 sizes × 2 approaches × 8 seeds = 80 total
@@ -124,30 +124,23 @@ def create_individual_dataset(dataset, individual_ids, sample_size, approach, se
             
             print(f"{ind_id}: {len(train_indices_ind)} train (pelage only) + {len(val_indices_ind)} val (pelage only)")
             
-        elif approach == 'random':
-            # Training: use sample_size mixed samples  
-            # Validation: use 32 mixed samples (maintaining natural ratio)
-            all_indices = visible_indices + invisible_indices
+        elif approach == 'pelage_abs':
+            # Training: use sample_size invisible samples  
+            # Validation: use 32 invisible samples
             train_needed = sample_size
             val_needed = 32
             total_needed = train_needed + val_needed
             
-            if len(all_indices) < total_needed:
-                print(f"Error: {ind_id} has only {len(all_indices)} total samples, need {total_needed}")
+            if len(invisible_indices) < total_needed:
+                print(f"Error: {ind_id} has only {len(invisible_indices)} invisible, need {total_needed}")
                 continue
             
-            # Sample from all indices (mixed)
-            random.shuffle(all_indices)
-            val_indices_ind = all_indices[:val_needed]  # First 32 for validation
-            train_indices_ind = all_indices[val_needed:val_needed + train_needed]  # Next sample_size for training
+            # Sample from invisible indices only
+            random.shuffle(invisible_indices)
+            val_indices_ind = invisible_indices[:val_needed]  # First 32 for validation
+            train_indices_ind = invisible_indices[val_needed:val_needed + train_needed]  # Next sample_size for training
             
-            # Count visible/invisible for reporting
-            val_visible = sum(1 for idx in val_indices_ind if dataset[idx]['label'] == 1)
-            val_invisible = len(val_indices_ind) - val_visible
-            train_visible = sum(1 for idx in train_indices_ind if dataset[idx]['label'] == 1)
-            train_invisible = len(train_indices_ind) - train_visible
-            
-            print(f"{ind_id}: {len(train_indices_ind)} train ({train_visible}v, {train_invisible}i) + {len(val_indices_ind)} val ({val_visible}v, {val_invisible}i)")
+            print(f"{ind_id}: {len(train_indices_ind)} train (invisible only) + {len(val_indices_ind)} val (invisible only)")
         
         # Add to master lists
         train_indices.extend(train_indices_ind)

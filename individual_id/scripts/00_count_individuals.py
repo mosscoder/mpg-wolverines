@@ -60,39 +60,63 @@ def create_compatibility_matrix(individual_stats):
     
     return matrix_df, sample_sizes
 
-def create_compatibility_figure(matrix_df, sample_sizes, individual_stats, output_dir):
-    """Create and save pelage sample count bar graph"""
+def create_compatibility_figure(matrix_df, sample_sizes, individual_stats, test_individual_stats, output_dir):
+    """Create and save pelage sample count bar graph with train and test data"""
     
     # Set up the plot
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(12, 8))
     
-    # Get pelage counts and sort by count (descending)
-    individual_data = [(ind, stats['label_1_samples']) for ind, stats in individual_stats.items()]
-    individual_data.sort(key=lambda x: x[1], reverse=True)  # Sort by count, highest first
+    # Get all unique individuals from both datasets
+    all_individuals = set(individual_stats.keys()) | set(test_individual_stats.keys())
+    
+    # Get pelage counts and sort by total count (train + test, descending)
+    individual_data = []
+    for ind in all_individuals:
+        train_count = individual_stats.get(ind, {}).get('label_1_samples', 0)
+        test_count = test_individual_stats.get(ind, {}).get('label_1_samples', 0)
+        total_count = train_count + test_count
+        individual_data.append((ind, train_count, test_count, total_count))
+    
+    individual_data.sort(key=lambda x: x[3], reverse=True)  # Sort by total count, highest first
     
     individuals = [x[0] for x in individual_data]
-    pelage_counts = [x[1] for x in individual_data]
+    train_counts = [x[1] for x in individual_data]
+    test_counts = [x[2] for x in individual_data]
     
-    # Create horizontal bar chart
-    bars = plt.barh(individuals, pelage_counts, color='blue')
+    # Create positions for dodged bars
+    y_pos = np.arange(len(individuals))
+    bar_height = 0.35
+    
+    # Create horizontal bar chart with dodged bars
+    train_bars = plt.barh(y_pos - bar_height/2, train_counts, bar_height, 
+                         color='blue', alpha=0.8, label='Train')
+    test_bars = plt.barh(y_pos + bar_height/2, test_counts, bar_height, 
+                        color='red', alpha=0.8, label='Test')
     
     # Set non-linear x-axis with specific tick marks
     x_ticks = [2, 4, 8, 16, 32, 64, 128]
     plt.xticks(x_ticks)
     
     # Set x-axis limits to show all ticks properly
-    max_count = max(pelage_counts)
-    plt.xlim(0, max(128, max_count * 1.1))
+    max_count = max(max(train_counts + test_counts, default=0), 128)
+    plt.xlim(0, max_count * 1.1)
     
     # Add dashed light gray horizontal grid lines
     plt.grid(axis='x', linestyle='--', color='lightgray', alpha=0.7)
     
     # Add value annotations at the right end of each bar
-    for i, (individual, count) in enumerate(zip(individuals, pelage_counts)):
-        plt.text(count + 1, i, str(count), va='center', ha='left', fontsize=9)
+    for i, (individual, train_count, test_count) in enumerate(zip(individuals, train_counts, test_counts)):
+        if train_count > 0:
+            plt.text(train_count + 1, i - bar_height/2, str(train_count), 
+                    va='center', ha='left', fontsize=8, color='blue')
+        if test_count > 0:
+            plt.text(test_count + 1, i + bar_height/2, str(test_count), 
+                    va='center', ha='left', fontsize=8, color='red')
     
     plt.xlabel('Pelage Sample Count')
     plt.ylabel('Individual')
+    plt.yticks(y_pos, individuals)
+    plt.legend()
     
     plt.tight_layout()
     
@@ -152,14 +176,15 @@ def analyze_individuals(args):
     """Analyze individual wolverine data by date and label"""
     
     print("=" * 80)
-    print("INDIVIDUAL WOLVERINE ANALYSIS - TRAINING SET ONLY")
+    print("INDIVIDUAL WOLVERINE ANALYSIS - TRAIN AND TEST SETS")
     print("=" * 80)
     
-    # Load dataset - TRAINING SET ONLY for individual ID experiments
+    # Load dataset - BOTH TRAINING AND TEST SETS for comprehensive analysis
     print("Loading wolverines dataset...")
-    train_dataset, _ = load_wolverines_dataset()
+    train_dataset, test_dataset = load_wolverines_dataset()
     
-    print(f"Train dataset: {len(train_dataset)} samples (using training set only)")
+    print(f"Train dataset: {len(train_dataset)} samples")
+    print(f"Test dataset: {len(test_dataset)} samples")
     
     # Convert to DataFrame for analysis
     def dataset_to_df(dataset):
@@ -177,8 +202,10 @@ def analyze_individuals(args):
         return pd.DataFrame(data)
     
     train_df = dataset_to_df(train_dataset)
+    test_df = dataset_to_df(test_dataset)
     
     print(f"\\nTraining DataFrame: {train_df.shape[0]} rows, {train_df.shape[1]} columns")
+    print(f"Test DataFrame: {test_df.shape[0]} rows, {test_df.shape[1]} columns")
     
     # Analysis 1: Individual counts by label
     print("\\n" + "=" * 80)
@@ -218,6 +245,44 @@ def analyze_individuals(args):
         print(f"  Years: {year_range}")
         print(f"  Stations: {', '.join(individual_stats[individual_id]['stations'])}")
     
+    # Analysis 1b: Individual counts by label - TEST SET
+    print("\\n" + "=" * 80)
+    print("INDIVIDUAL COUNTS BY LABEL (TEST SET)")
+    print("=" * 80)
+    
+    test_individual_stats = {}
+    
+    for individual_id in sorted(test_df['id'].unique()):
+        ind_data = test_df[test_df['id'] == individual_id]
+        
+        total_samples = len(ind_data)
+        label_0_count = len(ind_data[ind_data['label'] == 0])
+        label_1_count = len(ind_data[ind_data['label'] == 1])
+        
+        # Count unique dates
+        unique_dates = ind_data['ymdh'].nunique()
+        
+        # Year range
+        years = sorted(ind_data['year'].unique())
+        year_range = f"{min(years)}-{max(years)}" if len(years) > 1 else str(years[0])
+        
+        test_individual_stats[individual_id] = {
+            'total_samples': total_samples,
+            'label_0_samples': label_0_count,
+            'label_1_samples': label_1_count,
+            'unique_dates': unique_dates,
+            'year_range': year_range,
+            'stations': list(ind_data['station'].unique())
+        }
+        
+        print(f"\\n{individual_id}:")
+        print(f"  Total samples: {total_samples}")
+        print(f"  Label 0 (no pelage): {label_0_count}")
+        print(f"  Label 1 (pelage): {label_1_count}")
+        print(f"  Unique dates: {unique_dates}")
+        print(f"  Years: {year_range}")
+        print(f"  Stations: {', '.join(test_individual_stats[individual_id]['stations'])}")
+    
     # Analysis 2: Date distribution
     print("\\n" + "=" * 80)
     print("DATE DISTRIBUTION ANALYSIS (TRAINING SET)")
@@ -246,6 +311,34 @@ def analyze_individuals(args):
         if hour is not None:
             print(f"  Hour {hour:2d}: {count:4d} samples")
     
+    # Analysis 2b: Date distribution - TEST SET
+    print("\\n" + "=" * 80)
+    print("DATE DISTRIBUTION ANALYSIS (TEST SET)")
+    print("=" * 80)
+    
+    # Parse YMDH for temporal analysis
+    test_df['parsed_year'] = test_df['ymdh'].apply(lambda x: parse_ymdh(x)[0])
+    test_df['parsed_month'] = test_df['ymdh'].apply(lambda x: parse_ymdh(x)[1])
+    test_df['parsed_day'] = test_df['ymdh'].apply(lambda x: parse_ymdh(x)[2])
+    test_df['parsed_hour'] = test_df['ymdh'].apply(lambda x: parse_ymdh(x)[3])
+    
+    print(f"Total unique YMDH timestamps: {test_df['ymdh'].nunique()}")
+    print(f"Year range: {test_df['parsed_year'].min()}-{test_df['parsed_year'].max()}")
+    
+    # Samples per month
+    print("\\nSamples by month:")
+    test_month_dist = test_df['parsed_month'].value_counts().sort_index()
+    for month, count in test_month_dist.items():
+        if month is not None:
+            print(f"  Month {month:2d}: {count:4d} samples")
+    
+    # Samples per hour
+    print("\\nSamples by hour:")
+    test_hour_dist = test_df['parsed_hour'].value_counts().sort_index()
+    for hour, count in test_hour_dist.items():
+        if hour is not None:
+            print(f"  Hour {hour:2d}: {count:4d} samples")
+    
     # Analysis 3: Pelage-Only Compatibility Matrix
     print("\\n" + "=" * 80)
     print("PELAGE-ONLY COMPATIBILITY MATRIX")
@@ -254,7 +347,7 @@ def analyze_individuals(args):
     matrix_df, sample_sizes = create_compatibility_matrix(individual_stats)
     
     # Create and save compatibility matrix figure
-    figure_path = create_compatibility_figure(matrix_df, sample_sizes, individual_stats, args.output_dir)
+    figure_path = create_compatibility_figure(matrix_df, sample_sizes, individual_stats, test_individual_stats, args.output_dir)
     
     # Save feasible individuals for script 01
     feasible_individuals_path = save_feasible_individuals(individual_stats, args.output_dir)
@@ -311,25 +404,43 @@ def analyze_individuals(args):
     # Prepare results for saving
     results = {
         'dataset_summary': {
-            'total_samples': len(train_df),
             'train_samples': len(train_df),
-            'total_individuals': len(individual_stats),
-            'unique_dates': train_df['ymdh'].nunique()
+            'test_samples': len(test_df),
+            'total_samples': len(train_df) + len(test_df),
+            'train_individuals': len(individual_stats),
+            'test_individuals': len(test_individual_stats),
+            'total_unique_individuals': len(set(individual_stats.keys()) | set(test_individual_stats.keys())),
+            'train_unique_dates': train_df['ymdh'].nunique(),
+            'test_unique_dates': test_df['ymdh'].nunique()
         },
-        'individual_statistics': individual_stats,
-        'temporal_distribution': {
-            'year_range': f"{train_df['parsed_year'].min()}-{train_df['parsed_year'].max()}",
-            'samples_by_month': month_dist.to_dict(),
-            'samples_by_hour': hour_dist.to_dict()
+        'train_data': {
+            'individual_statistics': individual_stats,
+            'temporal_distribution': {
+                'year_range': f"{train_df['parsed_year'].min()}-{train_df['parsed_year'].max()}",
+                'samples_by_month': month_dist.to_dict(),
+                'samples_by_hour': hour_dist.to_dict()
+            },
+            'label_distribution': {
+                'label_0': int(train_df[train_df['label'] == 0].shape[0]),
+                'label_1': int(train_df[train_df['label'] == 1].shape[0])
+            }
+        },
+        'test_data': {
+            'individual_statistics': test_individual_stats,
+            'temporal_distribution': {
+                'year_range': f"{test_df['parsed_year'].min()}-{test_df['parsed_year'].max()}",
+                'samples_by_month': test_month_dist.to_dict(),
+                'samples_by_hour': test_hour_dist.to_dict()
+            },
+            'label_distribution': {
+                'label_0': int(test_df[test_df['label'] == 0].shape[0]),
+                'label_1': int(test_df[test_df['label'] == 1].shape[0])
+            }
         },
         'pelage_only_compatibility_matrix': {
             'sample_sizes': sample_sizes,
             'matrix': matrix_df.to_dict(),
             'feasible_counts': {size: int(matrix_df[f'{size}_samples'].sum()) for size in sample_sizes}
-        },
-        'label_distribution': {
-            'label_0': int(train_df[train_df['label'] == 0].shape[0]),
-            'label_1': int(train_df[train_df['label'] == 1].shape[0])
         }
     }
     
