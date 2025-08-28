@@ -207,19 +207,21 @@ def plot_results(metrics, performance_df, output_path):
     # Styling
     ax.set_xlabel('Training Samples per Individual', fontsize=14)
     ax.set_ylabel('Validation Accuracy', fontsize=14)
-    ax.set_title('Individual ID Performance: Pelage vs Random Training\n'
-                'Validation matches training condition (95% CI, n=8 seeds)', 
+    
+    # Set explicit x-axis ticks for all sample sizes
+    ax.set_xticks([2, 4, 8, 16, 32])
+    ax.set_title('Individual ID Performance: Pelage vs Random Training', 
                 fontsize=16)
     
     # Add legend with title
-    legend = ax.legend(legend_handles, legend_labels, bbox_to_anchor=(1.05, 1), loc='upper left')
+    legend = ax.legend(legend_handles, legend_labels, loc='lower right')
     legend.set_title("Training image quality:", prop={'weight': 'bold'})
     
     # Set fixed y-axis limits and gridlines
     ax.set_ylim(0.3, 1)
     
     # Add horizontal gridlines every 0.1
-    y_ticks = np.arange(0, 1.1, 0.1)
+    y_ticks = np.arange(0.3, 1.1, 0.1)
     ax.set_yticks(y_ticks)
     ax.grid(True, alpha=0.3, axis='y', color='lightgray')
     
