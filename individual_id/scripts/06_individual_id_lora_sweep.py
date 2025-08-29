@@ -26,7 +26,7 @@ from utils.preprocessing import get_height_crop_and_resize_transform
 from utils.training import check_result_exists, MultiClassTrainer
 from utils.individual_id import get_feasible_individuals, create_sweep_dataset
 
-def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
+def get_job_combinations(job_idx: int, max_jobs: int = 8) -> list:
     """Map job index to list of (lora_r, lora_alpha, seed) tuples"""
     
     # LoRA hyperparameters
@@ -47,17 +47,17 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 54 combinations across 24 jobs
-    # Jobs 0-5: 3 configs each (18 total)
-    # Jobs 6-23: 2 configs each (36 total)
+    # Distribute 54 combinations across 8 jobs
+    # Jobs 0-5: 7 configs each (42 total)
+    # Jobs 6-7: 6 configs each (12 total)
     if job_idx < 6:
-        configs_per_job = 3
-        start_idx = job_idx * 3
-        end_idx = start_idx + 3
+        configs_per_job = 7
+        start_idx = job_idx * 7
+        end_idx = start_idx + 7
     else:
-        configs_per_job = 2
-        start_idx = 18 + (job_idx - 6) * 2
-        end_idx = start_idx + 2
+        configs_per_job = 6
+        start_idx = 42 + (job_idx - 6) * 6
+        end_idx = start_idx + 6
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]

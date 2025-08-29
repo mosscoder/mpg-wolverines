@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --partition=preempt
+#SBATCH --partition=general
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --gres=gpu:1 
+#SBATCH --gres=gpu:a6000:1 
 #SBATCH --time=24:00:00
-#SBATCH --array=0-23%24
-#SBATCH --requeue
+#SBATCH --array=0-7%8
 #SBATCH --output=/home/kdoherty/logs/wolverines/individual_id/%x_%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/individual_id/%x_%A_%a.err
 #SBATCH --job-name=individual_id_lora_sweep
