@@ -729,7 +729,7 @@ def analyze_individuals(args):
 def main():
     parser = argparse.ArgumentParser(description='Analyze individual wolverine data')
     parser.add_argument('--output_dir', type=str,
-                       default='results',
+                       default='individual_id/results',
                        help='Output directory for analysis results')
     
     args = parser.parse_args()
