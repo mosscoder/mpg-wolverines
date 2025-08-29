@@ -71,19 +71,27 @@ def extract_pelage_metrics(results):
         invisible_accs = []
         
         for result in group_results:
-            # Overall accuracy from performance
-            if 'performance' in result and 'final_val_accuracy' in result['performance']:
-                overall_accs.append(result['performance']['final_val_accuracy'])
+            # Overall F1 score from performance (primary metric)
+            if 'performance' in result and 'final_val_f1_weighted' in result['performance']:
+                overall_accs.append(result['performance']['final_val_f1_weighted'])
             
             # Pelage-specific accuracies from final metrics
             if 'performance' in result and 'final_pelage_metrics' in result['performance']:
                 pelage_metrics = result['performance']['final_pelage_metrics']
                 
                 if 'visible' in pelage_metrics:
-                    visible_accs.append(pelage_metrics['visible']['accuracy'])
+                    # Use F1 score if available, fallback to accuracy
+                    if 'f1_score' in pelage_metrics['visible']:
+                        visible_accs.append(pelage_metrics['visible']['f1_score'])
+                    else:
+                        visible_accs.append(pelage_metrics['visible']['accuracy'])
                 
                 if 'invisible' in pelage_metrics:
-                    invisible_accs.append(pelage_metrics['invisible']['accuracy'])
+                    # Use F1 score if available, fallback to accuracy
+                    if 'f1_score' in pelage_metrics['invisible']:
+                        invisible_accs.append(pelage_metrics['invisible']['f1_score'])
+                    else:
+                        invisible_accs.append(pelage_metrics['invisible']['accuracy'])
         
         # Store metrics for each validation type
         config_key = (sample_size, approach)
@@ -102,7 +110,7 @@ def extract_pelage_metrics(results):
                     'sample_size': sample_size,
                     'approach': approach,
                     'val_type': 'overall',
-                    'accuracy': acc
+                    'f1_score': acc
                 })
         
         if visible_accs:
@@ -119,7 +127,7 @@ def extract_pelage_metrics(results):
                     'sample_size': sample_size,
                     'approach': approach,
                     'val_type': 'visible',
-                    'accuracy': acc
+                    'f1_score': acc
                 })
         
         if invisible_accs:
@@ -136,11 +144,11 @@ def extract_pelage_metrics(results):
                     'sample_size': sample_size,
                     'approach': approach,
                     'val_type': 'invisible',
-                    'accuracy': acc
+                    'f1_score': acc
                 })
         
         print(f"samples={sample_size}, approach={approach}: "
-              f"Accuracy={np.mean(overall_accs):.4f} (n={len(overall_accs)} seeds)")
+              f"F1={np.mean(overall_accs):.4f} (n={len(overall_accs)} seeds)")
     
     return metrics, pd.DataFrame(performance_data)
 
@@ -206,7 +214,7 @@ def plot_results(metrics, performance_df, output_path):
     
     # Styling
     ax.set_xlabel('Image Count per Individual', fontsize=14)
-    ax.set_ylabel('Validation Accuracy Score', fontsize=14)
+    ax.set_ylabel('Validation F1 Score', fontsize=14)
     
     # Set explicit x-axis ticks for all sample sizes
     ax.set_xticks([2, 4, 8, 16, 32])
@@ -215,10 +223,10 @@ def plot_results(metrics, performance_df, output_path):
     legend.set_title("Training image quality:", prop={'weight': 'bold'})
     
     # Set fixed y-axis limits and gridlines
-    ax.set_ylim(0.3, 1)
+    ax.set_ylim(0.0, 1.0)
     
     # Add horizontal gridlines every 0.1
-    y_ticks = np.arange(0.3, 1.1, 0.1)
+    y_ticks = np.arange(0.0, 1.1, 0.1)
     ax.set_yticks(y_ticks)
     ax.grid(True, alpha=0.3, axis='y', color='lightgray')
     
@@ -232,7 +240,7 @@ def print_summary_table(metrics):
     print("\n" + "="*80)
     print("SUMMARY TABLE")
     print("="*80)
-    print(f"{'Config':<25} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3}")
+    print(f"{'Config':<25} {'Mean F1':<10} {'Std F1':<10} {'95% CI':<15} {'N':<3}")
     print("-"*80)
     
     # Only show overall metrics (no val_type separation)

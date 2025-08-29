@@ -344,6 +344,133 @@ def get_feasible_individuals(config_path='results/feasible_individuals.json'):
     return config
 
 
+def create_temporal_sweep_dataset(train_dataset, test_dataset, individual_ids, sample_size, approach, seed):
+    """Create temporal train/val split using pre-computed year data and HuggingFace filters
+    
+    For each individual:
+    - Validation: All samples from the final year of observations
+    - Training: N samples from all other years
+    
+    Args:
+        train_dataset: HuggingFace training dataset
+        test_dataset: HuggingFace test dataset  
+        individual_ids: List of individual IDs to include
+        sample_size: Number of training samples per individual
+        approach: 'pelage' (label==1 only) or 'pelage_abs' (label==0 only)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        train_dataset: Training dataset (all years except final)
+        val_dataset: Validation dataset (final year only)
+        individual_to_class: Mapping from individual ID to class index
+        temporal_info: Dict with temporal split details per individual
+    """
+    import random
+    from datasets import concatenate_datasets
+    import json
+    import os
+    
+    set_all_seeds(seed)
+    
+    # Step 1: Pool train and test datasets
+    print("Pooling train and test datasets...")
+    pooled_dataset = concatenate_datasets([train_dataset, test_dataset])
+    print(f"Pooled dataset: {len(pooled_dataset)} samples")
+    
+    # Step 2: Load pre-computed year information
+    config_path = 'results/feasible_individuals.json'
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        year_data = config['individual_year_data']
+        print("Using pre-computed year data from feasible_individuals.json")
+    else:
+        raise FileNotFoundError(f"Year data not found at {config_path}. Run 00_count_individuals.py first.")
+    
+    # Step 3: Create temporal splits using HuggingFace filters
+    individual_temporal_info = {}
+    all_train_samples = []
+    all_val_samples = []
+    individual_to_class = {ind_id: i for i, ind_id in enumerate(sorted(individual_ids))}
+    
+    for ind_id in individual_ids:
+        if ind_id not in year_data:
+            print(f"Warning: {ind_id} not in year data, skipping")
+            continue
+            
+        ind_year_info = year_data[ind_id]
+        val_year = ind_year_info['val_year']
+        train_years = [y for y in ind_year_info['all_years'] if y < val_year]
+        
+        print(f"Processing {ind_id}: train_years={train_years}, val_year={val_year}")
+        
+        # Filter to this individual only (efficient HF filter)
+        ind_data = pooled_dataset.filter(lambda x: x['id'] == ind_id)
+        
+        # Split by validation year using HF filter
+        val_data = ind_data.filter(lambda x: x['year'] == val_year)
+        train_data = ind_data.filter(lambda x: x['year'] in train_years)
+        
+        # Apply label filtering based on approach
+        target_label = 1 if approach == 'pelage' else 0
+        val_data = val_data.filter(lambda x: x['label'] == target_label)
+        train_data = train_data.filter(lambda x: x['label'] == target_label)
+        
+        print(f"  After label filtering ({approach}): {len(train_data)} train, {len(val_data)} val samples")
+        
+        # Sample from training data if needed
+        if len(train_data) > sample_size:
+            train_sample = train_data.shuffle(seed=seed).select(range(sample_size))
+        else:
+            train_sample = train_data
+            if len(train_data) < sample_size:
+                print(f"  Warning: {ind_id} has only {len(train_data)} training samples, needed {sample_size}")
+        
+        # Store temporal info
+        individual_temporal_info[ind_id] = {
+            'train_years': train_years,
+            'val_year': val_year,
+            'train_samples': len(train_sample),
+            'val_samples': len(val_data),
+            'approach': approach
+        }
+        
+        print(f"  Final: {len(train_sample)} train + {len(val_data)} val samples")
+        
+        # Collect samples for final datasets
+        all_train_samples.append(train_sample)
+        all_val_samples.append(val_data)
+    
+    # Step 4: Create final datasets by concatenating individual datasets
+    if all_train_samples:
+        train_dataset = concatenate_datasets(all_train_samples)
+    else:
+        train_dataset = pooled_dataset.select([])  # Empty dataset
+    
+    if all_val_samples:
+        val_dataset = concatenate_datasets(all_val_samples)
+    else:
+        val_dataset = pooled_dataset.select([])  # Empty dataset
+    
+    print(f"Total: {len(train_dataset)} train + {len(val_dataset)} val samples")
+    print(f"Classes: {len(individual_ids)} individuals")
+    
+    # Encode individual IDs as class labels
+    train_dataset = train_dataset.rename_column('label', 'pelage')
+    train_dataset = train_dataset.class_encode_column('id')
+    train_dataset = train_dataset.rename_column('id', 'label')
+    
+    val_dataset = val_dataset.rename_column('label', 'pelage')
+    val_dataset = val_dataset.class_encode_column('id')
+    val_dataset = val_dataset.rename_column('id', 'label')
+    
+    # Get label mapping
+    label_names = train_dataset.features['label'].names
+    label2id = {name: i for i, name in enumerate(label_names)}
+    
+    return train_dataset, val_dataset, label2id, individual_temporal_info
+
+
 def create_sweep_dataset(dataset, individual_ids, sample_size, approach, seed):
     """Create train/val dataset views for individual ID sweep experiments
     

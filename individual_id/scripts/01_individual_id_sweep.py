@@ -24,7 +24,7 @@ from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloa
 from utils.preprocessing import get_height_crop_and_resize_transform
 from utils.models import create_model
 from utils.training import check_result_exists, MultiClassTrainer
-from utils.individual_id import get_feasible_individuals, create_sweep_dataset
+from utils.individual_id import get_feasible_individuals, create_temporal_sweep_dataset
 
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
@@ -83,44 +83,37 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     print(f"Training: samples={sample_size}, approach={approach}, seed={seed}")
     
-    # Load dataset - TRAINING SET ONLY for individual ID experiments
-    print("Loading dataset...")
-    train_dataset, _ = load_wolverines_dataset()
-    print(f"Training dataset: {len(train_dataset)} samples (training set only)")
+    # Load datasets - BOTH TRAIN AND TEST for temporal pooling
+    print("Loading datasets...")
+    train_dataset, test_dataset = load_wolverines_dataset()
+    print(f"Training dataset: {len(train_dataset)} samples")
+    print(f"Test dataset: {len(test_dataset)} samples")
 
-    # Load pre-computed feasible individuals using shared utility
+    # Load sorted individuals and use top 3
+    config_path = args.output_dir + '/feasible_individuals.json'
     try:
-        feasible_config = get_feasible_individuals(args.output_dir + '/feasible_individuals.json')
-        feasible_individuals = feasible_config['feasible_individuals_pelage_64']
-        individual_counts = {
-            ind_id: {'label_1': feasible_config['individual_pelage_counts'][ind_id],
-                    'total': feasible_config['individual_total_counts'][ind_id]}
-            for ind_id in feasible_individuals
-        }
-        print(f"Loaded feasible individuals: {', '.join(feasible_individuals)}")
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Index into sorted list for top 3 individuals
+        n_individuals = 3
+        individuals_sorted = config['individuals_sorted_by_pelage']
+        feasible_individuals = individuals_sorted[:n_individuals]
+        print(f"Using top {n_individuals} individuals by pelage count: {', '.join(feasible_individuals)}")
+        
+        # Show pelage counts for reference
+        for ind_id in feasible_individuals:
+            pelage_count = config['individual_pelage_counts'][ind_id]
+            print(f"  {ind_id}: {pelage_count} pelage samples")
+            
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        print("Please run 00_count_individuals.py first to generate feasible individuals.")
+        print("Please run 00_count_individuals.py first to generate individual data.")
         return None
     
-    # Filter dataset to only feasible individuals - MASSIVE memory reduction!
-    feasible_ids_set = set(feasible_individuals)
-    print(f"Filtering dataset to {len(feasible_individuals)} individuals...")
-    
-    # Filter to feasible individuals only (need both visible and invisible samples)
-    filtered_dataset = train_dataset.filter(
-        lambda x: x['id'] in feasible_ids_set
-    )
-    
-    print(f"Filtered dataset: {len(filtered_dataset)} samples (down from {len(train_dataset)})")
-    
-    if len(feasible_individuals) < 3:
-        print(f"Error: Only {len(feasible_individuals)} feasible individuals, need at least 3")
-        return None
-    
-    # Create individual dataset using shared utility
-    ind_train_dataset, ind_val_dataset, individual_to_class = create_sweep_dataset(
-        filtered_dataset, feasible_individuals, sample_size, approach, seed
+    # Create temporal individual dataset - no pre-filtering needed
+    ind_train_dataset, ind_val_dataset, individual_to_class, temporal_info = create_temporal_sweep_dataset(
+        train_dataset, test_dataset, feasible_individuals, sample_size, approach, seed
     )
     
     num_classes = len(feasible_individuals)
@@ -164,8 +157,13 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         # Training
         train_loss, train_acc = trainer.train_epoch(train_loader)
         
-        # Validation with detailed metrics
+        # Validation with detailed metrics including F1
         val_loss, val_acc, val_preds, val_labels = trainer.validate_epoch(val_loader)
+        
+        # Calculate F1 scores
+        from sklearn.metrics import f1_score
+        val_f1_weighted = f1_score(val_labels, val_preds, average='weighted', zero_division=0)
+        val_f1_macro = f1_score(val_labels, val_preds, average='macro', zero_division=0)
         
         # Calculate pelage-specific metrics if available
         pelage_metrics = {}
@@ -187,8 +185,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
                 val_preds_arr = np.array(val_preds)
                 val_labels_arr = np.array(val_labels)
                 visible_acc = sum(val_preds_arr[visible_mask] == val_labels_arr[visible_mask]) / np.sum(visible_mask)
+                visible_f1 = f1_score(val_labels_arr[visible_mask], val_preds_arr[visible_mask], 
+                                     average='weighted', zero_division=0)
                 pelage_metrics['visible'] = {
                     'accuracy': visible_acc,
+                    'f1_score': visible_f1,
                     'count': int(np.sum(visible_mask))
                 }
             
@@ -196,8 +197,11 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
                 val_preds_arr = np.array(val_preds)
                 val_labels_arr = np.array(val_labels)
                 invisible_acc = sum(val_preds_arr[invisible_mask] == val_labels_arr[invisible_mask]) / np.sum(invisible_mask)
+                invisible_f1 = f1_score(val_labels_arr[invisible_mask], val_preds_arr[invisible_mask], 
+                                       average='weighted', zero_division=0)
                 pelage_metrics['invisible'] = {
                     'accuracy': invisible_acc,
+                    'f1_score': invisible_f1,
                     'count': int(np.sum(invisible_mask))
                 }
         
@@ -212,23 +216,30 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
             'epoch': epoch + 1,
             'loss': val_loss,
             'accuracy': val_acc,
+            'f1_weighted': val_f1_weighted,
+            'f1_macro': val_f1_macro,
             'pelage_metrics': pelage_metrics
         })
         
         # Print progress
         if True:  # verbose
-            msg = f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}"
+            msg = f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val F1={val_f1_weighted:.4f}"
             if pelage_metrics:
                 if 'visible' in pelage_metrics:
-                    msg += f", Vis={pelage_metrics['visible']['accuracy']:.4f}"
+                    msg += f", Vis F1={pelage_metrics['visible']['f1_score']:.4f}"
                 if 'invisible' in pelage_metrics:
-                    msg += f", Inv={pelage_metrics['invisible']['accuracy']:.4f}"
+                    msg += f", Inv F1={pelage_metrics['invisible']['f1_score']:.4f}"
             print(msg)
     
     training_time = time.time() - start_time
     
     # Final evaluation
     final_val_loss, final_val_acc, final_preds, final_labels = trainer.validate_epoch(val_loader)
+    
+    # Calculate final F1 scores
+    from sklearn.metrics import f1_score
+    final_f1_weighted = f1_score(final_labels, final_preds, average='weighted', zero_division=0)
+    final_f1_macro = f1_score(final_labels, final_preds, average='macro', zero_division=0)
     
     # Get final pelage metrics
     final_pelage_metrics = trainer.val_history[-1]['pelage_metrics'] if trainer.val_history else {}
@@ -240,6 +251,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     results = {
         'epochs_trained': epochs,
         'final_val_accuracy': final_val_acc,
+        'final_val_f1_weighted': final_f1_weighted,
+        'final_val_f1_macro': final_f1_macro,
         'final_val_loss': final_val_loss,
         'final_classification_report': final_report,
         'final_pelage_metrics': final_pelage_metrics,
@@ -256,7 +269,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'num_individuals': len(feasible_individuals),
         'individual_ids': feasible_individuals,
         'individual_to_class': individual_to_class,
-        'individual_counts': {ind_id: individual_counts[ind_id] for ind_id in feasible_individuals},
+        'individual_counts': {ind_id: config['individual_pelage_counts'][ind_id] for ind_id in feasible_individuals},
+        'temporal_split_info': temporal_info,
         'dataset_stats': {
             'total_samples_used': len(ind_train_dataset) + len(ind_val_dataset),
             'train_samples': len(ind_train_dataset),
@@ -271,7 +285,7 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'experimental_params': {
             'resize_size': resize_size,
             'approach': approach,
-            'approach_details': f'Approach: {approach} (1280px height crop → 728x728 square resize)',
+            'approach_details': f'Temporal split approach: {approach} (1280px height crop → 728x728 square resize)',
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
@@ -286,17 +300,21 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     print(f"✓ Saved results to: {filename}")
     print(f"  Final validation accuracy: {results['final_val_accuracy']:.4f}")
+    print(f"  Final validation F1 (weighted): {results['final_val_f1_weighted']:.4f}")
+    print(f"  Final validation F1 (macro): {results['final_val_f1_macro']:.4f}")
     
     # Show pelage-specific performance if available
     if final_pelage_metrics:
         if 'visible' in final_pelage_metrics:
             vis_acc = final_pelage_metrics['visible']['accuracy']
+            vis_f1 = final_pelage_metrics['visible']['f1_score']
             vis_count = final_pelage_metrics['visible']['count']
-            print(f"  Final visible accuracy: {vis_acc:.4f} (n={vis_count})")
+            print(f"  Final visible accuracy: {vis_acc:.4f}, F1: {vis_f1:.4f} (n={vis_count})")
         if 'invisible' in final_pelage_metrics:
             inv_acc = final_pelage_metrics['invisible']['accuracy']
+            inv_f1 = final_pelage_metrics['invisible']['f1_score']
             inv_count = final_pelage_metrics['invisible']['count']
-            print(f"  Final invisible accuracy: {inv_acc:.4f} (n={inv_count})")
+            print(f"  Final invisible accuracy: {inv_acc:.4f}, F1: {inv_f1:.4f} (n={inv_count})")
     
     print(f"  Training time: {training_time/60:.1f} minutes")
     
@@ -351,8 +369,12 @@ def main():
     if results_summary:
         avg_acc = sum(r['performance']['final_val_accuracy'] for r in results_summary) / len(results_summary)
         best_acc = max(r['performance']['final_val_accuracy'] for r in results_summary)
+        avg_f1 = sum(r['performance']['final_val_f1_weighted'] for r in results_summary) / len(results_summary)
+        best_f1 = max(r['performance']['final_val_f1_weighted'] for r in results_summary)
         print(f"Average final validation accuracy: {avg_acc:.4f}")
         print(f"Best final validation accuracy: {best_acc:.4f}")
+        print(f"Average final validation F1 (weighted): {avg_f1:.4f}")
+        print(f"Best final validation F1 (weighted): {best_f1:.4f}")
         print(f"Results saved to: {args.output_dir}")
 
 if __name__ == "__main__":
