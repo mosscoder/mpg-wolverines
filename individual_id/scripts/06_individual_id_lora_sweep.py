@@ -14,6 +14,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from sklearn.metrics import confusion_matrix
+from peft import LoraConfig, get_peft_model, TaskType
 
 # Add utils to path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -24,15 +25,6 @@ from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloa
 from utils.preprocessing import get_height_crop_and_resize_transform
 from utils.training import check_result_exists, MultiClassTrainer
 from utils.individual_id import get_feasible_individuals, create_sweep_dataset
-
-# PEFT imports for LoRA
-try:
-    from peft import LoraConfig, get_peft_model, TaskType
-    PEFT_AVAILABLE = True
-except ImportError:
-    print("Warning: PEFT not available. Install with: pip install peft")
-    PEFT_AVAILABLE = False
-
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (lora_r, lora_alpha, seed) tuples"""
@@ -90,11 +82,12 @@ def create_lora_model(base_model, lora_r, lora_alpha, device):
     
     # Define LoRA configuration
     modules_to_save = ["classifier"]
+    target_modules = ["qkv","proj","fc1","fc2"]
     
     config = LoraConfig(
         r=lora_r,
         lora_alpha=lora_alpha,
-        target_modules=["query", "key", "value", "dense"],  # Attention projection layers
+        target_modules=target_modules,
         modules_to_save=modules_to_save,
         lora_dropout=0.05,
         bias="none",
@@ -342,7 +335,7 @@ def train_single_config(lora_r: int, lora_alpha: int, seed: int, args: argparse.
         'lora_config': {
             'lora_r': lora_r,
             'lora_alpha': lora_alpha,
-            'target_modules': ["qkv","proj","fc1","fc2"],
+            'target_modules': target_modules,
             'modules_to_save': ["classifier"],
             'lora_dropout': 0.05,
             'bias': "none"
