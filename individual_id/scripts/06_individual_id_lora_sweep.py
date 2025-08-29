@@ -77,9 +77,6 @@ def create_lora_model(base_model, lora_r, lora_alpha, device):
     Returns:
         PEFT model with LoRA adapters
     """
-    if not PEFT_AVAILABLE:
-        raise ImportError("PEFT library required for LoRA. Install with: pip install peft")
-    
     # Define LoRA configuration
     modules_to_save = ["classifier"]
     target_modules = ["qkv","proj","fc1","fc2"]
@@ -366,10 +363,6 @@ def train_single_config(lora_r: int, lora_alpha: int, seed: int, args: argparse.
 
 
 def main():
-    if not PEFT_AVAILABLE:
-        print("Error: PEFT library not available. Install with: pip install peft")
-        return
-    
     parser = argparse.ArgumentParser(description='Individual ID LoRA classification sweep')
     parser.add_argument('--idx', type=int, required=True, 
                        help='Job index (0-23)')
