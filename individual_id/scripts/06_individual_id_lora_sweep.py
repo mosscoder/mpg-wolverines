@@ -79,7 +79,7 @@ def create_lora_model(base_model, lora_r, lora_alpha, device):
     """
     # Define LoRA configuration
     modules_to_save = ["classifier"]
-    target_modules = ["qkv","proj","fc1","fc2"]
+    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
     
     config = LoraConfig(
         r=lora_r,
