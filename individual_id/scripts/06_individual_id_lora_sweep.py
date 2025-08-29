@@ -107,8 +107,8 @@ def create_lora_model(base_model, lora_r, lora_alpha, device):
             self.classifier = classifier
             
         def forward(self, x):
-            # LoRA backbone is trainable now
-            outputs = self.backbone(x)
+            # LoRA backbone is trainable now - DINOv3 expects pixel_values
+            outputs = self.backbone(pixel_values=x)
             features = outputs.last_hidden_state[:, 0, :]  # CLS token
             return self.classifier(features)
         
