@@ -342,7 +342,7 @@ def train_single_config(lora_r: int, lora_alpha: int, seed: int, args: argparse.
         'lora_config': {
             'lora_r': lora_r,
             'lora_alpha': lora_alpha,
-            'target_modules': ["query", "key", "value", "dense"],
+            'target_modules': ["qkv","proj","fc1","fc2"],
             'modules_to_save': ["classifier"],
             'lora_dropout': 0.05,
             'bias': "none"
