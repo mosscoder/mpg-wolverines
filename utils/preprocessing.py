@@ -103,6 +103,52 @@ def get_height_crop_and_resize_transform(height=1280, resize=728):
     ])
 
 
+def get_center_crop_transform(width=1480, height=1480):
+    """
+    Get transform with center crop on both width and height, no resizing.
+    
+    Args:
+        width: Target crop width
+        height: Target crop height
+    
+    Returns:
+        torchvision.transforms.Compose with center crop + ToTensor + Normalize
+    """
+    from torchvision import transforms
+    
+    print(f"Center crop transform: crop to {width}x{height}px (no resize)")
+    
+    return transforms.Compose([
+        CenterCrop2D(width, height),  # Custom transform for width+height center crop
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+
+def get_center_crop_and_resize_transform(crop_size=1480, resize=256):
+    """
+    Get transform with center crop followed by resize.
+    
+    Args:
+        crop_size: Target square crop size
+        resize: Target square resize size
+    
+    Returns:
+        torchvision.transforms.Compose with center crop + resize + ToTensor + Normalize
+    """
+    from torchvision import transforms
+    from PIL import Image
+    
+    print(f"Center crop and resize transform: crop to {crop_size}x{crop_size}px → resize to {resize}x{resize}")
+    
+    return transforms.Compose([
+        CenterCrop2D(crop_size, crop_size),  # Custom transform for square center crop
+        transforms.Resize((resize, resize), interpolation=Image.LANCZOS),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+
 class HeightCenterCrop:
     """Custom transform to center crop only the height, keeping full width"""
     
@@ -129,3 +175,31 @@ class HeightCenterCrop:
         
         # Crop: (left, top, right, bottom)
         return img.crop((0, top, img_width, bottom))
+
+
+class CenterCrop2D:
+    """Custom transform to center crop both width and height"""
+    
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+    
+    def __call__(self, img):
+        """
+        Args:
+            img (PIL Image): Image to be cropped
+            
+        Returns:
+            PIL Image: Center-cropped image (width and height)
+        """
+        img_width, img_height = img.size
+        
+        # Calculate crop coordinates for both dimensions
+        left = max(0, (img_width - self.width) // 2)
+        right = min(img_width, left + self.width)
+        
+        top = max(0, (img_height - self.height) // 2)
+        bottom = min(img_height, top + self.height)
+        
+        # Crop: (left, top, right, bottom)
+        return img.crop((left, top, right, bottom))

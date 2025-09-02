@@ -13,10 +13,8 @@ import numpy as np
 from PIL import Image
 import random
 
-# Add utils to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-wolverines_root = os.path.dirname(os.path.dirname(script_dir))
-sys.path.append(wolverines_root)
+# Assume script is run from wolverines root directory
+sys.path.append('.')
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds
 from utils.preprocessing import get_height_crop_and_resize_transform

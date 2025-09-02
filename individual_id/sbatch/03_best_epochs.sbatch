@@ -27,6 +27,9 @@ mkdir -p /home/kdoherty/logs/wolverines/individual_id
 # Create output directory
 mkdir -p individual_id/results/best_epoch_cv
 
+# Set Python to unbuffered mode for immediate output in logs
+export PYTHONUNBUFFERED=1
+
 # Run cross-validation fold
 echo "Starting Individual ID Cross-Validation - Fold ${SLURM_ARRAY_TASK_ID}"
 echo "Job ID: ${SLURM_JOB_ID}"

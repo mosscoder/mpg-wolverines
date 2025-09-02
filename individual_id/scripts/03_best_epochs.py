@@ -16,10 +16,8 @@ from pathlib import Path
 from collections import defaultdict
 import random
 
-# Add utils to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolverines root
-sys.path.append(wolverines_root)
+# Assume script is run from wolverines root directory
+sys.path.append('.')
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders, WolverinesDataset
 from utils.preprocessing import get_height_crop_and_resize_transform

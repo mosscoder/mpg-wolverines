@@ -19,10 +19,8 @@ from collections import defaultdict, Counter
 from datetime import datetime
 import argparse
 
-# Add utils to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolverines root
-sys.path.append(wolverines_root)
+# Assume script is run from wolverines root directory
+sys.path.append('.')
 
 from utils.dataset import load_wolverines_dataset
 
@@ -179,9 +177,8 @@ def create_yearly_compatibility_figure(train_df, test_df, individual_stats, test
     plt.tight_layout()
     
     # Save figure
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    figure_path = os.path.join(script_dir, 'figures', 'pelage_yearly_counts.png')
-    os.makedirs(os.path.dirname(figure_path), exist_ok=True)
+    figure_path = 'individual_id/figures/pelage_yearly_counts.png'
+    os.makedirs('individual_id/figures', exist_ok=True)
     plt.savefig(figure_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
     
@@ -328,9 +325,8 @@ def create_compatibility_figure(matrix_df, sample_sizes, individual_stats, test_
     plt.tight_layout()
     
     # Save figure in individual_id/figures/
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Get individual_id directory
-    figure_path = os.path.join(script_dir, 'figures', 'pelage_compatibility_matrix.png')
-    os.makedirs(os.path.dirname(figure_path), exist_ok=True)
+    figure_path = 'individual_id/figures/pelage_compatibility_matrix.png'
+    os.makedirs('individual_id/figures', exist_ok=True)
     plt.savefig(figure_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
     

@@ -326,7 +326,7 @@ def select_test_images_per_individual(test_dataset, individual_ids, seed=42):
     return selected_images
 
 
-def get_feasible_individuals(config_path='results/feasible_individuals.json'):
+def get_feasible_individuals(config_path='individual_id/results/feasible_individuals.json'):
     """Load pre-computed feasible individuals from script 00
     
     Args:
@@ -378,7 +378,7 @@ def create_temporal_sweep_dataset(train_dataset, test_dataset, individual_ids, s
     print(f"Pooled dataset: {len(pooled_dataset)} samples")
     
     # Step 2: Load pre-computed year information
-    config_path = 'results/feasible_individuals.json'
+    config_path = 'individual_id/results/feasible_individuals.json'
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             config = json.load(f)

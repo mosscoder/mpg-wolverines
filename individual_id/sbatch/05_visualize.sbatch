@@ -36,6 +36,9 @@ done
 
 echo "Trained model found, starting visualization..."
 
+# Set Python to unbuffered mode for immediate output in logs
+export PYTHONUNBUFFERED=1
+
 # Run visualization
 echo "Starting Individual ID Feature Visualization"
 echo "Job ID: ${SLURM_JOB_ID}"

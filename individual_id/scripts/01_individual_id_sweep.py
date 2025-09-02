@@ -15,13 +15,11 @@ import numpy as np
 from pathlib import Path
 from sklearn.metrics import confusion_matrix
 
-# Add utils to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-wolverines_root = os.path.dirname(os.path.dirname(script_dir))  # Go up to wolverines root
-sys.path.append(wolverines_root)
+# Assume script is run from wolverines root directory
+sys.path.append('.')
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders
-from utils.preprocessing import get_height_crop_and_resize_transform
+from utils.preprocessing import get_center_crop_and_resize_transform
 from utils.models import create_model
 from utils.training import check_result_exists, MultiClassTrainer
 from utils.individual_id import get_feasible_individuals, create_temporal_sweep_dataset
@@ -90,7 +88,7 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Test dataset: {len(test_dataset)} samples")
 
     # Load sorted individuals and use top 3
-    config_path = args.output_dir + '/feasible_individuals.json'
+    config_path = 'individual_id/results/feasible_individuals.json'
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -124,8 +122,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     # Create transforms - single pipeline for all approaches
     batch_size = 16
-    transform = get_height_crop_and_resize_transform(height=1280, resize=728)
-    resize_size = "728x728"
+    transform = get_center_crop_and_resize_transform(crop_size=1480, resize=256)
+    crop_size = "1480x1480 → 256x256"
     
     # Use standard dataloaders
     train_loader, val_loader = create_dataloaders(
@@ -283,9 +281,9 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'train_history': trainer.train_history,
         'val_history': trainer.val_history,
         'experimental_params': {
-            'resize_size': resize_size,
+            'crop_size': crop_size,
             'approach': approach,
-            'approach_details': f'Temporal split approach: {approach} (1280px height crop → 728x728 square resize)',
+            'approach_details': f'Temporal split approach: {approach} (1480x1480 center crop → 256x256 resize)',
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
@@ -328,7 +326,7 @@ def main():
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                       default='results',
+                       default='individual_id/results',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                        default='gpu', help='Device to use for training')

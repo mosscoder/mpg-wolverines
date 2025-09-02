@@ -40,6 +40,9 @@ done
 
 echo "All CV results found, starting final training..."
 
+# Set Python to unbuffered mode for immediate output in logs
+export PYTHONUNBUFFERED=1
+
 # Run final training
 echo "Starting Individual ID Final Training"
 echo "Job ID: ${SLURM_JOB_ID}"

@@ -30,6 +30,9 @@ mamba activate wolverines
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
+# Set Python to unbuffered mode for immediate output in logs
+export PYTHONUNBUFFERED=1
+
 # Run script with array index
 python scripts/01_individual_id_sweep.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
