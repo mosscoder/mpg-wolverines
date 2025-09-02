@@ -47,35 +47,47 @@ def visualize_training_grid(args):
     feasible_individuals = random.sample(individuals_sorted, min(3, len(individuals_sorted)))
     print(f"Randomly selected 3 individuals: {', '.join(feasible_individuals)}")
     
-    # Create temporal dataset using pelage approach
-    ind_train_dataset, _, _, _ = create_temporal_sweep_dataset(
+    # Create temporal datasets for both approaches
+    pelage_train_dataset, _, _, _ = create_temporal_sweep_dataset(
         train_dataset, test_dataset, feasible_individuals, 
         sample_size=16, approach='pelage', seed=args.seed
     )
     
-    print(f"Training samples for visualization: {len(ind_train_dataset)}")
+    pelage_abs_train_dataset, _, _, _ = create_temporal_sweep_dataset(
+        train_dataset, test_dataset, feasible_individuals, 
+        sample_size=16, approach='pelage_abs', seed=args.seed
+    )
+    
+    print(f"Pelage visible training samples: {len(pelage_train_dataset)}")
+    print(f"Pelage invisible training samples: {len(pelage_abs_train_dataset)}")
     
     # Create transform
     transform = get_center_crop_transform(width=1480, height=1480)
     
-    # Randomly select 10 images
-    n_images = 10
-    if len(ind_train_dataset) < n_images:
-        n_images = len(ind_train_dataset)
-        print(f"Warning: Only {n_images} samples available")
+    # Randomly select 10 images from each dataset
+    n_images_per_type = 10
     
-    indices = random.sample(range(len(ind_train_dataset)), n_images)
+    # Select pelage visible images
+    pelage_n = min(n_images_per_type, len(pelage_train_dataset))
+    pelage_indices = random.sample(range(len(pelage_train_dataset)), pelage_n)
     
-    # Create figure with 2 rows, 5 columns
-    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-    fig.suptitle('Training Images with 1480x1480 Center Crop', fontsize=16)
+    # Select pelage invisible images
+    pelage_abs_n = min(n_images_per_type, len(pelage_abs_train_dataset))
+    pelage_abs_indices = random.sample(range(len(pelage_abs_train_dataset)), pelage_abs_n)
     
-    for i, idx in enumerate(indices):
+    print(f"Visualizing {pelage_n} pelage visible + {pelage_abs_n} pelage invisible images")
+    
+    # Create figure with 4 rows, 5 columns
+    fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+    fig.suptitle('Training Images: Pelage Visible (Top) vs Not Visible (Bottom)', fontsize=16)
+    
+    # Display pelage visible images (rows 0-1)
+    for i, idx in enumerate(pelage_indices):
         row = i // 5
         col = i % 5
         
         # Get sample and apply transform
-        sample = ind_train_dataset[idx]
+        sample = pelage_train_dataset[idx]
         image = sample['image']
         individual_id = sample.get('id', 'Unknown')
         pelage = sample.get('pelage', 'Unknown')
@@ -94,12 +106,45 @@ def visualize_training_grid(args):
         
         # Display image
         axes[row, col].imshow(img_np)
-        axes[row, col].set_title(f'{individual_id}\nPelage: {pelage}', fontsize=10)
+        axes[row, col].set_title(f'{individual_id}\nVisible: {pelage}', fontsize=10)
+        axes[row, col].axis('off')
+    
+    # Display pelage invisible images (rows 2-3)
+    for i, idx in enumerate(pelage_abs_indices):
+        row = (i // 5) + 2  # Start from row 2
+        col = i % 5
+        
+        # Get sample and apply transform
+        sample = pelage_abs_train_dataset[idx]
+        image = sample['image']
+        individual_id = sample.get('id', 'Unknown')
+        pelage = sample.get('pelage', 'Unknown')
+        
+        # Apply transform
+        transformed_image = transform(image)
+        
+        # Convert to numpy for display
+        img_np = transformed_image.permute(1, 2, 0).numpy()
+        
+        # Denormalize for display
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        img_np = img_np * std + mean
+        img_np = np.clip(img_np, 0, 1)
+        
+        # Display image
+        axes[row, col].imshow(img_np)
+        axes[row, col].set_title(f'{individual_id}\nInvisible: {pelage}', fontsize=10)
         axes[row, col].axis('off')
     
     # Hide any unused subplots
-    for i in range(n_images, 10):
+    for i in range(pelage_n, 10):
         row = i // 5
+        col = i % 5
+        axes[row, col].axis('off')
+    
+    for i in range(pelage_abs_n, 10):
+        row = (i // 5) + 2
         col = i % 5
         axes[row, col].axis('off')
     
@@ -112,7 +157,7 @@ def visualize_training_grid(args):
     plt.close()
     
     print(f"✓ Training grid visualization saved to: {output_path}")
-    print(f"  Used {n_images} random images from training set")
+    print(f"  Used {pelage_n} pelage visible + {pelage_abs_n} pelage invisible images")
     print(f"  Transform: 1480x1480 center crop, no resize")
 
 

@@ -455,17 +455,25 @@ def create_temporal_sweep_dataset(train_dataset, test_dataset, individual_ids, s
     print(f"Total: {len(train_dataset)} train + {len(val_dataset)} val samples")
     print(f"Classes: {len(individual_ids)} individuals")
     
-    # Encode individual IDs as class labels
+    # Encode individual IDs as class labels with unified encoding
+    # Rename label to pelage before encoding
     train_dataset = train_dataset.rename_column('label', 'pelage')
-    train_dataset = train_dataset.class_encode_column('id')
-    train_dataset = train_dataset.rename_column('id', 'label')
-    
     val_dataset = val_dataset.rename_column('label', 'pelage')
-    val_dataset = val_dataset.class_encode_column('id')
-    val_dataset = val_dataset.rename_column('id', 'label')
     
-    # Get label mapping
-    label_names = train_dataset.features['label'].names
+    # Concatenate datasets for unified encoding
+    combined_dataset = concatenate_datasets([train_dataset, val_dataset])
+    
+    # Apply class encoding once on combined dataset
+    combined_dataset = combined_dataset.class_encode_column('id')
+    combined_dataset = combined_dataset.rename_column('id', 'label')
+    
+    # Split back into train and val using original lengths
+    train_size = len(train_dataset)
+    train_dataset = combined_dataset.select(range(train_size))
+    val_dataset = combined_dataset.select(range(train_size, len(combined_dataset)))
+    
+    # Get label mapping from the unified encoding
+    label_names = combined_dataset.features['label'].names
     label2id = {name: i for i, name in enumerate(label_names)}
     
     return train_dataset, val_dataset, label2id, individual_temporal_info
