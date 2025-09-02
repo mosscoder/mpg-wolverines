@@ -12,8 +12,8 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/individual_id/%x_%A_%a.err
 #SBATCH --job-name=individual_id_sweep
 
-# Change to individual_id directory
-cd /home/kdoherty/wolverines/individual_id
+# Change to wolverines root directory
+cd /home/kdoherty/wolverines
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/individual_id
@@ -34,9 +34,9 @@ python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 export PYTHONUNBUFFERED=1
 
 # Run script with array index
-python scripts/01_individual_id_sweep.py \
+python individual_id/scripts/01_individual_id_sweep.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
-    --output_dir results \
+    --output_dir individual_id/results \
     --device gpu
 
 echo "Job completed at $(date)"
