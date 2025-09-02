@@ -72,8 +72,8 @@ def extract_pelage_metrics(results):
         
         for result in group_results:
             # Overall F1 score from performance (primary metric)
-            if 'performance' in result and 'final_val_f1_weighted' in result['performance']:
-                overall_accs.append(result['performance']['final_val_f1_weighted'])
+            if 'performance' in result and 'final_val_f1_macro' in result['performance']:
+                overall_accs.append(result['performance']['final_val_f1_macro'])
             
             # Pelage-specific accuracies from final metrics
             if 'performance' in result and 'final_pelage_metrics' in result['performance']:

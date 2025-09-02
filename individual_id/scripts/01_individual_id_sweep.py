@@ -158,9 +158,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         # Validation with detailed metrics including F1
         val_loss, val_acc, val_preds, val_labels = trainer.validate_epoch(val_loader)
         
-        # Calculate F1 scores
+        # Calculate F1 score (macro only)
         from sklearn.metrics import f1_score
-        val_f1_weighted = f1_score(val_labels, val_preds, average='weighted', zero_division=0)
         val_f1_macro = f1_score(val_labels, val_preds, average='macro', zero_division=0)
         
         # Calculate pelage-specific metrics if available
@@ -214,14 +213,13 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
             'epoch': epoch + 1,
             'loss': val_loss,
             'accuracy': val_acc,
-            'f1_weighted': val_f1_weighted,
             'f1_macro': val_f1_macro,
             'pelage_metrics': pelage_metrics
         })
         
         # Print progress
         if True:  # verbose
-            msg = f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val F1={val_f1_weighted:.4f}"
+            msg = f"Epoch {epoch+1:2d}/{epochs}: Train Acc={train_acc:.4f}, Val Acc={val_acc:.4f}, Val F1={val_f1_macro:.4f}"
             if pelage_metrics:
                 if 'visible' in pelage_metrics:
                     msg += f", Vis F1={pelage_metrics['visible']['f1_score']:.4f}"
@@ -234,9 +232,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     # Final evaluation
     final_val_loss, final_val_acc, final_preds, final_labels = trainer.validate_epoch(val_loader)
     
-    # Calculate final F1 scores
+    # Calculate final F1 score (macro only)
     from sklearn.metrics import f1_score
-    final_f1_weighted = f1_score(final_labels, final_preds, average='weighted', zero_division=0)
     final_f1_macro = f1_score(final_labels, final_preds, average='macro', zero_division=0)
     
     # Get final pelage metrics
@@ -249,7 +246,6 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     results = {
         'epochs_trained': epochs,
         'final_val_accuracy': final_val_acc,
-        'final_val_f1_weighted': final_f1_weighted,
         'final_val_f1_macro': final_f1_macro,
         'final_val_loss': final_val_loss,
         'final_classification_report': final_report,
@@ -298,7 +294,6 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     print(f"✓ Saved results to: {filename}")
     print(f"  Final validation accuracy: {results['final_val_accuracy']:.4f}")
-    print(f"  Final validation F1 (weighted): {results['final_val_f1_weighted']:.4f}")
     print(f"  Final validation F1 (macro): {results['final_val_f1_macro']:.4f}")
     
     # Show pelage-specific performance if available
@@ -367,12 +362,12 @@ def main():
     if results_summary:
         avg_acc = sum(r['performance']['final_val_accuracy'] for r in results_summary) / len(results_summary)
         best_acc = max(r['performance']['final_val_accuracy'] for r in results_summary)
-        avg_f1 = sum(r['performance']['final_val_f1_weighted'] for r in results_summary) / len(results_summary)
-        best_f1 = max(r['performance']['final_val_f1_weighted'] for r in results_summary)
+        avg_f1 = sum(r['performance']['final_val_f1_macro'] for r in results_summary) / len(results_summary)
+        best_f1 = max(r['performance']['final_val_f1_macro'] for r in results_summary)
         print(f"Average final validation accuracy: {avg_acc:.4f}")
         print(f"Best final validation accuracy: {best_acc:.4f}")
-        print(f"Average final validation F1 (weighted): {avg_f1:.4f}")
-        print(f"Best final validation F1 (weighted): {best_f1:.4f}")
+        print(f"Average final validation F1 (macro): {avg_f1:.4f}")
+        print(f"Best final validation F1 (macro): {best_f1:.4f}")
         print(f"Results saved to: {args.output_dir}")
 
 if __name__ == "__main__":

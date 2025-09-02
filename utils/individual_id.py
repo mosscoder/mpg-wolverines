@@ -265,7 +265,7 @@ def create_cv_folds(dataset, individual_ids, n_folds=5, seed=42, train_ratio=0.8
     return folds
 
 
-def calculate_metrics(predictions, labels, average='weighted'):
+def calculate_metrics(predictions, labels, average='macro'):
     """Calculate classification metrics
     
     Args:

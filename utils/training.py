@@ -15,7 +15,7 @@ def compute_metrics(predictions: np.ndarray, labels: np.ndarray) -> Dict[str, fl
     """Compute classification metrics"""
     return {
         'accuracy': accuracy_score(labels, predictions),
-        'f1_score': f1_score(labels, predictions, average='weighted'),
+        'f1_score': f1_score(labels, predictions, average='macro'),
         'precision': precision_score(labels, predictions, average='weighted', zero_division=0),
         'recall': recall_score(labels, predictions, average='weighted', zero_division=0)
     }
@@ -303,7 +303,7 @@ class CVTrainer(MultiClassTrainer):
         from sklearn.metrics import f1_score
         
         avg_loss, accuracy, predictions, labels = self.validate_epoch(val_loader)
-        f1 = f1_score(labels, predictions, average='weighted', zero_division=0)
+        f1 = f1_score(labels, predictions, average='macro', zero_division=0)
         
         return avg_loss, accuracy, f1, predictions, labels
     
@@ -363,7 +363,7 @@ class FinalTrainer(MultiClassTrainer):
         
         # Calculate comprehensive metrics
         accuracy = sum(p == l for p, l in zip(all_predictions, all_labels)) / len(all_labels)
-        f1 = f1_score(all_labels, all_predictions, average='weighted', zero_division=0)
+        f1 = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
         
         # Classification report with individual names
         report = classification_report(all_labels, all_predictions, 
