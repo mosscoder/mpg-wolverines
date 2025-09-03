@@ -203,3 +203,99 @@ class CenterCrop2D:
         
         # Crop: (left, top, right, bottom)
         return img.crop((left, top, right, bottom))
+
+
+def get_proportional_crop_and_resize_transform(resize=256, top_frac=0.05, bottom_frac=0.05, left_frac=0.25, right_frac=0.25):
+    """
+    Get transform with proportional crop followed by resize.
+    
+    Args:
+        resize: Target square resize size
+        top_frac: Fraction to remove from top (default: 0.05)
+        bottom_frac: Fraction to remove from bottom (default: 0.05)
+        left_frac: Fraction to remove from left (default: 0.25)
+        right_frac: Fraction to remove from right (default: 0.25)
+    
+    Returns:
+        torchvision.transforms.Compose with proportional crop + resize + ToTensor + Normalize
+    """
+    from torchvision import transforms
+    from PIL import Image
+    
+    print(f"Proportional crop and resize transform: remove {top_frac:.0%} top, {bottom_frac:.0%} bottom, {left_frac:.0%} left, {right_frac:.0%} right → resize to {resize}x{resize}")
+    
+    return transforms.Compose([
+        ProportionalCrop(top_frac=top_frac, bottom_frac=bottom_frac, left_frac=left_frac, right_frac=right_frac),
+        transforms.Resize((resize, resize), interpolation=Image.LANCZOS),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+
+class ProportionalCrop:
+    """Custom transform to crop based on proportions of image dimensions"""
+    
+    def __init__(self, top_frac=0.05, bottom_frac=0.05, left_frac=0.25, right_frac=0.25):
+        """
+        Args:
+            top_frac: Fraction to remove from top
+            bottom_frac: Fraction to remove from bottom
+            left_frac: Fraction to remove from left
+            right_frac: Fraction to remove from right
+        """
+        self.top_frac = top_frac
+        self.bottom_frac = bottom_frac
+        self.left_frac = left_frac
+        self.right_frac = right_frac
+    
+    def __call__(self, img):
+        """
+        Args:
+            img (PIL Image): Image to be cropped
+            
+        Returns:
+            PIL Image: Proportionally cropped image
+        """
+        img_width, img_height = img.size
+        
+        # Calculate crop coordinates based on proportions
+        left = int(img_width * self.left_frac)
+        right = int(img_width * (1 - self.right_frac))
+        top = int(img_height * self.top_frac)
+        bottom = int(img_height * (1 - self.bottom_frac))
+        
+        # Ensure valid crop dimensions
+        left = max(0, left)
+        right = min(img_width, right)
+        top = max(0, top)
+        bottom = min(img_height, bottom)
+        
+        # Crop: (left, top, right, bottom)
+        return img.crop((left, top, right, bottom))
+
+
+def get_proportional_crop_and_resize_transform(resize=256, top_frac=0.05, bottom_frac=0.05, left_frac=0.25, right_frac=0.25):
+    """
+    Get transform with proportional crop followed by resize.
+    
+    Args:
+        resize: Target square resize size
+        top_frac: Fraction to remove from top (default: 0.05)
+        bottom_frac: Fraction to remove from bottom (default: 0.05)
+        left_frac: Fraction to remove from left (default: 0.25)
+        right_frac: Fraction to remove from right (default: 0.25)
+    
+    Returns:
+        torchvision.transforms.Compose with proportional crop + resize + ToTensor + Normalize
+    """
+    from torchvision import transforms
+    from PIL import Image
+    
+    print(f"Proportional crop and resize transform: remove {top_frac:.0%} top, {bottom_frac:.0%} bottom, {left_frac:.0%} left, {right_frac:.0%} right → resize to {resize}x{resize}")
+    
+    return transforms.Compose([
+        ProportionalCrop(top_frac=top_frac, bottom_frac=bottom_frac, left_frac=left_frac, right_frac=right_frac),
+        transforms.Resize((resize, resize), interpolation=Image.LANCZOS),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])

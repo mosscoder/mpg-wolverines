@@ -19,7 +19,7 @@ from sklearn.metrics import confusion_matrix
 sys.path.append('.')
 
 from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders
-from utils.preprocessing import get_center_crop_and_resize_transform
+from utils.preprocessing import get_proportional_crop_and_resize_transform
 from utils.models import create_model
 from utils.training import check_result_exists, MultiClassTrainer
 from utils.individual_id import get_feasible_individuals, create_temporal_sweep_dataset
@@ -122,8 +122,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     # Create transforms - single pipeline for all approaches
     batch_size = 16
-    transform = get_center_crop_and_resize_transform(crop_size=1480, resize=256)
-    crop_size = "1480x1480 → 256x256"
+    transform = get_proportional_crop_and_resize_transform(resize=256)
+    crop_size = "proportional crop (50% width, 90% height) → 256x256"
     
     # Use standard dataloaders
     train_loader, val_loader = create_dataloaders(

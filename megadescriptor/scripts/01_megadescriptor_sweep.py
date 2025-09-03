@@ -66,13 +66,13 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
 def create_megadescriptor_transform():
     """Create MegaDescriptor-specific transform pipeline"""
     import torchvision.transforms as T
-    from utils.preprocessing import CenterCrop2D
+    from utils.preprocessing import ProportionalCrop
     from PIL import Image
     
-    print("MegaDescriptor transform: 1480x1480 center crop → 384x384 resize + normalize")
+    print("MegaDescriptor transform: proportional crop (keep center 50% width, 90% height) → 384x384 resize + normalize")
     
     return T.Compose([
-        CenterCrop2D(1480, 1480),  # Same center crop as individual_id
+        ProportionalCrop(top_frac=0.05, bottom_frac=0.05, left_frac=0.25, right_frac=0.25),
         T.Resize(size=(384, 384), interpolation=Image.LANCZOS),
         T.ToTensor(), 
         T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
