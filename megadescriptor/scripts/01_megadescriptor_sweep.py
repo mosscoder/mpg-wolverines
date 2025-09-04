@@ -28,35 +28,35 @@ from datasets import load_dataset
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - pelage vs pelage_abs experiments
-    sample_sizes = [2, 4, 8, 16, 32]
+    # Experimental parameters - detection-filtered experiments
+    sample_sizes = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]  # 16 sizes
     approaches = ['pelage', 'pelage_abs']
     seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
-    # Generate all combinations: 5 sizes × 2 approaches × 8 seeds = 80 total
+    # Generate all combinations: 16 sizes × 2 approaches × 8 seeds = 256 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 80 total
+    total_combinations = len(all_combinations)  # 256 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 80 combinations across 24 jobs
-    # Jobs 0-7: 4 configs each (32 total)
-    # Jobs 8-23: 3 configs each (48 total)
-    if job_idx < 8:
-        configs_per_job = 4
-        start_idx = job_idx * 4
-        end_idx = start_idx + 4
+    # Distribute 256 combinations across 24 jobs
+    # Jobs 0-15: 11 configs each (176 total)
+    # Jobs 16-23: 10 configs each (80 total)
+    if job_idx < 16:
+        configs_per_job = 11
+        start_idx = job_idx * 11
+        end_idx = start_idx + 11
     else:
-        configs_per_job = 3
-        start_idx = 32 + (job_idx - 8) * 3
-        end_idx = start_idx + 3
+        configs_per_job = 10
+        start_idx = 176 + (job_idx - 16) * 10
+        end_idx = start_idx + 10
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]
@@ -188,14 +188,15 @@ def create_temporal_split_dataset(dataset, individuals, sample_size, approach, s
     for i, sample in enumerate(dataset):
         individual_id = sample['id']
         if individual_id in individuals:
-            # Apply filtering based on approach
+            # Apply filtering based on approach (ALL require megadetector_status == 1)
             if approach == 'pelage' and sample['pelage'] == 1:
                 # For pelage==1: only include samples with detections
                 if sample['megadetector_status'] == 1:
                     individual_samples[individual_id].append((i, sample))
             elif approach == 'pelage_abs' and sample['pelage'] == 0:
-                # For pelage==0: no filtering needed
-                individual_samples[individual_id].append((i, sample))
+                # For pelage==0: also require detections for consistency
+                if sample['megadetector_status'] == 1:
+                    individual_samples[individual_id].append((i, sample))
     
     print(f"Samples found per individual (after filtering):")
     for ind_id in individuals:
@@ -426,7 +427,7 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
             'dataset_config': 'crops-masks',
             'feature_dim': train_features.shape[1] if len(train_features) > 0 else 0,
             'batch_size': 16,
-            'detection_filtering': approach == 'pelage'
+            'detection_filtering': True  # All approaches now require detections
         }
     }
     
