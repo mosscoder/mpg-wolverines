@@ -265,7 +265,7 @@ def print_summary_table(metrics):
 
 def main():
     parser = argparse.ArgumentParser(description='Plot Individual ID results')
-    parser.add_argument('--results_dir', type=str, default='results',
+    parser.add_argument('--results_dir', type=str, default='individual_id/results',
                        help='Directory containing result JSON files')
     parser.add_argument('--output_dir', type=str, default='figures',
                        help='Directory to save output figure')
