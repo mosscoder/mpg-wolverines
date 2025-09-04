@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Script 01: MegaDescriptor Sweep
+Script 01: MegaDescriptor Sweep (Crops-Masks Config)
 Multi-class classification experiment using MegaDescriptor feature extraction
-with nearest neighbor classification and cosine similarity.
+with nearest neighbor classification on the crops-masks dataset configuration.
+Uses date-based temporal train/val splits and detection filtering.
 """
 
 import sys
@@ -19,9 +20,9 @@ from sklearn.metrics import confusion_matrix, f1_score, classification_report
 # Assume script is run from wolverines root directory
 sys.path.append('.')
 
-from utils.dataset import load_wolverines_dataset, set_all_seeds
-from utils.individual_id import create_temporal_sweep_dataset
+from utils.dataset import set_all_seeds
 from utils.training import check_result_exists
+from datasets import load_dataset
 
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
@@ -63,23 +64,29 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
         return all_combinations[start_idx:total_combinations]
 
 
+def load_crops_masks_dataset():
+    """Load the wolverines dataset with crops-masks configuration"""
+    print("Loading wolverines dataset (crops-masks config)...")
+    dataset = load_dataset("kdoherty/wolverines", "crops-masks", split="train")
+    print(f"Loaded {len(dataset)} samples from crops-masks config")
+    return dataset
+
+
 def create_megadescriptor_transform():
-    """Create MegaDescriptor-specific transform pipeline"""
+    """Create MegaDescriptor-specific transform pipeline for pre-cropped images"""
     import torchvision.transforms as T
-    from utils.preprocessing import ProportionalCrop
     from PIL import Image
     
-    print("MegaDescriptor transform: proportional crop (keep center 50% width, 90% height) → 384x384 resize + normalize")
+    print("MegaDescriptor transform: resize to 384x384 + normalize (using pre-cropped images)")
     
     return T.Compose([
-        ProportionalCrop(top_frac=0.05, bottom_frac=0.05, left_frac=0.25, right_frac=0.25),
         T.Resize(size=(384, 384), interpolation=Image.LANCZOS),
         T.ToTensor(), 
         T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
 
-def extract_features(dataset, model, transform, device, batch_size=16):
+def extract_features(dataset, model, transform, device, batch_size=16, use_crops=True):
     """Extract MegaDescriptor features for all samples in dataset"""
     model.eval()
     features = []
@@ -88,6 +95,7 @@ def extract_features(dataset, model, transform, device, batch_size=16):
     pelage_labels = []
     
     print(f"Extracting features from {len(dataset)} samples...")
+    print(f"Using {'cropped images' if use_crops else 'SAM masks'} for feature extraction")
     
     # Process in batches for memory efficiency
     for i in range(0, len(dataset), batch_size):
@@ -101,12 +109,24 @@ def extract_features(dataset, model, transform, device, batch_size=16):
         batch_pelage = []
         
         for sample in batch_samples:
-            img_tensor = transform(sample['image'])
+            # Use cropped images or SAM masks based on use_crops flag
+            if use_crops and sample['megadetector_image'] is not None:
+                img = sample['megadetector_image']
+            elif not use_crops and sample['sam_mask'] is not None:
+                img = sample['sam_mask']
+            else:
+                # Skip samples without the required image type
+                continue
+                
+            img_tensor = transform(img)
             batch_images.append(img_tensor)
-            batch_labels.append(sample['label'])
-            batch_ids.append(sample.get('id', 'Unknown'))
-            batch_pelage.append(sample.get('pelage', 0))
+            batch_labels.append(sample['id'])  # Use individual ID as label
+            batch_ids.append(sample['id'])
+            batch_pelage.append(sample['pelage'])
         
+        if not batch_images:  # Skip empty batches
+            continue
+            
         # Stack into batch tensor
         batch_tensor = torch.stack(batch_images).to(device)
         
@@ -123,10 +143,13 @@ def extract_features(dataset, model, transform, device, batch_size=16):
             print(f"  Processed {i + len(batch_samples)}/{len(dataset)} samples")
     
     # Concatenate all features
-    all_features = torch.cat(features, dim=0)
-    print(f"Extracted features shape: {all_features.shape}")
-    
-    return all_features, torch.tensor(labels), individual_ids, torch.tensor(pelage_labels)
+    if features:
+        all_features = torch.cat(features, dim=0)
+        print(f"Extracted features shape: {all_features.shape}")
+        return all_features, labels, individual_ids, pelage_labels
+    else:
+        print("No valid samples found for feature extraction!")
+        return torch.empty(0), [], [], []
 
 
 def nearest_neighbor_classify(val_features, train_features, train_labels):
@@ -149,6 +172,93 @@ def nearest_neighbor_classify(val_features, train_features, train_labels):
     return predictions, max_similarities.numpy()
 
 
+def create_temporal_split_dataset(dataset, individuals, sample_size, approach, seed):
+    """Create date-based temporal train/val splits for individuals"""
+    import random
+    from collections import defaultdict
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    print(f"Creating temporal split dataset: {sample_size} samples per class, approach={approach}")
+    
+    # Group samples by individual ID
+    individual_samples = defaultdict(list)
+    
+    for i, sample in enumerate(dataset):
+        individual_id = sample['id']
+        if individual_id in individuals:
+            # Apply filtering based on approach
+            if approach == 'pelage' and sample['pelage'] == 1:
+                # For pelage==1: only include samples with detections
+                if sample['megadetector_status'] == 1:
+                    individual_samples[individual_id].append((i, sample))
+            elif approach == 'pelage_abs' and sample['pelage'] == 0:
+                # For pelage==0: no filtering needed
+                individual_samples[individual_id].append((i, sample))
+    
+    print(f"Samples found per individual (after filtering):")
+    for ind_id in individuals:
+        count = len(individual_samples[ind_id])
+        print(f"  {ind_id}: {count} samples")
+    
+    # Check if we have enough samples
+    train_dataset_indices = []
+    val_dataset_indices = []
+    individual_to_class = {}
+    temporal_info = {}
+    
+    for class_idx, individual_id in enumerate(individuals):
+        samples = individual_samples[individual_id]
+        
+        if len(samples) < sample_size * 2:
+            raise ValueError(
+                f"INSUFFICIENT SAMPLES: Individual {individual_id} has only {len(samples)} samples, "
+                f"but need {sample_size * 2} (2x {sample_size} for train/val split)"
+            )
+        
+        # Random sample 2x the required amount FIRST
+        total_needed = sample_size * 2
+        if len(samples) > total_needed:
+            selected_samples = random.sample(samples, total_needed)
+        else:
+            selected_samples = samples
+        
+        # THEN sort by date (ymdh) 
+        selected_samples.sort(key=lambda x: x[1]['ymdh'])
+        
+        # Split temporally: first half for train, second half for val
+        train_samples = selected_samples[:sample_size]
+        val_samples = selected_samples[sample_size:]
+            
+        train_dataset_indices.extend([idx for idx, _ in train_samples])
+        val_dataset_indices.extend([idx for idx, _ in val_samples])
+        
+        individual_to_class[individual_id] = class_idx
+        
+        # Store temporal split info
+        train_dates = [s[1]['ymdh'] for s in train_samples]
+        val_dates = [s[1]['ymdh'] for s in val_samples]
+        
+        temporal_info[individual_id] = {
+            'train_dates': train_dates,
+            'val_dates': val_dates,
+            'train_date_range': [min(train_dates), max(train_dates)] if train_dates else [],
+            'val_date_range': [min(val_dates), max(val_dates)] if val_dates else [],
+            'total_samples_available': len(samples),
+            'samples_used': len(train_samples) + len(val_samples)
+        }
+        
+        print(f"  {individual_id}: Train={len(train_samples)} (dates {min(train_dates)}-{max(train_dates)}), "
+              f"Val={len(val_samples)} (dates {min(val_dates)}-{max(val_dates)})")
+    
+    # Create subset datasets
+    train_subset = dataset.select(train_dataset_indices)
+    val_subset = dataset.select(val_dataset_indices)
+    
+    return train_subset, val_subset, individual_to_class, temporal_info
+
+
 def evaluate_single_config(sample_size: int, approach: str, seed: int, args: argparse.Namespace) -> dict:
     """Evaluate one configuration using MegaDescriptor + nearest neighbor"""
     
@@ -166,11 +276,8 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
     
     print(f"Evaluating: samples={sample_size}, approach={approach}, seed={seed}")
     
-    # Load datasets
-    print("Loading datasets...")
-    train_dataset, test_dataset = load_wolverines_dataset()
-    print(f"Training dataset: {len(train_dataset)} samples")
-    print(f"Test dataset: {len(test_dataset)} samples")
+    # Load crops-masks dataset
+    dataset = load_crops_masks_dataset()
 
     # Load top 3 individuals
     import json
@@ -182,10 +289,14 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
     feasible_individuals = individuals_sorted[:3]
     print(f"Using top 3 individuals: {', '.join(feasible_individuals)}")
     
-    # Create temporal dataset
-    ind_train_dataset, ind_val_dataset, individual_to_class, temporal_info = create_temporal_sweep_dataset(
-        train_dataset, test_dataset, feasible_individuals, sample_size, approach, seed
-    )
+    # Create temporal dataset splits
+    try:
+        ind_train_dataset, ind_val_dataset, individual_to_class, temporal_info = create_temporal_split_dataset(
+            dataset, feasible_individuals, sample_size, approach, seed
+        )
+    except ValueError as e:
+        print(f"FATAL ERROR: {e}")
+        raise e
     
     num_classes = len(feasible_individuals)
     print(f"Multi-class problem: {num_classes} individuals (classes)")
@@ -218,34 +329,41 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
     
     feature_time = time.time() - start_time
     
+    # Convert string IDs to numeric labels for classification
+    unique_ids = sorted(list(set(train_labels + val_labels)))
+    id_to_label = {id_str: idx for idx, id_str in enumerate(unique_ids)}
+    
+    train_labels_numeric = torch.tensor([id_to_label[id_str] for id_str in train_labels])
+    val_labels_numeric = torch.tensor([id_to_label[id_str] for id_str in val_labels])
+    
     # Nearest neighbor classification
     print("Performing nearest neighbor classification...")
     start_time = time.time()
     
     val_preds, similarity_scores = nearest_neighbor_classify(
-        val_features, train_features, train_labels
+        val_features, train_features, train_labels_numeric
     )
     
     classification_time = time.time() - start_time
     
     # Convert to numpy for metrics
     val_preds = val_preds.numpy()
-    val_labels = val_labels.numpy()
+    val_labels_numeric = val_labels_numeric.numpy()
     
     # Calculate F1 score (macro only)
-    val_f1_macro = f1_score(val_labels, val_preds, average='macro', zero_division=0)
-    val_acc = sum(val_preds == val_labels) / len(val_labels)
+    val_f1_macro = f1_score(val_labels_numeric, val_preds, average='macro', zero_division=0)
+    val_acc = sum(val_preds == val_labels_numeric) / len(val_labels_numeric)
     
     # Calculate pelage-specific metrics
     pelage_metrics = {}
     if len(val_pelage) == len(val_preds):
-        val_pelage_np = val_pelage.numpy()
+        val_pelage_np = np.array(val_pelage)
         visible_mask = val_pelage_np == 1
         invisible_mask = val_pelage_np == 0
         
         if np.sum(visible_mask) > 0:
-            visible_acc = sum(val_preds[visible_mask] == val_labels[visible_mask]) / np.sum(visible_mask)
-            visible_f1 = f1_score(val_labels[visible_mask], val_preds[visible_mask], 
+            visible_acc = sum(val_preds[visible_mask] == val_labels_numeric[visible_mask]) / np.sum(visible_mask)
+            visible_f1 = f1_score(val_labels_numeric[visible_mask], val_preds[visible_mask], 
                                  average='weighted', zero_division=0)
             pelage_metrics['visible'] = {
                 'accuracy': visible_acc,
@@ -255,8 +373,8 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
             }
         
         if np.sum(invisible_mask) > 0:
-            invisible_acc = sum(val_preds[invisible_mask] == val_labels[invisible_mask]) / np.sum(invisible_mask)
-            invisible_f1 = f1_score(val_labels[invisible_mask], val_preds[invisible_mask], 
+            invisible_acc = sum(val_preds[invisible_mask] == val_labels_numeric[invisible_mask]) / np.sum(invisible_mask)
+            invisible_f1 = f1_score(val_labels_numeric[invisible_mask], val_preds[invisible_mask], 
                                    average='weighted', zero_division=0)
             pelage_metrics['invisible'] = {
                 'accuracy': invisible_acc,
@@ -266,14 +384,14 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
             }
     
     # Calculate classification report
-    final_report = classification_report(val_labels, val_preds, output_dict=True, zero_division=0)
+    final_report = classification_report(val_labels_numeric, val_preds, output_dict=True, zero_division=0)
     
     results = {
         'final_val_accuracy': val_acc,
         'final_val_f1_macro': val_f1_macro,
         'final_classification_report': final_report,
         'final_pelage_metrics': pelage_metrics,
-        'confusion_matrix': confusion_matrix(val_labels, val_preds).tolist(),
+        'confusion_matrix': confusion_matrix(val_labels_numeric, val_preds).tolist(),
         'avg_similarity_score': float(similarity_scores.mean()),
         'similarity_stats': {
             'min': float(similarity_scores.min()),
@@ -304,9 +422,11 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
             'model': 'MegaDescriptor-L-384',
             'classifier': 'nearest_neighbor_cosine',
             'approach': approach,
-            'approach_details': f'Temporal split approach: {approach} (1480x1480 center crop → 384x384 resize for MegaDescriptor)',
-            'feature_dim': train_features.shape[1],
-            'batch_size': 16
+            'approach_details': f'Temporal split approach: {approach} (uses crops-masks config with detection filtering)',
+            'dataset_config': 'crops-masks',
+            'feature_dim': train_features.shape[1] if len(train_features) > 0 else 0,
+            'batch_size': 16,
+            'detection_filtering': approach == 'pelage'
         }
     }
     

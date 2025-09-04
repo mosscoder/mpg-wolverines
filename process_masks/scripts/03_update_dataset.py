@@ -202,7 +202,7 @@ def create_updated_dataset(original_dataset, detection_columns):
     updated_data = {
         'id': [sample.get('id', 'Unknown') for sample in original_dataset],
         'pelage': [sample.get('label', 0) for sample in original_dataset],  # Renamed from 'label'
-        'date': [sample.get('date', 'Unknown') for sample in original_dataset],
+        'ymdh': [sample.get('ymdh', 0) for sample in original_dataset],  # Date timestamp
     }
     
     # Add all detection and mask columns
@@ -212,7 +212,7 @@ def create_updated_dataset(original_dataset, detection_columns):
     features = Features({
         'id': Value('string'),
         'pelage': Value('int32'),
-        'date': Value('string'),
+        'ymdh': Value('int64'),  # Date timestamp (YYYYMMDDHHMM)
         'megadetector_confidence': Value('float32'),
         'megadetector_bbox_xmin': Value('float32'),
         'megadetector_bbox_ymin': Value('float32'),
@@ -231,7 +231,7 @@ def create_updated_dataset(original_dataset, detection_columns):
     updated_dataset = Dataset.from_dict(updated_data, features=features)
     
     print(f"Updated dataset created with {len(updated_dataset)} samples")
-    print(f"Columns: id, pelage (renamed from label), date, MegaDetector columns, SAM columns")
+    print(f"Columns: id, pelage (renamed from label), ymdh, MegaDetector columns, SAM columns")
     print(f"Image columns: megadetector_image, sam_mask (with Image dtype)")
     
     return updated_dataset
