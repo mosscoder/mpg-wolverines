@@ -216,8 +216,9 @@ def plot_results(metrics, performance_df, output_path):
     ax.set_xlabel('Image Count per Individual', fontsize=14)
     ax.set_ylabel('Validation F1 Score', fontsize=14)
     
-    # Set explicit x-axis ticks for all sample sizes
-    ax.set_xticks([2, 4, 8, 16, 32])
+    # Set explicit x-axis ticks every 2 examples per class
+    ax.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
+    ax.set_xlim(0, 34)
     # Add legend with title
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
     legend.set_title("Training image quality:", prop={'weight': 'bold'})

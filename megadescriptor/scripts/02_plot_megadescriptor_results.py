@@ -230,7 +230,8 @@ def plot_results(metrics, performance_df, output_path):
     
     # Styling for F1 subplot
     ax1.set_ylabel('Validation F1 Score (Macro)', fontsize=14)
-    ax1.set_xticks([2, 4, 8, 16, 32])
+    ax1.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
+    ax1.set_xlim(0, 34)
     ax1.set_ylim(0.0, 1.0)
     ax1.set_yticks(np.arange(0.0, 1.1, 0.1))
     ax1.grid(True, alpha=0.3, axis='y', color='lightgray')
@@ -240,7 +241,8 @@ def plot_results(metrics, performance_df, output_path):
     # Styling for similarity subplot
     ax2.set_xlabel('Image Count per Individual', fontsize=14)
     ax2.set_ylabel('Average Cosine Similarity', fontsize=14)
-    ax2.set_xticks([2, 4, 8, 16, 32])
+    ax2.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
+    ax2.set_xlim(0, 34)
     ax2.grid(True, alpha=0.3, axis='y', color='lightgray')
     ax2.legend(title="Training image quality:", loc='lower right')
     
