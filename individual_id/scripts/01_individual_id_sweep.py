@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Script 01: Individual ID Sweep
+Script 01: Individual ID Sweep (Crops-Masks Config)
 Multi-class classification experiment with varying samples per individual.
-Tests pelage-only vs random sampling approaches with different sample sizes.
+Uses crops-masks dataset configuration with detection filtering and temporal splits.
 """
 
 import sys
@@ -18,50 +18,158 @@ from sklearn.metrics import confusion_matrix
 # Assume script is run from wolverines root directory
 sys.path.append('.')
 
-from utils.dataset import load_wolverines_dataset, set_all_seeds, create_dataloaders
-from utils.preprocessing import get_proportional_crop_and_resize_transform
+from utils.dataset import set_all_seeds, create_dataloaders
 from utils.models import create_model
 from utils.training import check_result_exists, MultiClassTrainer
-from utils.individual_id import get_feasible_individuals, create_temporal_sweep_dataset
+from datasets import load_dataset
+import torchvision.transforms as T
+from PIL import Image
 
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - pelage vs pelage_abs experiments
-    sample_sizes = [2, 4, 8, 16, 32]
+    # Experimental parameters - detection-filtered experiments
+    sample_sizes = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]  # 16 sizes
     approaches = ['pelage', 'pelage_abs']
     seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
-    # Generate all combinations: 5 sizes × 2 approaches × 8 seeds = 80 total
+    # Generate all combinations: 16 sizes × 2 approaches × 8 seeds = 256 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 80 total
+    total_combinations = len(all_combinations)  # 256 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 80 combinations across 24 jobs
-    # Jobs 0-7: 4 configs each (32 total)
-    # Jobs 8-23: 3 configs each (48 total)
-    if job_idx < 8:
-        configs_per_job = 4
-        start_idx = job_idx * 4
-        end_idx = start_idx + 4
+    # Distribute 256 combinations across 24 jobs
+    # Jobs 0-15: 11 configs each (176 total)
+    # Jobs 16-23: 10 configs each (80 total)
+    if job_idx < 16:
+        configs_per_job = 11
+        start_idx = job_idx * 11
+        end_idx = start_idx + 11
     else:
-        configs_per_job = 3
-        start_idx = 32 + (job_idx - 8) * 3
-        end_idx = start_idx + 3
+        configs_per_job = 10
+        start_idx = 176 + (job_idx - 16) * 10
+        end_idx = start_idx + 10
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]
     else:
         return all_combinations[start_idx:total_combinations]
+
+
+def load_crops_masks_dataset():
+    """Load the wolverines dataset with crops-masks configuration"""
+    print("Loading wolverines dataset (crops-masks config)...")
+    dataset = load_dataset("kdoherty/wolverines", "crops-masks", split="train")
+    print(f"Loaded {len(dataset)} samples from crops-masks config")
+    return dataset
+
+
+def create_temporal_split_dataset(dataset, individuals, sample_size, approach, seed):
+    """Create date-based temporal train/val splits for individuals"""
+    import random
+    from collections import defaultdict
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    print(f"Creating temporal split dataset: {sample_size} samples per class, approach={approach}")
+    
+    # Group samples by individual ID
+    individual_samples = defaultdict(list)
+    
+    for i, sample in enumerate(dataset):
+        individual_id = sample['id']
+        if individual_id in individuals:
+            # Apply filtering based on approach (ALL require megadetector_status == 1)
+            if approach == 'pelage' and sample['pelage'] == 1:
+                # For pelage==1: only include samples with detections
+                if sample['megadetector_status'] == 1:
+                    individual_samples[individual_id].append((i, sample))
+            elif approach == 'pelage_abs' and sample['pelage'] == 0:
+                # For pelage==0: also require detections for consistency
+                if sample['megadetector_status'] == 1:
+                    individual_samples[individual_id].append((i, sample))
+    
+    print(f"Samples found per individual (after filtering):")
+    for ind_id in individuals:
+        count = len(individual_samples[ind_id])
+        print(f"  {ind_id}: {count} samples")
+    
+    # Check if we have enough samples
+    train_dataset_indices = []
+    val_dataset_indices = []
+    individual_to_class = {}
+    temporal_info = {}
+    
+    for class_idx, individual_id in enumerate(individuals):
+        samples = individual_samples[individual_id]
+        
+        if len(samples) < sample_size * 2:
+            raise ValueError(
+                f"INSUFFICIENT SAMPLES: Individual {individual_id} has only {len(samples)} samples, "
+                f"but need {sample_size * 2} (2x {sample_size} for train/val split)"
+            )
+        
+        # Random sample 2x the required amount FIRST
+        total_needed = sample_size * 2
+        if len(samples) > total_needed:
+            selected_samples = random.sample(samples, total_needed)
+        else:
+            selected_samples = samples
+        
+        # THEN sort by date (ymdh) 
+        selected_samples.sort(key=lambda x: x[1]['ymdh'])
+        
+        # Split temporally: first half for train, second half for val
+        train_samples = selected_samples[:sample_size]
+        val_samples = selected_samples[sample_size:]
+            
+        train_dataset_indices.extend([idx for idx, _ in train_samples])
+        val_dataset_indices.extend([idx for idx, _ in val_samples])
+        
+        individual_to_class[individual_id] = class_idx
+        
+        # Store temporal split info
+        train_dates = [s[1]['ymdh'] for s in train_samples]
+        val_dates = [s[1]['ymdh'] for s in val_samples]
+        
+        temporal_info[individual_id] = {
+            'train_dates': train_dates,
+            'val_dates': val_dates,
+            'train_date_range': [min(train_dates), max(train_dates)] if train_dates else [],
+            'val_date_range': [min(val_dates), max(val_dates)] if val_dates else [],
+            'total_samples_available': len(samples),
+            'samples_used': len(train_samples) + len(val_samples)
+        }
+        
+        print(f"  {individual_id}: Train={len(train_samples)} (dates {min(train_dates)}-{max(train_dates)}), "
+              f"Val={len(val_samples)} (dates {min(val_dates)}-{max(val_dates)})")
+    
+    # Create subset datasets
+    train_subset = dataset.select(train_dataset_indices)
+    val_subset = dataset.select(val_dataset_indices)
+    
+    return train_subset, val_subset, individual_to_class, temporal_info
+
+
+def create_dinov3_transform():
+    """Create DINOv3-specific transform pipeline for pre-cropped images"""
+    print("DINOv3 transform: resize to 224x224 + normalize (using pre-cropped images)")
+    
+    return T.Compose([
+        T.Resize(size=(224, 224), interpolation=Image.LANCZOS),
+        T.ToTensor(), 
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet stats for DINOv3
+    ])
 
 
 def train_single_config(sample_size: int, approach: str, seed: int, args: argparse.Namespace) -> dict:
@@ -81,11 +189,8 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     
     print(f"Training: samples={sample_size}, approach={approach}, seed={seed}")
     
-    # Load datasets - BOTH TRAIN AND TEST for temporal pooling
-    print("Loading datasets...")
-    train_dataset, test_dataset = load_wolverines_dataset()
-    print(f"Training dataset: {len(train_dataset)} samples")
-    print(f"Test dataset: {len(test_dataset)} samples")
+    # Load crops-masks dataset
+    dataset = load_crops_masks_dataset()
 
     # Load sorted individuals and use top 3
     config_path = 'individual_id/results/feasible_individuals.json'
@@ -109,10 +214,14 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         print("Please run 00_count_individuals.py first to generate individual data.")
         return None
     
-    # Create temporal individual dataset - no pre-filtering needed
-    ind_train_dataset, ind_val_dataset, individual_to_class, temporal_info = create_temporal_sweep_dataset(
-        train_dataset, test_dataset, feasible_individuals, sample_size, approach, seed
-    )
+    # Create temporal dataset splits
+    try:
+        ind_train_dataset, ind_val_dataset, individual_to_class, temporal_info = create_temporal_split_dataset(
+            dataset, feasible_individuals, sample_size, approach, seed
+        )
+    except ValueError as e:
+        print(f"FATAL ERROR: {e}")
+        raise e
     
     num_classes = len(feasible_individuals)
     print(f"Multi-class problem: {num_classes} individuals (classes)")
@@ -120,16 +229,48 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     print(f"Train samples: {len(ind_train_dataset)}")
     print(f"Val samples: {len(ind_val_dataset)}")
     
-    # Create transforms - single pipeline for all approaches
+    # Create transforms for pre-cropped images
     batch_size = 16
-    transform = get_proportional_crop_and_resize_transform(resize=256)
-    crop_size = "proportional crop (50% width, 90% height) → 256x256"
+    transform = create_dinov3_transform()
+    crop_size = "pre-cropped → 224x224"
     
-    # Use standard dataloaders
-    train_loader, val_loader = create_dataloaders(
-        ind_train_dataset, ind_val_dataset,
-        transform, transform, batch_size
-    )
+    # Create custom dataloaders for crops-masks dataset
+    from torch.utils.data import DataLoader, Dataset as TorchDataset
+    
+    class CropsMasksDataset(TorchDataset):
+        def __init__(self, dataset, transform, individual_to_class):
+            self.dataset = dataset
+            self.transform = transform
+            self.individual_to_class = individual_to_class
+            
+        def __len__(self):
+            return len(self.dataset)
+            
+        def __getitem__(self, idx):
+            sample = self.dataset[idx]
+            
+            # Use cropped image
+            if sample['megadetector_image'] is not None:
+                image = sample['megadetector_image']
+            else:
+                # Should not happen since we filtered for detections
+                raise ValueError(f"No cropped image for sample {idx}")
+            
+            # Apply transforms
+            image = self.transform(image)
+            
+            # Get class label and pelage info
+            individual_id = sample['id']
+            class_label = self.individual_to_class[individual_id]
+            pelage = sample['pelage']
+            
+            return image, class_label, pelage
+    
+    train_dataset_torch = CropsMasksDataset(ind_train_dataset, transform, individual_to_class)
+    val_dataset_torch = CropsMasksDataset(ind_val_dataset, transform, individual_to_class)
+    
+    train_loader = DataLoader(train_dataset_torch, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset_torch, batch_size=batch_size, shuffle=False, num_workers=4)
     
     # Create model (modify for multi-class)
     device = "cuda" if args.device == "gpu" else "cpu"
@@ -279,7 +420,9 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         'experimental_params': {
             'crop_size': crop_size,
             'approach': approach,
-            'approach_details': f'Temporal split approach: {approach} (1480x1480 center crop → 256x256 resize)',
+            'approach_details': f'Temporal split approach: {approach} (uses crops-masks config with detection filtering)',
+            'dataset_config': 'crops-masks',
+            'detection_filtering': True,
             'batch_size': batch_size,
             'epochs': epochs,
             'learning_rate': 0.001,
@@ -346,7 +489,7 @@ def main():
     # Train each combination
     results_summary = []
     for i, (sample_size, approach, seed) in enumerate(combinations):
-        print(f"\\n--- Configuration {i+1}/{len(combinations)} ---")
+        print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
             result = train_single_config(sample_size, approach, seed, args)
             if result:
@@ -355,7 +498,7 @@ def main():
             print(f"Error training samples={sample_size}, approach={approach}, seed={seed}: {e}")
             continue
     
-    print(f"\\n" + "=" * 80)
+    print(f"\n" + "=" * 80)
     print(f"Job {args.idx} completed!")
     print(f"Successfully processed {len(results_summary)} configurations")
     
