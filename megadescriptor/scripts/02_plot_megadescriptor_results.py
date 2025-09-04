@@ -160,8 +160,9 @@ def plot_results(metrics, performance_df, output_path):
         'pelage_abs': '#e74c3c'  # Red - pelage absent training
     }
     
-    # Plot F1 scores (top subplot) and collect all F1 values for y-axis scaling
-    all_f1_values = []
+    # Plot F1 scores (top subplot) and collect CI bounds for y-axis scaling
+    all_ci_lower = []
+    all_ci_upper = []
     
     for approach in approaches:
         x_vals = []
@@ -186,11 +187,14 @@ def plot_results(metrics, performance_df, output_path):
                 
                 x_vals.append(sample_size)
                 y_vals.append(mean_f1)
-                ci_lower.append(mean_f1 - ci_range)
-                ci_upper.append(mean_f1 + ci_range)
+                ci_lower_val = mean_f1 - ci_range
+                ci_upper_val = mean_f1 + ci_range
+                ci_lower.append(ci_lower_val)
+                ci_upper.append(ci_upper_val)
                 
-                # Collect F1 values for y-axis scaling
-                all_f1_values.extend(f1_scores)
+                # Collect CI bounds for y-axis scaling
+                all_ci_lower.append(ci_lower_val)
+                all_ci_upper.append(ci_upper_val)
         
         if x_vals:
             # Plot F1 line with confidence interval
@@ -238,10 +242,10 @@ def plot_results(metrics, performance_df, output_path):
     ax1.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
     ax1.set_xlim(0, 34)
     
-    # Set dynamic y-limits based on data
-    if all_f1_values:
-        min_f1 = min(all_f1_values)
-        max_f1 = max(all_f1_values)
+    # Set dynamic y-limits based on confidence interval bounds
+    if all_ci_lower and all_ci_upper:
+        min_f1 = min(all_ci_lower)
+        max_f1 = max(all_ci_upper)
         y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
         y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
         ax1.set_ylim(y_min, y_max)

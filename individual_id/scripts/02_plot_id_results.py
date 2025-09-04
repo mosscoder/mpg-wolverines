@@ -166,10 +166,11 @@ def plot_results(metrics, performance_df, output_path):
         'pelage_abs': '#e74c3c'  # Red - pelage absent training
     }
     
-    # Plot lines with confidence interval ribbons and collect all F1 values for y-axis scaling
+    # Plot lines with confidence interval ribbons and collect CI bounds for y-axis scaling
     legend_handles = []
     legend_labels = []
-    all_f1_values = []
+    all_ci_lower = []
+    all_ci_upper = []
     
     for approach in approaches:
         x_vals = []
@@ -195,11 +196,14 @@ def plot_results(metrics, performance_df, output_path):
                 
                 x_vals.append(sample_size)
                 y_vals.append(mean_acc)
-                ci_lower.append(mean_acc - ci_range)
-                ci_upper.append(mean_acc + ci_range)
+                ci_lower_val = mean_acc - ci_range
+                ci_upper_val = mean_acc + ci_range
+                ci_lower.append(ci_lower_val)
+                ci_upper.append(ci_upper_val)
                 
-                # Collect F1 values for y-axis scaling
-                all_f1_values.extend(accuracies)
+                # Collect CI bounds for y-axis scaling
+                all_ci_lower.append(ci_lower_val)
+                all_ci_upper.append(ci_upper_val)
         
         if x_vals:  # Only plot if we have data
             # Plot main line
@@ -227,10 +231,10 @@ def plot_results(metrics, performance_df, output_path):
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
     legend.set_title("Training image quality:", prop={'weight': 'bold'})
     
-    # Set dynamic y-axis limits based on data
-    if all_f1_values:
-        min_f1 = min(all_f1_values)
-        max_f1 = max(all_f1_values)
+    # Set dynamic y-axis limits based on confidence interval bounds
+    if all_ci_lower and all_ci_upper:
+        min_f1 = min(all_ci_lower)
+        max_f1 = max(all_ci_upper)
         y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
         y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
         ax.set_ylim(y_min, y_max)
