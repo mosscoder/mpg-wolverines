@@ -1,370 +1,261 @@
 #!/usr/bin/env python3
 """
-Script 02: Generate Segmentation Masks with SAM
-Uses Segment Anything Model to create precise wildlife masks from MegaDetector bounding boxes.
+Script 02: Generate Masks with SAM-2 (Hybrid Prompting)
+Uses detections from a JSON file to generate segmented masks. This version
+uses a hybrid approach, prompting the model with both the bounding box and
+its center point to improve segmentation accuracy.
 """
 
-# Fix OpenMP conflict on macOS before any imports
 import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
-import sys
-import argparse
-import time
 import json
+import argparse
 import torch
-import numpy as np
-from pathlib import Path
+from datasets import load_dataset
+from transformers import Sam2Processor, Sam2Model, infer_device # UPDATED
 from PIL import Image
-import cv2
+import numpy as np
 from tqdm import tqdm
+import cv2
 
-# Assume script is run from wolverines root directory
-sys.path.append('.')
-
-from utils.dataset import load_wolverines_dataset, set_all_seeds
-
-
-def load_sam_model(model_type='vit_b', device='cpu'):
-    """Load Segment Anything Model"""
-    try:
-        from segment_anything import sam_model_registry, SamPredictor
-    except ImportError:
-        raise ImportError("Please install segment-anything: pip install git+https://github.com/facebookresearch/segment-anything.git")
-    
-    print(f"Loading SAM model ({model_type})...")
-    
-    # Model checkpoints
-    model_urls = {
-        'vit_b': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth',
-        'vit_l': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth',
-        'vit_h': 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth'
-    }
-    
-    model_path = f"process_masks/models/sam_{model_type}.pth"
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    
-    # Download model if not exists
-    if not os.path.exists(model_path):
-        print(f"Downloading SAM {model_type} model...")
-        import requests
-        response = requests.get(model_urls[model_type], stream=True)
-        response.raise_for_status()
-        
-        with open(model_path, 'wb') as f:
-            for chunk in tqdm(response.iter_content(chunk_size=8192)):
-                f.write(chunk)
-        print(f"Model downloaded to: {model_path}")
-    
-    # Load model
-    sam = sam_model_registry[model_type](checkpoint=model_path)
-    sam.to(device=device)
-    predictor = SamPredictor(sam)
-    
-    print(f"SAM {model_type} loaded on device: {device}")
-    return predictor
-
-
-def generate_mask_from_bbox(predictor, image, bbox,
-                           pred_iou_thresh=0.8,
-                           stability_score_thresh=0.9,
-                           min_mask_region_area=500):
+def process_batch_masks(images, bboxes, model, processor, device, kernel):
     """
-    Generate segmentation mask from bounding box using SAM
+    Process multiple images in a single batch for efficiency
     
     Args:
-        predictor: SAM predictor object
-        image: PIL Image
-        bbox: Bounding box [x, y, width, height]
-        pred_iou_thresh: IoU threshold for mask quality filtering (lower = more liberal)
-        stability_score_thresh: Stability threshold for mask filtering (lower = more liberal)
-        min_mask_region_area: Minimum area for mask regions (suppresses small holes)
+        images: List of PIL Images
+        bboxes: List of bounding boxes [x, y, w, h]
+        model: SAM-2 model
+        processor: SAM-2 processor
+        device: torch device
+        kernel: Pre-created morphological kernel
     
     Returns:
-        Binary mask as numpy array (same size as image)
+        List of processed masks (numpy arrays)
     """
-    # Convert PIL to numpy
-    image_array = np.array(image)
+    if not images:
+        return []
     
-    # Set image for SAM
-    predictor.set_image(image_array)
+    # --- 1. Prepare Batch Prompts ---
+    batch_boxes = []
+    batch_points = []
+    batch_labels = []
     
-    # Use bounding box directly without buffer for precise masks
-    x, y, width, height = bbox
+    for bbox in bboxes:
+        x, y, w, h = bbox
+        # Bounding box prompt (XYXY format)
+        batch_boxes.append([[x, y, x + w, y + h]])
+        
+        # Point prompt at center of box
+        center_x, center_y = x + w / 2, y + h / 2
+        batch_points.append([[[center_x, center_y]]])
+        batch_labels.append([[1]])  # 1 = foreground point
     
-    # Convert to SAM format (x_min, y_min, x_max, y_max)
-    x_min = x
-    y_min = y
-    x_max = x + width
-    y_max = y + height
+    # --- 2. Batch Process ---
+    inputs = processor(
+        images=images,
+        input_boxes=batch_boxes,
+        input_points=batch_points,
+        input_labels=batch_labels,
+        return_tensors="pt"
+    ).to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
     
-    input_box = np.array([x_min, y_min, x_max, y_max])
-    
-    # Generate mask with quality scores
-    masks, scores, logits = predictor.predict(
-        point_coords=None,
-        point_labels=None,
-        box=input_box[None, :],
-        multimask_output=True  # Get multiple masks with scores
+    # Post-process all masks at once
+    all_masks = processor.post_process_masks(
+        outputs.pred_masks.cpu(), inputs["original_sizes"].cpu()
     )
     
-    # Filter masks by predicted IoU threshold
-    if np.max(scores) < pred_iou_thresh:
-        print(f"  Warning: Best mask score {np.max(scores):.3f} below threshold {pred_iou_thresh}")
-    
-    # Select best scoring mask
-    best_mask_idx = np.argmax(scores)
-    selected_mask = masks[best_mask_idx]
-    best_score = scores[best_mask_idx]
-    
-    # Remove small disconnected regions if specified
-    if min_mask_region_area > 0:
-        import cv2
-        mask_uint8 = selected_mask.astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(mask_uint8)
+    # --- 3. Process Each Mask ---
+    processed_masks = []
+    for i, masks in enumerate(all_masks):
+        binary_mask = masks[0, 0].numpy().astype(np.uint8) * 255
         
-        # Keep only components larger than min_mask_region_area
-        filtered_mask = np.zeros_like(selected_mask, dtype=bool)
-        for label_id in range(1, num_labels):
-            component_mask = labels == label_id
-            if np.sum(component_mask) >= min_mask_region_area:
-                filtered_mask |= component_mask
+        # Apply morphological closing with pre-created kernel
+        closed_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
         
-        selected_mask = filtered_mask
+        # Find largest contour
+        contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        final_mask = np.zeros_like(binary_mask)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(final_mask, [largest_contour], -1, 255, -1)
+        
+        processed_masks.append(final_mask)
     
-    return selected_mask  # Shape: (H, W) boolean array
+    return processed_masks
 
 
-def apply_mask_to_image(image, mask):
+def apply_mask_to_crop(image, bbox_xywh, mask):
     """
-    Apply binary mask to image, setting background to transparent
+    Memory-efficient cropping and mask application
     
     Args:
-        image: PIL Image (RGB)
-        mask: Binary numpy array (H, W)
+        image: PIL Image
+        bbox_xywh: Bounding box [x, y, w, h]
+        mask: Binary mask (numpy array)
     
     Returns:
-        PIL Image with RGBA format (masked background transparent)
+        PIL Image (RGBA) - cropped and masked
     """
-    # Convert image to RGBA
-    image_rgba = image.convert('RGBA')
-    image_array = np.array(image_rgba)
+    x, y, w, h = bbox_xywh
     
-    # Apply mask to alpha channel
-    image_array[:, :, 3] = mask.astype(np.uint8) * 255
+    # Crop image first to reduce memory usage
+    crop_box = (int(x), int(y), int(x + w), int(y + h))
+    cropped_image = image.crop(crop_box)
+    cropped_mask = mask[int(y):int(y+h), int(x):int(x+w)]
     
-    # Create new PIL image
-    masked_image = Image.fromarray(image_array, 'RGBA')
+    # Convert to RGBA and apply mask
+    cropped_np = np.array(cropped_image)
+    rgba_image = np.concatenate([cropped_np, np.full((cropped_np.shape[0], cropped_np.shape[1], 1), 255, dtype=np.uint8)], axis=-1)
+    rgba_image[:, :, 3] = cropped_mask
     
-    return masked_image
+    return Image.fromarray(rgba_image, 'RGBA')
 
 
-def process_detections(dataset, predictor, detections_file, output_dir):
-    """Process all detections to generate masks"""
-    
-    # Load detections
-    print(f"Loading detections from: {detections_file}")
-    with open(detections_file, 'r') as f:
-        detection_data = json.load(f)
-    
-    detections = detection_data['detections']
-    
-    # Create output directories
-    masks_dir = os.path.join(output_dir, 'masks')
-    masked_images_dir = os.path.join(output_dir, 'masked_images')
-    os.makedirs(masks_dir, exist_ok=True)
-    os.makedirs(masked_images_dir, exist_ok=True)
-    
-    # Process each image with detections
-    mask_results = {}
-    processing_stats = {'images_processed': 0, 'masks_generated': 0, 'failed_masks': 0}
-    
-    print(f"Generating masks for images with wildlife detections...")
-    
-    # Process all images with detections from the JSON
-    images_with_detections = [(k, v) for k, v in detections.items() if v['detections']]
-    print(f"Processing {len(images_with_detections)} images with detections")
-    
-    for image_id, image_data in tqdm(images_with_detections):
-        if not image_data['detections']:
-            continue  # Skip images without detections
-        
-        # Get original image
-        original_index = image_data['original_index']
-        image = dataset[original_index]['image']
-        
-        # Use the highest confidence detection for this image
-        if not image_data['detections']:
-            continue
-            
-        # Sort detections by confidence and use the best one
-        best_detection = max(image_data['detections'], key=lambda x: x['confidence'])
-        
-        try:
-            # Generate mask for best detection with quality filtering
-            mask = generate_mask_from_bbox(
-                predictor, 
-                image, 
-                best_detection['bbox'],
-                pred_iou_thresh=0.8,
-                stability_score_thresh=0.9,
-                min_mask_region_area=500
-            )
-            
-            # Apply mask to create masked image
-            masked_image = apply_mask_to_image(image, mask)
-            
-            # Save with simple naming that maps to dataset index
-            masked_image_filename = f"{image_id}.png"  # Maps directly to dataset row
-            mask_filename = f"{image_id}_mask.npy"
-            
-            # Ensure PNG format with alpha channel (RGBA)
-            masked_image.save(os.path.join(masked_images_dir, masked_image_filename), 'PNG')
-            np.save(os.path.join(masks_dir, mask_filename), mask)
-            
-            # Store mask info
-            image_masks = [{
-                'bbox': best_detection['bbox'],
-                'confidence': best_detection['confidence'],
-                'mask_file': mask_filename,
-                'masked_image_file': masked_image_filename,
-                'mask_area': int(np.sum(mask)),
-                'image_area': mask.shape[0] * mask.shape[1],
-                'coverage_ratio': float(np.sum(mask)) / (mask.shape[0] * mask.shape[1])
-            }]
-            
-            processing_stats['masks_generated'] += 1
-            
-        except Exception as e:
-            print(f"Error generating mask for {image_id}: {e}")
-            processing_stats['failed_masks'] += 1
-            image_masks = []
-        
-        # Store results for this image
-        mask_results[image_id] = {
-            'original_index': original_index,
-            'individual_id': image_data['individual_id'],
-            'label': image_data['label'],
-            'date': image_data['date'],
-            'masks': image_masks,
-            'has_mask': len(image_masks) > 0
-        }
-        
-        processing_stats['images_processed'] += 1
-    
-    # Save mask results
-    mask_output_file = os.path.join(output_dir, 'mask_results.json')
-    final_mask_results = {
-        'mask_data': mask_results,
-        'processing_stats': processing_stats,
-        'model_info': {
-            'sam_model': 'vit_b',  # Default model type
-            'mask_format': 'numpy_binary_array'
-        },
-        'file_info': {
-            'masks_directory': masks_dir,
-            'masked_images_directory': masked_images_dir,
-            'timestamp': time.time()
-        }
-    }
-    
-    with open(mask_output_file, 'w') as f:
-        json.dump(final_mask_results, f, indent=2)
-    
-    return final_mask_results, mask_output_file
+def main(json_path: str, output_dir: str, kernel_size: int, batch_size: int = 8):
+    """
+    Main function to set up models, load data, and orchestrate batch image processing.
+    """
+    print("Starting the SAM-2 mask generation pipeline...")
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output will be saved to '{output_dir}/'")
+    print(f"Batch size: {batch_size}")
 
+    # Use infer_device for automatic device selection
+    device = infer_device()
+    print(f"Using device: {device}")
 
-def print_mask_summary(results):
-    """Print summary of mask generation results"""
-    stats = results['processing_stats']
-    mask_data = results['mask_data']
-    
-    print(f"\n" + "=" * 60)
-    print("SAM MASK GENERATION SUMMARY")
-    print("=" * 60)
-    print(f"Images processed: {stats['images_processed']}")
-    print(f"Masks generated: {stats['masks_generated']}")
-    print(f"Failed masks: {stats['failed_masks']}")
-    
-    if stats['masks_generated'] > 0:
-        # Calculate coverage statistics
-        coverage_ratios = []
-        for image_data in mask_data.values():
-            for mask_info in image_data['masks']:
-                coverage_ratios.append(mask_info['coverage_ratio'])
-        
-        if coverage_ratios:
-            avg_coverage = np.mean(coverage_ratios)
-            min_coverage = np.min(coverage_ratios)
-            max_coverage = np.max(coverage_ratios)
-            
-            print(f"Mask coverage statistics:")
-            print(f"  Average coverage: {avg_coverage:.3f} ({100*avg_coverage:.1f}% of image)")
-            print(f"  Min coverage: {min_coverage:.3f} ({100*min_coverage:.1f}% of image)")
-            print(f"  Max coverage: {max_coverage:.3f} ({100*max_coverage:.1f}% of image)")
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Generate segmentation masks using SAM')
-    parser.add_argument('--detections_file', type=str, 
-                       default='process_masks/results/detections/wildlife_detections.json',
-                       help='Path to MegaDetector detection results')
-    parser.add_argument('--output_dir', type=str, default='process_masks/results/masks',
-                       help='Directory to save mask results')
-    parser.add_argument('--device', type=str, choices=['gpu', 'cpu', 'mps'],
-                       default='mps', help='Device to use for SAM')
-    parser.add_argument('--model_type', type=str, choices=['vit_b', 'vit_l', 'vit_h'],
-                       default='vit_b', help='SAM model size (vit_b is fastest)')
-    
-    args = parser.parse_args()
-    
-    print("=" * 80)
-    print("SAM Mask Generation Pipeline")
-    print("=" * 80)
-    
-    # Check if detections file exists
-    if not os.path.exists(args.detections_file):
-        print(f"Error: Detections file not found: {args.detections_file}")
-        print("Please run 01_detect_wildlife.py first")
+    print("Loading the 'kdoherty/wolverines' dataset...")
+    try:
+        dataset = load_dataset("kdoherty/wolverines", split="train", trust_remote_code=True)
+        print("Dataset loaded successfully.")
+    except Exception as e:
+        print(f"Failed to load dataset. Error: {e}")
         return
+
+    print("Loading the Segment Anything 2.1 Model...")
+    try:
+        model_id = "facebook/sam2.1-hiera-base-plus"
+        model = Sam2Model.from_pretrained(model_id).to(device)
+        processor = Sam2Processor.from_pretrained(model_id)
+        print("SAM-2.1 model loaded.")
+    except Exception as e:
+        print(f"Failed to load SAM-2.1 model. Error: {e}")
+        return
+
+    print(f"Loading detection data from '{json_path}'...")
+    try:
+        with open(json_path, 'r') as f:
+            detection_data = json.load(f)
+        detections = detection_data.get("detections", {})
+        print("Detection data loaded.")
+    except FileNotFoundError:
+        print(f"Error: The file '{json_path}' was not found.")
+        return
+    except json.JSONDecodeError:
+        print(f"Error: The file '{json_path}' is not a valid JSON file.")
+        return
+
+    # Pre-create morphological kernel for efficiency
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     
-    # Set random seed
-    set_all_seeds(42)
+    # Filter valid detections
+    valid_items = [(k, v) for k, v in detections.items() 
+                   if v.get("detections") and v["original_index"] < len(dataset)]
     
-    # Load dataset
-    print("Loading wolverines dataset...")
-    train_dataset, test_dataset = load_wolverines_dataset()
-    dataset = train_dataset  # Use same dataset as detection step
+    print(f"Dataset contains {len(dataset)} images.")
+    print(f"JSON contains {len(detections)} total entries, {len(valid_items)} valid for processing.")
+
+    print("\nProcessing detections in batches...")
     
-    # Setup device
-    if args.device == "mps" and torch.backends.mps.is_available():
-        device = "mps"
-    elif args.device == "gpu" and torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device = "cpu"
-    
-    # Load SAM model
-    predictor = load_sam_model(args.model_type, device)
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Process detections to generate masks
-    print(f"\nStarting mask generation...")
-    start_time = time.time()
-    
-    results, output_file = process_detections(dataset, predictor, args.detections_file, args.output_dir)
-    
-    processing_time = time.time() - start_time
-    
-    # Print summary
-    print_mask_summary(results)
-    
-    print(f"\nMask generation completed in {processing_time/60:.1f} minutes")
-    print(f"Results saved to: {output_file}")
-    print(f"Next step: Run 03_update_dataset.py to add masks to HuggingFace dataset")
+    # Process in batches
+    for batch_start in tqdm(range(0, len(valid_items), batch_size), desc="Processing batches"):
+        batch_end = min(batch_start + batch_size, len(valid_items))
+        
+        # Prepare batch data
+        batch_images = []
+        batch_bboxes = []
+        batch_keys = []
+        batch_indices = []
+        
+        for i in range(batch_start, batch_end):
+            image_key, details = valid_items[i]
+            original_index = details["original_index"]
+            
+            try:
+                image = dataset[original_index]["image"].convert("RGB")
+                bbox = details["detections"][0]["bbox"]
+                
+                batch_images.append(image)
+                batch_bboxes.append(bbox)
+                batch_keys.append(image_key)
+                batch_indices.append(i)
+                
+            except Exception as e:
+                print(f"Error loading {image_key}: {e}")
+                continue
+        
+        if not batch_images:
+            continue
+        
+        # Process entire batch
+        try:
+            batch_masks = process_batch_masks(batch_images, batch_bboxes, model, processor, device, kernel)
+            
+            # Save results
+            for j, mask in enumerate(batch_masks):
+                if j < len(batch_keys):
+                    image_key = batch_keys[j]
+                    bbox = batch_bboxes[j]
+                    image = batch_images[j]
+                    
+                    # Apply mask and save
+                    output_path = f"{output_dir}/{image_key}_sam_crop.png"
+                    masked_crop = apply_mask_to_crop(image, bbox, mask)
+                    masked_crop.save(output_path)
+                    
+        except Exception as e:
+            print(f"Error processing batch {batch_start}-{batch_end}: {e}")
+            # Fallback to individual processing
+            for j in range(len(batch_images)):
+                try:
+                    image_key = batch_keys[j]
+                    bbox = batch_bboxes[j]
+                    image = batch_images[j]
+                    output_path = f"{output_dir}/{image_key}_sam_crop.png"
+                    
+                    # Process single image
+                    single_mask = process_batch_masks([image], [bbox], model, processor, device, kernel)[0]
+                    masked_crop = apply_mask_to_crop(image, bbox, single_mask)
+                    masked_crop.save(output_path)
+                    
+                except Exception as e:
+                    print(f"Error processing {batch_keys[j] if j < len(batch_keys) else 'unknown'}: {e}")
+
+    print(f"\nProcessing complete! Check the '{output_dir}' directory.")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Process images with SAM-2.1 using hybrid box-and-point prompts from a JSON file."
+    )
+    parser.add_argument(
+        "json_path", type=str, help="Path to the input JSON file with wildlife detections."
+    )
+    parser.add_argument(
+        "-o", "--output_dir", type=str, default="masked_and_cropped_wolverines",
+        help="Directory to save output images."
+    )
+    parser.add_argument(
+        "-k", "--kernel_size", type=int, default=50,
+        help="Size of the kernel for morphological closing to clean the mask."
+    )
+    parser.add_argument(
+        "-b", "--batch_size", type=int, default=8,
+        help="Number of images to process in parallel (default: 8)."
+    )
+    args = parser.parse_args()
+    main(args.json_path, args.output_dir, args.kernel_size, args.batch_size)
