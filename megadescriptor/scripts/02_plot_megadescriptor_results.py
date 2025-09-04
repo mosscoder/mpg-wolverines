@@ -160,7 +160,9 @@ def plot_results(metrics, performance_df, output_path):
         'pelage_abs': '#e74c3c'  # Red - pelage absent training
     }
     
-    # Plot F1 scores (top subplot)
+    # Plot F1 scores (top subplot) and collect all F1 values for y-axis scaling
+    all_f1_values = []
+    
     for approach in approaches:
         x_vals = []
         y_vals = []
@@ -186,6 +188,9 @@ def plot_results(metrics, performance_df, output_path):
                 y_vals.append(mean_f1)
                 ci_lower.append(mean_f1 - ci_range)
                 ci_upper.append(mean_f1 + ci_range)
+                
+                # Collect F1 values for y-axis scaling
+                all_f1_values.extend(f1_scores)
         
         if x_vals:
             # Plot F1 line with confidence interval
@@ -228,12 +233,21 @@ def plot_results(metrics, performance_df, output_path):
             ax2.fill_between(x_vals, ci_lower, ci_upper, 
                            color=colors[approach], alpha=0.2)
     
-    # Styling for F1 subplot
+    # Styling for F1 subplot with dynamic y-limits
     ax1.set_ylabel('Validation F1 Score (Macro)', fontsize=14)
     ax1.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
     ax1.set_xlim(0, 34)
-    ax1.set_ylim(0.0, 1.0)
-    ax1.set_yticks(np.arange(0.0, 1.1, 0.1))
+    
+    # Set dynamic y-limits based on data
+    if all_f1_values:
+        min_f1 = min(all_f1_values)
+        max_f1 = max(all_f1_values)
+        y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
+        y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
+        ax1.set_ylim(y_min, y_max)
+    else:
+        ax1.set_ylim(0.0, 1.0)  # Fallback
+    
     ax1.grid(True, alpha=0.3, axis='y', color='lightgray')
     ax1.legend(title="Training image quality:", loc='lower right')
     ax1.set_title('MegaDescriptor Nearest Neighbor Classification Performance', fontsize=16)

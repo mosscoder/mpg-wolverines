@@ -166,9 +166,10 @@ def plot_results(metrics, performance_df, output_path):
         'pelage_abs': '#e74c3c'  # Red - pelage absent training
     }
     
-    # Plot lines with confidence interval ribbons
+    # Plot lines with confidence interval ribbons and collect all F1 values for y-axis scaling
     legend_handles = []
     legend_labels = []
+    all_f1_values = []
     
     for approach in approaches:
         x_vals = []
@@ -196,6 +197,9 @@ def plot_results(metrics, performance_df, output_path):
                 y_vals.append(mean_acc)
                 ci_lower.append(mean_acc - ci_range)
                 ci_upper.append(mean_acc + ci_range)
+                
+                # Collect F1 values for y-axis scaling
+                all_f1_values.extend(accuracies)
         
         if x_vals:  # Only plot if we have data
             # Plot main line
@@ -223,12 +227,17 @@ def plot_results(metrics, performance_df, output_path):
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
     legend.set_title("Training image quality:", prop={'weight': 'bold'})
     
-    # Set fixed y-axis limits and gridlines
-    ax.set_ylim(0.0, 1.0)
+    # Set dynamic y-axis limits based on data
+    if all_f1_values:
+        min_f1 = min(all_f1_values)
+        max_f1 = max(all_f1_values)
+        y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
+        y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
+        ax.set_ylim(y_min, y_max)
+    else:
+        ax.set_ylim(0.0, 1.0)  # Fallback
     
-    # Add horizontal gridlines every 0.1
-    y_ticks = np.arange(0.0, 1.1, 0.1)
-    ax.set_yticks(y_ticks)
+    # Add horizontal gridlines
     ax.grid(True, alpha=0.3, axis='y', color='lightgray')
     
     plt.tight_layout()
