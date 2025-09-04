@@ -256,29 +256,6 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
     # Create custom dataloaders for crops-masks dataset
     from torch.utils.data import DataLoader, Dataset as TorchDataset
     
-    def apply_sam_mask(image, mask):
-        """Apply SAM mask to image by setting background to black"""
-        import numpy as np
-        from PIL import Image as PILImage
-        
-        # Convert to numpy arrays
-        img_np = np.array(image)
-        mask_np = np.array(mask.convert('L'))  # Convert mask to grayscale
-        
-        # Normalize mask to 0-1 range
-        if mask_np.max() > 1:
-            mask_np = mask_np / 255.0
-        
-        # Apply mask: set background pixels (mask=0) to black
-        if len(img_np.shape) == 3:  # RGB image
-            masked_img = img_np * mask_np[:, :, np.newaxis]
-        else:  # Grayscale image
-            masked_img = img_np * mask_np
-        
-        # Convert back to PIL Image
-        masked_img = masked_img.astype(np.uint8)
-        return PILImage.fromarray(masked_img)
-    
     class CropsMasksDataset(TorchDataset):
         def __init__(self, dataset, transform, individual_to_class, use_masks=False):
             self.dataset = dataset
@@ -292,19 +269,22 @@ def train_single_config(sample_size: int, approach: str, seed: int, args: argpar
         def __getitem__(self, idx):
             sample = self.dataset[idx]
             
-            # Get base image from MegaDetector crop
-            if sample['megadetector_image'] is None:
-                raise ValueError(f"No cropped image for sample {idx}")
-            
-            image = sample['megadetector_image']
-            
-            # Apply SAM mask if requested
+            # Choose image source based on use_masks flag
             if self.use_masks:
+                # Use SAM masked image (background already removed)
                 if sample['sam_mask'] is not None and sample['sam_status'] == 1:
-                    image = apply_sam_mask(image, sample['sam_mask'])
+                    image = sample['sam_mask']
+                    # Convert RGBA to RGB if needed
+                    if image.mode == 'RGBA':
+                        image = image.convert('RGB')
                 else:
-                    # Should not happen since we filtered for valid masks
-                    raise ValueError(f"No valid mask for sample {idx} in masked approach")
+                    raise ValueError(f"No valid SAM mask for sample {idx} in masked approach")
+            else:
+                # Use MegaDetector cropped image
+                if sample['megadetector_image'] is not None:
+                    image = sample['megadetector_image']
+                else:
+                    raise ValueError(f"No MegaDetector crop for sample {idx}")
             
             # Apply transforms
             image = self.transform(image)

@@ -91,30 +91,6 @@ def create_megadescriptor_transform():
     ])
 
 
-def apply_sam_mask(image, mask):
-    """Apply SAM mask to image by setting background to black"""
-    import numpy as np
-    from PIL import Image
-    
-    # Convert to numpy arrays
-    img_np = np.array(image)
-    mask_np = np.array(mask.convert('L'))  # Convert mask to grayscale
-    
-    # Normalize mask to 0-1 range
-    if mask_np.max() > 1:
-        mask_np = mask_np / 255.0
-    
-    # Apply mask: set background pixels (mask=0) to black
-    if len(img_np.shape) == 3:  # RGB image
-        masked_img = img_np * mask_np[:, :, np.newaxis]
-    else:  # Grayscale image
-        masked_img = img_np * mask_np
-    
-    # Convert back to PIL Image
-    masked_img = masked_img.astype(np.uint8)
-    return Image.fromarray(masked_img)
-
-
 def extract_features(dataset, model, transform, device, use_masks=False, batch_size=16):
     """Extract MegaDescriptor features for all samples in dataset"""
     model.eval()
@@ -124,7 +100,7 @@ def extract_features(dataset, model, transform, device, use_masks=False, batch_s
     pelage_labels = []
     
     print(f"Extracting features from {len(dataset)} samples...")
-    print(f"Using {'SAM masked images' if use_masks else 'cropped images'} for feature extraction")
+    print(f"Using {'SAM masked images (background removed)' if use_masks else 'MegaDetector cropped images'} for feature extraction")
     
     # Process in batches for memory efficiency
     for i in range(0, len(dataset), batch_size):
@@ -138,19 +114,23 @@ def extract_features(dataset, model, transform, device, use_masks=False, batch_s
         batch_pelage = []
         
         for sample in batch_samples:
-            # Get base image from MegaDetector crop
-            if sample['megadetector_image'] is None:
-                continue  # Skip samples without cropped images
-            
-            img = sample['megadetector_image']
-            
-            # Apply SAM mask if requested
+            # Choose image source based on use_masks flag
             if use_masks:
+                # Use SAM masked image (background already removed)
                 if sample['sam_mask'] is not None and sample['sam_status'] == 1:
-                    img = apply_sam_mask(img, sample['sam_mask'])
+                    img = sample['sam_mask']
+                    # Convert RGBA to RGB if needed
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
                 else:
                     # Skip samples without valid masks when masking is requested
                     continue
+            else:
+                # Use MegaDetector cropped image
+                if sample['megadetector_image'] is not None:
+                    img = sample['megadetector_image']
+                else:
+                    continue  # Skip samples without cropped images
                 
             img_tensor = transform(img)
             batch_images.append(img_tensor)
