@@ -28,35 +28,40 @@ from datasets import load_dataset
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
     """Map job index to list of (sample_size, approach, seed) tuples"""
     
-    # Experimental parameters - detection-filtered experiments
+    # Experimental parameters - detection-filtered experiments with masked variants
     sample_sizes = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]  # 16 sizes
-    approaches = ['pelage', 'pelage_abs']
+    approaches = ['pelage', 'pelage_abs', 'pelage_masked', 'pelage_abs_masked']
     seeds = [0, 1, 2, 3, 4, 5, 6, 7]
     
-    # Generate all combinations: 16 sizes × 2 approaches × 8 seeds = 256 total
+    # Generate all combinations: 16 sizes × 4 approaches × 8 seeds = 512 total
     all_combinations = []
     for sample_size in sample_sizes:
         for approach in approaches:
             for seed in seeds:
                 all_combinations.append((sample_size, approach, seed))
     
-    total_combinations = len(all_combinations)  # 256 total
+    total_combinations = len(all_combinations)  # 512 total
     
     # Handle case where job_idx exceeds available jobs
     if job_idx >= max_jobs:
         return []
     
-    # Distribute 256 combinations across 24 jobs
-    # Jobs 0-15: 11 configs each (176 total)
-    # Jobs 16-23: 10 configs each (80 total)
-    if job_idx < 16:
-        configs_per_job = 11
-        start_idx = job_idx * 11
-        end_idx = start_idx + 11
+    # Distribute 512 combinations across 24 jobs
+    # Jobs 0-7: 22 configs each (176 total)
+    # Jobs 8-15: 21 configs each (168 total) 
+    # Jobs 16-23: 21 configs each (168 total)
+    if job_idx < 8:
+        configs_per_job = 22
+        start_idx = job_idx * 22
+        end_idx = start_idx + 22
+    elif job_idx < 16:
+        configs_per_job = 21
+        start_idx = 176 + (job_idx - 8) * 21
+        end_idx = start_idx + 21
     else:
-        configs_per_job = 10
-        start_idx = 176 + (job_idx - 16) * 10
-        end_idx = start_idx + 10
+        configs_per_job = 21
+        start_idx = 344 + (job_idx - 16) * 21
+        end_idx = start_idx + 21
     
     if end_idx <= total_combinations:
         return all_combinations[start_idx:end_idx]
@@ -86,7 +91,31 @@ def create_megadescriptor_transform():
     ])
 
 
-def extract_features(dataset, model, transform, device, batch_size=16, use_crops=True):
+def apply_sam_mask(image, mask):
+    """Apply SAM mask to image by setting background to black"""
+    import numpy as np
+    from PIL import Image
+    
+    # Convert to numpy arrays
+    img_np = np.array(image)
+    mask_np = np.array(mask.convert('L'))  # Convert mask to grayscale
+    
+    # Normalize mask to 0-1 range
+    if mask_np.max() > 1:
+        mask_np = mask_np / 255.0
+    
+    # Apply mask: set background pixels (mask=0) to black
+    if len(img_np.shape) == 3:  # RGB image
+        masked_img = img_np * mask_np[:, :, np.newaxis]
+    else:  # Grayscale image
+        masked_img = img_np * mask_np
+    
+    # Convert back to PIL Image
+    masked_img = masked_img.astype(np.uint8)
+    return Image.fromarray(masked_img)
+
+
+def extract_features(dataset, model, transform, device, use_masks=False, batch_size=16):
     """Extract MegaDescriptor features for all samples in dataset"""
     model.eval()
     features = []
@@ -95,7 +124,7 @@ def extract_features(dataset, model, transform, device, batch_size=16, use_crops
     pelage_labels = []
     
     print(f"Extracting features from {len(dataset)} samples...")
-    print(f"Using {'cropped images' if use_crops else 'SAM masks'} for feature extraction")
+    print(f"Using {'SAM masked images' if use_masks else 'cropped images'} for feature extraction")
     
     # Process in batches for memory efficiency
     for i in range(0, len(dataset), batch_size):
@@ -109,14 +138,19 @@ def extract_features(dataset, model, transform, device, batch_size=16, use_crops
         batch_pelage = []
         
         for sample in batch_samples:
-            # Use cropped images or SAM masks based on use_crops flag
-            if use_crops and sample['megadetector_image'] is not None:
-                img = sample['megadetector_image']
-            elif not use_crops and sample['sam_mask'] is not None:
-                img = sample['sam_mask']
-            else:
-                # Skip samples without the required image type
-                continue
+            # Get base image from MegaDetector crop
+            if sample['megadetector_image'] is None:
+                continue  # Skip samples without cropped images
+            
+            img = sample['megadetector_image']
+            
+            # Apply SAM mask if requested
+            if use_masks:
+                if sample['sam_mask'] is not None and sample['sam_status'] == 1:
+                    img = apply_sam_mask(img, sample['sam_mask'])
+                else:
+                    # Skip samples without valid masks when masking is requested
+                    continue
                 
             img_tensor = transform(img)
             batch_images.append(img_tensor)
@@ -188,14 +222,28 @@ def create_temporal_split_dataset(dataset, individuals, sample_size, approach, s
     for i, sample in enumerate(dataset):
         individual_id = sample['id']
         if individual_id in individuals:
-            # Apply filtering based on approach (ALL require megadetector_status == 1)
-            if approach == 'pelage' and sample['pelage'] == 1:
-                # For pelage==1: only include samples with detections
-                if sample['megadetector_status'] == 1:
+            # Base filtering: ALL approaches require megadetector_status == 1
+            if sample['megadetector_status'] != 1:
+                continue
+                
+            # Apply pelage filtering based on approach
+            base_approach = approach.replace('_masked', '')  # Remove masked suffix
+            
+            if base_approach == 'pelage' and sample['pelage'] == 1:
+                # For pelage approaches: clear pelage markings
+                # Additional mask requirement for masked variants
+                if 'masked' in approach:
+                    if sample['sam_status'] == 1:  # Require valid mask
+                        individual_samples[individual_id].append((i, sample))
+                else:
                     individual_samples[individual_id].append((i, sample))
-            elif approach == 'pelage_abs' and sample['pelage'] == 0:
-                # For pelage==0: also require detections for consistency
-                if sample['megadetector_status'] == 1:
+            elif base_approach == 'pelage_abs' and sample['pelage'] == 0:
+                # For pelage_abs approaches: obscured pelage markings
+                # Additional mask requirement for masked variants
+                if 'masked' in approach:
+                    if sample['sam_status'] == 1:  # Require valid mask
+                        individual_samples[individual_id].append((i, sample))
+                else:
                     individual_samples[individual_id].append((i, sample))
     
     print(f"Samples found per individual (after filtering):")
@@ -315,17 +363,20 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
     print(f"Using device: {device}")
     print(f"Model: MegaDescriptor-L-384")
     
+    # Determine if we should use masks
+    use_masks = 'masked' in approach
+    
     # Extract features
     start_time = time.time()
     
     print("Extracting training features...")
     train_features, train_labels, train_ids, train_pelage = extract_features(
-        ind_train_dataset, model, transform, device, batch_size=16
+        ind_train_dataset, model, transform, device, use_masks=use_masks, batch_size=16
     )
     
     print("Extracting validation features...")
     val_features, val_labels, val_ids, val_pelage = extract_features(
-        ind_val_dataset, model, transform, device, batch_size=16
+        ind_val_dataset, model, transform, device, use_masks=use_masks, batch_size=16
     )
     
     feature_time = time.time() - start_time
@@ -423,7 +474,8 @@ def evaluate_single_config(sample_size: int, approach: str, seed: int, args: arg
             'model': 'MegaDescriptor-L-384',
             'classifier': 'nearest_neighbor_cosine',
             'approach': approach,
-            'approach_details': f'Temporal split approach: {approach} (uses crops-masks config with detection filtering)',
+            'approach_details': f'Temporal split approach: {approach} (uses crops-masks config with detection filtering{" and SAM masking" if use_masks else ""})',
+            'uses_sam_masks': use_masks,
             'dataset_config': 'crops-masks',
             'feature_dim': train_features.shape[1] if len(train_features) > 0 else 0,
             'batch_size': 16,

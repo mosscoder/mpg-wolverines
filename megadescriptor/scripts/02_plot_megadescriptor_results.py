@@ -152,12 +152,30 @@ def plot_results(metrics, performance_df, output_path):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage', 'pelage_abs']
+    approaches = ['pelage', 'pelage_abs', 'pelage_masked', 'pelage_abs_masked']
     
-    # Colors for training approaches
+    # Colors and styles for training approaches
     colors = {
-        'pelage': '#27ae60',     # Green - pelage visible training
-        'pelage_abs': '#e74c3c'  # Red - pelage absent training
+        'pelage': '#27ae60',           # Green - pelage visible
+        'pelage_abs': '#e74c3c',       # Red - pelage absent
+        'pelage_masked': '#27ae60',    # Green - pelage visible masked
+        'pelage_abs_masked': '#e74c3c' # Red - pelage absent masked
+    }
+    
+    # Line styles to distinguish masked from unmasked
+    line_styles = {
+        'pelage': '-',           # Solid line - unmasked
+        'pelage_abs': '-',       # Solid line - unmasked
+        'pelage_masked': '--',   # Dashed line - masked
+        'pelage_abs_masked': '--' # Dashed line - masked
+    }
+    
+    # Markers to distinguish masked from unmasked
+    markers = {
+        'pelage': 'o',           # Circle - unmasked
+        'pelage_abs': 'o',       # Circle - unmasked
+        'pelage_masked': 's',    # Square - masked
+        'pelage_abs_masked': 's' # Square - masked
     }
     
     # Plot F1 scores (top subplot) and collect CI bounds for y-axis scaling
@@ -199,7 +217,8 @@ def plot_results(metrics, performance_df, output_path):
         if x_vals:
             # Plot F1 line with confidence interval
             ax1.plot(x_vals, y_vals, color=colors[approach], linewidth=2.5, 
-                    marker='o', markersize=8, label=approach)
+                    marker=markers[approach], markersize=8, 
+                    linestyle=line_styles[approach], label=approach)
             ax1.fill_between(x_vals, ci_lower, ci_upper, 
                            color=colors[approach], alpha=0.2)
     
@@ -233,7 +252,8 @@ def plot_results(metrics, performance_df, output_path):
         if x_vals:
             # Plot similarity line with confidence interval
             ax2.plot(x_vals, y_vals, color=colors[approach], linewidth=2.5, 
-                    marker='s', markersize=8, label=approach)
+                    marker=markers[approach], markersize=8, 
+                    linestyle=line_styles[approach], label=approach)
             ax2.fill_between(x_vals, ci_lower, ci_upper, 
                            color=colors[approach], alpha=0.2)
     
@@ -253,7 +273,25 @@ def plot_results(metrics, performance_df, output_path):
         ax1.set_ylim(0.0, 1.0)  # Fallback
     
     ax1.grid(True, alpha=0.3, axis='y', color='lightgray')
-    ax1.legend(title="Training image quality:", loc='lower right')
+    
+    # Custom legend with better labels
+    legend_labels = {
+        'pelage': 'Clear pelage (unmasked)',
+        'pelage_abs': 'Obscured pelage (unmasked)', 
+        'pelage_masked': 'Clear pelage (SAM masked)',
+        'pelage_abs_masked': 'Obscured pelage (SAM masked)'
+    }
+    
+    # Only show legend entries for approaches that have data
+    handles, labels = ax1.get_legend_handles_labels()
+    filtered_handles = []
+    filtered_labels = []
+    for handle, label in zip(handles, labels):
+        if label in legend_labels:
+            filtered_handles.append(handle)
+            filtered_labels.append(legend_labels[label])
+    
+    ax1.legend(filtered_handles, filtered_labels, title="Training approach:", loc='lower right')
     ax1.set_title('MegaDescriptor Nearest Neighbor Classification Performance', fontsize=16)
     
     # Styling for similarity subplot
@@ -262,7 +300,17 @@ def plot_results(metrics, performance_df, output_path):
     ax2.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
     ax2.set_xlim(0, 34)
     ax2.grid(True, alpha=0.3, axis='y', color='lightgray')
-    ax2.legend(title="Training image quality:", loc='lower right')
+    
+    # Use same filtered legend for similarity plot
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    filtered_handles2 = []
+    filtered_labels2 = []
+    for handle, label in zip(handles2, labels2):
+        if label in legend_labels:
+            filtered_handles2.append(handle)
+            filtered_labels2.append(legend_labels[label])
+    
+    ax2.legend(filtered_handles2, filtered_labels2, title="Training approach:", loc='lower right')
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')

@@ -158,12 +158,30 @@ def plot_results(metrics, performance_df, output_path):
     fig, ax = plt.subplots(figsize=(12, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage', 'pelage_abs']
+    approaches = ['pelage', 'pelage_abs', 'pelage_masked', 'pelage_abs_masked']
     
-    # Colors for training approaches
+    # Colors and styles for training approaches
     colors = {
-        'pelage': '#27ae60',     # Green - pelage visible training
-        'pelage_abs': '#e74c3c'  # Red - pelage absent training
+        'pelage': '#27ae60',           # Green - pelage visible
+        'pelage_abs': '#e74c3c',       # Red - pelage absent
+        'pelage_masked': '#27ae60',    # Green - pelage visible masked
+        'pelage_abs_masked': '#e74c3c' # Red - pelage absent masked
+    }
+    
+    # Line styles to distinguish masked from unmasked
+    line_styles = {
+        'pelage': '-',           # Solid line - unmasked
+        'pelage_abs': '-',       # Solid line - unmasked
+        'pelage_masked': '--',   # Dashed line - masked
+        'pelage_abs_masked': '--' # Dashed line - masked
+    }
+    
+    # Markers to distinguish masked from unmasked
+    markers = {
+        'pelage': 'o',           # Circle - unmasked
+        'pelage_abs': 'o',       # Circle - unmasked
+        'pelage_masked': 's',    # Square - masked
+        'pelage_abs_masked': 's' # Square - masked
     }
     
     # Plot lines with confidence interval ribbons and collect CI bounds for y-axis scaling
@@ -208,17 +226,23 @@ def plot_results(metrics, performance_df, output_path):
         if x_vals:  # Only plot if we have data
             # Plot main line
             line = ax.plot(x_vals, y_vals, color=colors[approach], linewidth=2.5, 
-                          marker='o', markersize=8, label=approach)[0]
+                          marker=markers[approach], markersize=8, 
+                          linestyle=line_styles[approach], label=approach)[0]
             
             # Add confidence interval ribbon
             ax.fill_between(x_vals, ci_lower, ci_upper, 
                            color=colors[approach], alpha=0.2)
             
             legend_handles.append(line)
+            # Add descriptive labels
             if approach == 'pelage':
-                legend_labels.append("Pelage clearly visible")
-            else:
-                legend_labels.append("Pelage obscured or absent")
+                legend_labels.append("Clear pelage (unmasked)")
+            elif approach == 'pelage_abs':
+                legend_labels.append("Obscured pelage (unmasked)")
+            elif approach == 'pelage_masked':
+                legend_labels.append("Clear pelage (SAM masked)")
+            elif approach == 'pelage_abs_masked':
+                legend_labels.append("Obscured pelage (SAM masked)")
     
     # Styling
     ax.set_xlabel('Image Count per Individual', fontsize=14)
@@ -229,7 +253,7 @@ def plot_results(metrics, performance_df, output_path):
     ax.set_xlim(0, 34)
     # Add legend with title
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
-    legend.set_title("Training image quality:", prop={'weight': 'bold'})
+    legend.set_title("Training approach:", prop={'weight': 'bold'})
     
     # Set dynamic y-axis limits based on confidence interval bounds
     if all_ci_lower and all_ci_upper:
