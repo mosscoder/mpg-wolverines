@@ -12,12 +12,12 @@ import time
 
 
 def compute_metrics(predictions: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
-    """Compute classification metrics"""
+    """Compute classification metrics using macro averaging for binary classification"""
     return {
         'accuracy': accuracy_score(labels, predictions),
         'f1_score': f1_score(labels, predictions, average='macro'),
-        'precision': precision_score(labels, predictions, average='weighted', zero_division=0),
-        'recall': recall_score(labels, predictions, average='weighted', zero_division=0)
+        'precision': precision_score(labels, predictions, average='macro', zero_division=0),
+        'recall': recall_score(labels, predictions, average='macro', zero_division=0)
     }
 
 

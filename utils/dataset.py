@@ -34,10 +34,28 @@ class WolverinesDataset(Dataset):
         return image, label
 
 
+def remap_pelage_labels(example):
+    """
+    Remap pelage labels for binary classification: 2 vs all
+    - Original 2 (Full) → 1 (positive class)  
+    - Original 0,1 (None/Partial) → 0 (negative class)
+    """
+    if example['label'] == 2:  # Full pelage
+        example['label'] = 1
+    else:  # None (0) or Partial (1) 
+        example['label'] = 0
+    return example
+
+
 def load_wolverines_dataset():
-    """Load the wolverines dataset from HuggingFace using pelage config"""
+    """Load the wolverines dataset from HuggingFace using pelage config with label remapping"""
     dataset = load_dataset("kdoherty/wolverines", name="pelage", split="train")
     test_dataset = load_dataset("kdoherty/wolverines", name="pelage", split="test")
+    
+    # Remap labels for binary classification (2 vs all)
+    dataset = dataset.map(remap_pelage_labels)
+    test_dataset = test_dataset.map(remap_pelage_labels)
+    
     return dataset, test_dataset
 
 
