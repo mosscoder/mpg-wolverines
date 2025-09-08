@@ -38,41 +38,27 @@ def get_optimal_params_from_lr_sweep():
     import numpy as np
     from collections import defaultdict
     
-    # Get best learning rate and optimal epochs from script 00 (proper cross-validation)
-    best_lr = 0.001  # Default fallback
+    # Get optimal epochs from script 00 (5-fold CV, fixed LR=0.001)
+    best_lr = 0.001  # Fixed learning rate  
     optimal_epochs = 30  # Default fallback
-    results_pattern = "results/00_learning_rate/*.json"
+    results_pattern = "results/00_best_epoch/*.json"
     result_files = glob.glob(results_pattern)
     
     if result_files:
-        # Group results by learning rate
-        lr_groups = defaultdict(list)
+        # Process 5-fold CV results (all with same LR=0.001)
+        all_val_histories = []
         
         for file_path in result_files:
             try:
                 with open(file_path, 'r') as f:
                     result = json.load(f)
-                lr = result.get('learning_rate')
-                if lr is not None and 'val_history' in result:
-                    lr_groups[lr].append(result)
-            except (json.JSONDecodeError, KeyError):
-                continue
-        
-        # Find best learning rate using proper cross-validation
-        best_cv_f1 = 0
-        best_cv_epochs = 30
-        
-        for lr, lr_results in lr_groups.items():
-            # Collect validation histories for this learning rate
-            all_val_histories = []
-            for result in lr_results:
                 if 'val_history' in result and result['val_history']:
                     val_f1s = [epoch.get('f1_score', 0) for epoch in result['val_history']]
                     all_val_histories.append(val_f1s)
-            
-            if not all_val_histories:
+            except (json.JSONDecodeError, KeyError):
                 continue
-            
+        
+        if all_val_histories:
             # Find max epochs across all folds
             max_epochs = max(len(history) for history in all_val_histories)
             
@@ -88,19 +74,16 @@ def get_optimal_params_from_lr_sweep():
                 epoch_mean_f1s.append(np.mean(fold_f1s))
             
             # Find the epoch with best mean F1 across folds
-            lr_best_f1 = max(epoch_mean_f1s)
-            lr_best_epoch = epoch_mean_f1s.index(lr_best_f1) + 1  # Convert to 1-indexed
+            best_cv_f1 = max(epoch_mean_f1s)
+            optimal_epochs = epoch_mean_f1s.index(best_cv_f1) + 1  # Convert to 1-indexed
             
-            # Track overall best across learning rates
-            if lr_best_f1 > best_cv_f1:
-                best_cv_f1 = lr_best_f1
-                best_lr = lr
-                optimal_epochs = lr_best_epoch
-        
-        print(f"Best learning rate from cross-validation: {best_lr} (F1: {best_cv_f1:.4f})")
-        print(f"Optimal epochs from cross-validation: {optimal_epochs}")
+            print(f"Fixed learning rate: {best_lr}")
+            print(f"Best cross-validation F1: {best_cv_f1:.4f}")
+            print(f"Optimal epochs from cross-validation: {optimal_epochs}")
+        else:
+            print("No valid fold results found, using defaults")
     else:
-        print("No learning rate results found, using defaults")
+        print("No epoch optimization results found, using defaults")
     
     optimal_params = {
         # Fixed parameters
@@ -118,8 +101,8 @@ def get_optimal_params_from_lr_sweep():
     print("OPTIMAL PARAMETERS FOR PRODUCTION MODEL:")
     print(f"Resize size (fixed): 224")
     print(f"Batch size (fixed): 32") 
-    print(f"Learning rate (from script 00, CV): {best_lr}")
-    print(f"Optimal epochs (from CV): {optimal_epochs}")
+    print(f"Learning rate (fixed): {best_lr}")
+    print(f"Optimal epochs (from 5-fold CV): {optimal_epochs}")
     print("=" * 60)
     
     return optimal_params

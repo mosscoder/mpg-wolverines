@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Script 00: Learning Rate Sweep
-Sweeps over different learning rates using 5-fold cross-validation.
-Records performance at each epoch.
+Script 00: Find Best Epoch
+Finds optimal number of training epochs using 5-fold cross-validation.
+Fixed learning rate at 0.001, records performance at each epoch.
 Uses fixed 224x224 resize and batch size 32.
 """
 
@@ -30,39 +30,18 @@ from utils.training import (
 )
 
 
-def get_job_combinations(job_idx: int, max_jobs: int = 8) -> list:
-    """Map job index to list of (lr, fold) tuples - supports up to 8 jobs"""
+def get_job_combinations(job_idx: int, max_jobs: int = 5) -> list:
+    """Map job index to fold number - one job per fold"""
     
-    # Parameters from CLAUDE.md - constrained to 5 learning rates
-    learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01]
+    # Simple: 5 folds, 5 jobs
     folds = [0, 1, 2, 3, 4]  # 5-fold CV
     
-    # Generate all combinations: 5 LRs × 5 folds = 25 total
-    all_combinations = []
-    for lr in learning_rates:
-        for fold in folds:
-            all_combinations.append((lr, fold))
-    
-    total_combinations = len(all_combinations)  # 25 total
-    
     # Handle case where job_idx exceeds available jobs
-    if job_idx >= max_jobs:
+    if job_idx >= len(folds):
         return []
     
-    # Distribute 25 combinations across 8 jobs
-    # Jobs 0-6: 3 configs each (21 configs)
-    # Job 7: 4 configs (4 configs)
-    if job_idx < 7:
-        # Jobs 0-6 get 3 combinations each
-        start_idx = job_idx * 3
-        end_idx = start_idx + 3
-        return all_combinations[start_idx:end_idx]
-    elif job_idx == 7:
-        # Job 7 gets remaining 4 combinations
-        start_idx = 21
-        return all_combinations[start_idx:]
-    else:
-        return []
+    # One fold per job
+    return [folds[job_idx]]
 
 
 
@@ -81,19 +60,19 @@ def get_fixed_params():
     return params
 
 
-def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
-    """Train one LR/fold configuration and return results"""
+def train_single_config(fold: int, args: argparse.Namespace) -> dict:
+    """Train one fold configuration with fixed LR=0.001 and return results"""
     
-    # Set seed (consistent across all LR experiments for this fold)
+    # Set seed (consistent for this fold)
     seed = fold  # Use fold as seed for consistency
     set_all_seeds(seed)
     
-    # Get fixed parameters
+    # Get fixed parameters with locked learning rate
     params = get_fixed_params()
-    params['learning_rate'] = lr
+    lr = 0.001  # Fixed learning rate
     
     # Create output filename
-    filename = f"lr={lr:.6f}_fold={fold}.json"
+    filename = f"fold={fold}.json"
     output_path = os.path.join(args.output_dir, filename)
     
     # Check if should skip
@@ -101,7 +80,7 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
         print(f"Skipping existing result: {filename}")
         return None
     
-    print(f"Training: lr={lr}, fold={fold}")
+    print(f"Training: fold={fold}, lr={lr:.3f} (fixed)")
     
     # Load dataset
     print("Loading dataset...")
@@ -183,13 +162,13 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Sweep over learning rates with 5-fold CV')
+    parser = argparse.ArgumentParser(description='Find best epoch with 5-fold CV (fixed LR=0.001)')
     parser.add_argument('--idx', type=int, required=True, 
-                       help='Job index (0-7)')
+                       help='Job index (0-4, one per fold)')
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                       default='results/00_learning_rate',
+                       default='results/00_best_epoch',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                        default='gpu', help='Device to use for training')
@@ -197,42 +176,35 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print(f"Learning Rate Sweep - Job {args.idx}")
+    print(f"Best Epoch Search - Job {args.idx}")
     print("=" * 60)
     
-    # Get combinations for this job
-    combinations = get_job_combinations(args.idx)
+    # Get fold for this job
+    folds = get_job_combinations(args.idx)
     
-    if not combinations:
-        print(f"No combinations for job {args.idx}")
+    if not folds:
+        print(f"No fold assigned for job {args.idx}")
         return
     
-    print(f"Processing {len(combinations)} configurations:")
-    for lr, fold in combinations:
-        print(f"  LR: {lr}, Fold: {fold}")
+    fold = folds[0]  # One fold per job
+    print(f"Processing fold {fold} with fixed LR=0.001")
     
-    # Train each combination
-    results_summary = []
-    for i, (lr, fold) in enumerate(combinations):
-        print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
-        try:
-            result = train_single_config(lr, fold, args)
-            if result:
-                results_summary.append(result)
-        except Exception as e:
-            print(f"Error training LR={lr}, Fold={fold}: {e}")
-            continue
+    # Train this fold
+    print(f"\n--- Training Fold {fold} ---")
+    try:
+        result = train_single_config(fold, args)
+    except Exception as e:
+        print(f"Error training Fold={fold}: {e}")
+        return
     
     print(f"\n" + "=" * 60)
     print(f"Job {args.idx} completed!")
-    print(f"Successfully processed {len(results_summary)} configurations")
     
-    if results_summary:
-        avg_f1 = sum(r['best_val_f1'] for r in results_summary) / len(results_summary)
-        best_f1 = max(r['best_val_f1'] for r in results_summary)
-        print(f"Average best validation F1: {avg_f1:.4f}")
-        print(f"Best validation F1: {best_f1:.4f}")
+    if result:
+        print(f"Fold {fold} - Best validation F1: {result['best_val_f1']:.4f}")
         print(f"Results saved to: {args.output_dir}")
+    else:
+        print("No results generated")
 
 
 if __name__ == "__main__":

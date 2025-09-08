@@ -297,8 +297,8 @@ def main():
                        default='figures',
                        help='Output directory for figures')
     parser.add_argument('--experiments', nargs='+',
-                       choices=['00_learning_rate', '01_test', '02_production'],
-                       default=['00_learning_rate', '01_test', '02_production'],
+                       choices=['00_best_epoch', '01_test', '02_production'],
+                       default=['00_best_epoch', '01_test', '02_production'],
                        help='Which experiments to create figures for')
     
     args = parser.parse_args()
@@ -315,9 +315,9 @@ def main():
     sns.set_palette("husl")
     
     # Generate figures for each experiment
-    if '00_learning_rate' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '00_learning_rate')
-        output_path = os.path.join(args.output_dir, '00_learning_rate_results.png')
+    if '00_best_epoch' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '00_best_epoch')
+        output_path = os.path.join(args.output_dir, '00_best_epoch_results.png')
         make_learning_rate_figure(results_dir, output_path)
     
     if '01_test' in args.experiments:
