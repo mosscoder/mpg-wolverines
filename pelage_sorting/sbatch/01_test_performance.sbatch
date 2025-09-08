@@ -6,10 +6,9 @@
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --array=0-23
 #SBATCH --requeue
-#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A.err
 #SBATCH --job-name=01_test_performance
 
 # Change to project base directory
@@ -35,7 +34,7 @@ python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
 # Run script (using relative paths)
 python scripts/01_test_performance.py \
-    --idx ${SLURM_ARRAY_TASK_ID} \
+    --idx 0 \
     --output_dir results/01_test \
     --device gpu
 

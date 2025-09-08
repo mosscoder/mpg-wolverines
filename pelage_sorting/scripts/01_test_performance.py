@@ -191,8 +191,8 @@ def train_final_model(args: argparse.Namespace) -> dict:
         'optimal_params': optimal_params,
         'training_time': training_time,
         'dataset_stats': {
-            'train_samples': len(train_images),
-            'test_samples': len(test_images),
+            'train_samples': len(train_dataset),
+            'test_samples': len(test_dataset),
             'train_label_dist': [train_labels.count(0), train_labels.count(1)],
             'test_label_dist': [test_labels.count(0), test_labels.count(1)]
         },

@@ -175,10 +175,9 @@ def train_production_model(args: argparse.Namespace) -> dict:
     # Create transforms with resize and normalization
     transform = get_standard_transform(resize_size=optimal_params['resize_size'])
     
-    # Create dataloader for combined dataset (we'll use it as both train and val for final metrics)
-    # Note: For production, we train on all data without validation split
+    # Create dataloader for production training on all data
     train_loader, val_loader = create_dataloaders(
-        combined_dataset, combined_dataset,  # Same dataset for train and val
+        combined_dataset, combined_dataset,
         transform, transform, optimal_params['batch_size']
     )
     
@@ -204,7 +203,7 @@ def train_production_model(args: argparse.Namespace) -> dict:
     
     results = trainer.train(
         train_loader=train_loader,
-        val_loader=val_loader,  # Using same data for final metrics
+        val_loader=val_loader,
         epochs=optimal_params['optimal_epochs'],
         verbose=True
     )
@@ -235,7 +234,7 @@ def train_production_model(args: argparse.Namespace) -> dict:
         },
         # Include complete epoch-by-epoch history
         'train_history': trainer.train_history,
-        'val_history': trainer.val_history,  # Same as train for production
+        'val_history': trainer.val_history,
         'timestamp': time.time()
     }
     
