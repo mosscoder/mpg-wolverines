@@ -135,9 +135,12 @@ class ModelTrainer:
                 best_val_f1 = val_metrics['f1_score']
             
             if verbose:
-                print(f"Epoch {epoch+1:3d}/{epochs}: "
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                print(f"[{timestamp}] Epoch {epoch+1:3d}/{epochs}: "
                       f"Train Loss: {train_metrics['loss']:.4f}, Train F1: {train_metrics['f1_score']:.4f} | "
-                      f"Val Loss: {val_metrics['loss']:.4f}, Val F1: {val_metrics['f1_score']:.4f}")
+                      f"Val Loss: {val_metrics['loss']:.4f}, Val F1: {val_metrics['f1_score']:.4f}", 
+                      flush=True)
         
         training_time = time.time() - start_time
         

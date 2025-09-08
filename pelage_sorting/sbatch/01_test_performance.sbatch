@@ -26,6 +26,9 @@ echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 source ~/.bashrc
 mamba activate wolverines
 
+# Ensure unbuffered Python output for real-time logs
+export PYTHONUNBUFFERED=1
+
 # Verify GPU is available
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
