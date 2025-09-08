@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Script 01: Learning Rate Sweep
+Script 00: Learning Rate Sweep
 Sweeps over different learning rates using 5-fold cross-validation.
 Records performance at each epoch.
-Uses best resize size from script 00.
+Uses fixed 224x224 resize and batch size 32.
 """
 
 import sys
@@ -23,7 +23,7 @@ from utils.dataset import (
     load_wolverines_dataset, create_kfold_splits, 
     create_dataloaders, set_all_seeds
 )
-from utils.preprocessing import get_standard_transform, get_best_resize_size
+from utils.preprocessing import get_standard_transform
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, save_results, check_result_exists
@@ -67,23 +67,18 @@ def get_job_combinations(job_idx: int, max_jobs: int = 8) -> list:
 
 
 
-def get_best_params_from_previous_experiments():
-    """Load best parameters from script 00 (resize size)"""
+def get_fixed_params():
+    """Get fixed parameters for learning rate sweep"""
     
-    # Get best resize size from script 00
-    best_resize = get_best_resize_size()
-    
-    best_params = {
-        # From script 00
-        'resize_size': best_resize,
-        
-        # Fixed for this experiment
-        'batch_size': 16,
-        'epochs': 50,  # Longer training for LR sweep
+    params = {
+        # Fixed parameters
+        'resize_size': 224,  # Fixed 224x224 for DINOv3 efficiency
+        'batch_size': 32,    # Updated batch size
+        'epochs': 50,        # Longer training for LR sweep
         'weight_decay': 0.01
     }
     
-    return best_params
+    return params
 
 
 def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
@@ -93,9 +88,9 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     seed = fold  # Use fold as seed for consistency
     set_all_seeds(seed)
     
-    # Get best parameters from previous experiments
-    best_params = get_best_params_from_previous_experiments()
-    best_params['learning_rate'] = lr
+    # Get fixed parameters
+    params = get_fixed_params()
+    params['learning_rate'] = lr
     
     # Create output filename
     filename = f"lr={lr:.6f}_fold={fold}.json"
@@ -126,12 +121,12 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
     # Create transforms with resize and normalization
-    transform = get_standard_transform(resize_size=best_params['resize_size'])
+    transform = get_standard_transform(resize_size=params['resize_size'])
     
     # Create dataloaders using shared utility
     train_loader, val_loader = create_dataloaders(
         train_dataset, val_dataset,
-        transform, transform, best_params['batch_size']
+        transform, transform, params['batch_size']
     )
     
     # Create model
@@ -143,7 +138,7 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
         model=model,
         device=device,
         learning_rate=lr,
-        weight_decay=best_params['weight_decay']
+        weight_decay=params['weight_decay']
     )
     
     # Train with detailed epoch tracking
@@ -151,7 +146,7 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
     results = trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
-        epochs=best_params['epochs'],
+        epochs=params['epochs'],
         verbose=True
     )
     training_time = time.time() - start_time
@@ -162,7 +157,7 @@ def train_single_config(lr: float, fold: int, args: argparse.Namespace) -> dict:
         'learning_rate': lr,
         'fold': fold,
         'seed': seed,
-        'best_params': best_params,
+        'params': params,
         'training_time': training_time,
         'epochs_trained': results['epochs_trained'],
         'best_val_f1': results['best_val_f1'],
@@ -194,7 +189,7 @@ def main():
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                       default='results/02_learning_rate',
+                       default='results/00_learning_rate',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                        default='gpu', help='Device to use for training')

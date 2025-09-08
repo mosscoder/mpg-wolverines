@@ -1,24 +1,24 @@
 #!/bin/bash
-#SBATCH --partition=general
+#SBATCH --partition=preempt
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=32G
-#SBATCH --gres=gpu:A6000:1 
-#SBATCH --time=16:00:00
-#SBATCH --array=0-7
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
+#SBATCH --time=4:00:00
+#SBATCH --array=0-23
 #SBATCH --requeue
-#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_learning_rate/%x_%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_learning_rate/%x_%A_%a.err
-#SBATCH --job-name=01_sweep_lr
+#SBATCH --output=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/pelage/01_test/%x_%A_%a.err
+#SBATCH --job-name=01_test_performance
 
 # Change to project base directory
 cd /home/kdoherty/wolverines/pelage_sorting
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/pelage/01_learning_rate
+mkdir -p /home/kdoherty/logs/wolverines/pelage/01_test
 
-echo "Starting job $SLURM_ARRAY_TASK_ID on node $(hostname) at $(date)"
+echo "Starting final test evaluation on node $(hostname) at $(date)"
 echo "Working directory: $(pwd)"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
@@ -30,10 +30,10 @@ mamba activate wolverines
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
-# Run script with array index (using relative paths)
-python scripts/01_sweep_lr.py \
+# Run script (using relative paths)
+python scripts/01_test_performance.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
-    --output_dir results/01_learning_rate \
+    --output_dir results/01_test \
     --device gpu
 
-echo "Job completed at $(date)"
+echo "Final test evaluation completed at $(date)"

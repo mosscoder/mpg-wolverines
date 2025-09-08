@@ -8,6 +8,7 @@ DINOv3 embeddings for pelage quality labeling.
 # Fix OpenMP conflict on macOS before any imports
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+os.environ['OMP_NUM_THREADS'] = '1'
 
 import sys
 import argparse
@@ -23,6 +24,7 @@ import pickle
 
 # DINOv3 and transformers imports
 from transformers import AutoImageProcessor, AutoModel
+from sklearn.cluster import KMeans
 
 
 def set_all_seeds(seed=42):
@@ -77,6 +79,23 @@ def setup_database(db_path):
     # Create indices
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_id_color_ymdh ON pelage_labels(id, color, ymdh)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_label ON pelage_labels(label)')
+    
+    # Create precomputed clusters table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS precomputed_clusters (
+            image_path TEXT,
+            id TEXT,
+            color INTEGER,
+            ymdh TEXT,
+            k_value INTEGER,
+            cluster_id INTEGER,
+            PRIMARY KEY (image_path, k_value)
+        )
+    ''')
+    
+    # Create indices for clusters table
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_clusters_group ON precomputed_clusters(id, color, ymdh, k_value)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_clusters_k ON precomputed_clusters(k_value)')
     
     conn.commit()
     conn.close()
@@ -236,6 +255,217 @@ def process_embeddings(filtered_df, crops_dir, db_path, processor, model, device
     print(f"Stored {processed_count} embeddings successfully")
 
 
+def get_unique_groups(db_path):
+    """Get all unique ID/color/date groups that have embeddings"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT DISTINCT id, color, ymdh, COUNT(*) as image_count
+        FROM pelage_labels 
+        WHERE embedding IS NOT NULL
+        GROUP BY id, color, ymdh
+        ORDER BY id, color, ymdh
+    ''')
+    
+    groups = cursor.fetchall()
+    conn.close()
+    
+    return groups
+
+
+def get_group_embeddings(db_path, id_val, color_val, ymdh_val):
+    """Get embeddings for a specific group"""
+    conn = sqlite3.connect(db_path)
+    
+    query = '''
+        SELECT image_path, embedding
+        FROM pelage_labels 
+        WHERE id = ? AND color = ? AND ymdh = ? AND embedding IS NOT NULL
+        ORDER BY image_path
+    '''
+    
+    df = pd.read_sql_query(query, conn, params=[id_val, color_val, ymdh_val])
+    conn.close()
+    
+    if len(df) == 0:
+        return [], []
+    
+    # Extract embeddings
+    embeddings = []
+    image_paths = []
+    
+    for _, row in df.iterrows():
+        embedding_blob = row['embedding']
+        embedding = pickle.loads(embedding_blob)
+        embeddings.append(embedding)
+        image_paths.append(row['image_path'])
+    
+    return image_paths, np.array(embeddings)
+
+
+def compute_group_clusters(image_paths, embeddings, k_values, id_val, color_val, ymdh_val):
+    """Compute clusters for a group at multiple K values"""
+    group_clusters = {}
+    
+    # Ensure embeddings are float32 for memory efficiency
+    embeddings = embeddings.astype(np.float32)
+    
+    for k in k_values:
+        # Adjust K if we have fewer images than clusters
+        effective_k = min(k, len(embeddings))
+        
+        if effective_k < 2:
+            # Can't cluster with less than 2 items
+            cluster_labels = [0] * len(image_paths)
+        else:
+            try:
+                # Use safer KMeans parameters
+                kmeans = KMeans(
+                    n_clusters=effective_k, 
+                    random_state=42, 
+                    n_init=3,  # Reduced from 10 to prevent seg faults
+                    algorithm='lloyd'  # Explicitly use lloyd algorithm
+                )
+                cluster_labels = kmeans.fit_predict(embeddings)
+            except Exception as e:
+                print(f"Error clustering group {id_val}/{color_val}/{ymdh_val} at K={k}: {e}")
+                # Fallback: assign sequential cluster IDs
+                cluster_labels = [i % effective_k for i in range(len(image_paths))]
+        
+        # Store results for this K
+        group_clusters[k] = []
+        for i, image_path in enumerate(image_paths):
+            group_clusters[k].append({
+                'image_path': image_path,
+                'id': id_val,
+                'color': color_val,
+                'ymdh': ymdh_val,
+                'k_value': k,
+                'cluster_id': int(cluster_labels[i])
+            })
+    
+    return group_clusters
+
+
+def store_precomputed_clusters(db_path, clusters_data):
+    """Store precomputed clusters in database"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    for cluster_record in clusters_data:
+        cursor.execute('''
+            INSERT OR REPLACE INTO precomputed_clusters 
+            (image_path, id, color, ymdh, k_value, cluster_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            cluster_record['image_path'],
+            cluster_record['id'],
+            cluster_record['color'],
+            cluster_record['ymdh'],
+            cluster_record['k_value'],
+            cluster_record['cluster_id']
+        ))
+    
+    conn.commit()
+    conn.close()
+
+
+def check_existing_clusters(db_path, id_val, color_val, ymdh_val, k_values):
+    """Check which K values already have precomputed clusters for this group"""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT DISTINCT k_value
+        FROM precomputed_clusters 
+        WHERE id = ? AND color = ? AND ymdh = ?
+    ''', (id_val, color_val, ymdh_val))
+    
+    existing_k_values = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    
+    return [k for k in k_values if k not in existing_k_values]
+
+
+def clear_precomputed_clusters(db_path):
+    """Clear all precomputed clusters from database"""
+    print("Clearing existing precomputed clusters...")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute("DELETE FROM precomputed_clusters")
+    conn.commit()
+    
+    # Get count to confirm
+    cursor.execute("SELECT COUNT(*) FROM precomputed_clusters")
+    count = cursor.fetchone()[0]
+    conn.close()
+    
+    print(f"Cleared all clusters. Database now has {count} cluster records.")
+
+
+def precompute_all_clusters(db_path, k_values=[2, 4, 8, 16, 32, 64]):
+    """Precompute clusters for all groups at specified K values"""
+    print(f"Precomputing clusters for K values: {k_values}")
+    
+    # Get all unique groups
+    groups = get_unique_groups(db_path)
+    print(f"Found {len(groups)} unique groups to process")
+    
+    total_processed = 0
+    total_skipped = 0
+    total_errors = 0
+    
+    for i, (id_val, color_val, ymdh_val, image_count) in enumerate(tqdm(groups, desc="Processing groups")):
+        try:
+            print(f"Processing group {i+1}/{len(groups)}: {id_val}/{color_val}/{ymdh_val} ({image_count} images)")
+            
+            # Check which K values are missing for this group
+            missing_k_values = check_existing_clusters(db_path, id_val, color_val, ymdh_val, k_values)
+            
+            if not missing_k_values:
+                total_skipped += 1
+                continue
+            
+            # Get embeddings for this group
+            image_paths, embeddings = get_group_embeddings(db_path, id_val, color_val, ymdh_val)
+            
+            if len(embeddings) == 0:
+                print(f"Warning: No embeddings found for group {id_val}/{color_val}/{ymdh_val}")
+                continue
+            
+            print(f"Computing clusters for K values: {missing_k_values}")
+            
+            # Compute clusters for missing K values only
+            group_clusters = compute_group_clusters(
+                image_paths, embeddings, missing_k_values, 
+                id_val, color_val, ymdh_val
+            )
+            
+            # Store all clusters for this group
+            all_cluster_data = []
+            for k, cluster_list in group_clusters.items():
+                all_cluster_data.extend(cluster_list)
+            
+            if all_cluster_data:
+                store_precomputed_clusters(db_path, all_cluster_data)
+                total_processed += 1
+                print(f"Successfully stored clusters for group {id_val}/{color_val}/{ymdh_val}")
+            
+            # Clear memory after each group
+            del embeddings, group_clusters, all_cluster_data
+            
+        except Exception as e:
+            print(f"Error processing group {id_val}/{color_val}/{ymdh_val}: {e}")
+            total_errors += 1
+            # Continue with next group rather than failing entirely
+            continue
+    
+    print(f"Completed clustering: {total_processed} processed, {total_skipped} skipped, {total_errors} errors")
+    return total_processed
+
+
 def main():
     parser = argparse.ArgumentParser(description='Prepare pelage labeling data with DINOv3 embeddings')
     parser.add_argument('--metadata_csv', type=str,
@@ -251,6 +481,8 @@ def main():
                        help='Batch size for embedding generation')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility')
+    parser.add_argument('--force_recluster', action='store_true',
+                       help='Force recomputation of all clusters (clears existing clusters)')
     
     args = parser.parse_args()
     
@@ -288,11 +520,27 @@ def main():
         # Process embeddings
         start_time = time.time()
         process_embeddings(filtered_df, args.crops_dir, args.output_db, processor, model, device, args.batch_size)
-        processing_time = time.time() - start_time
+        embedding_time = time.time() - start_time
+        
+        # Precompute clusters
+        print(f"\nStarting cluster precomputation...")
+        cluster_start_time = time.time()
+        
+        # Clear existing clusters if force_recluster is set
+        if args.force_recluster:
+            clear_precomputed_clusters(args.output_db)
+        
+        processed_groups = precompute_all_clusters(args.output_db)
+        cluster_time = time.time() - cluster_start_time
+        
+        total_time = time.time() - start_time
         
         print(f"\n" + "="*60)
         print(f"PREPARATION COMPLETE")
-        print(f"Processing time: {processing_time/60:.1f} minutes")
+        print(f"Embedding processing time: {embedding_time/60:.1f} minutes")
+        print(f"Cluster precomputation time: {cluster_time/60:.1f} minutes")
+        print(f"Total processing time: {total_time/60:.1f} minutes")
+        print(f"Processed {processed_groups} groups for clustering")
         print(f"Database ready at: {args.output_db}")
         print("Ready for labeling with Streamlit app")
         print("="*60)

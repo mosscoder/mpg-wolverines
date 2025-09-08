@@ -12,9 +12,18 @@ import pickle
 from PIL import Image
 import os
 from datetime import datetime
-from sklearn.cluster import KMeans
-import plotly.express as px
 from pathlib import Path
+
+
+@st.cache_data
+def load_and_resize_image(image_path, max_size=(300, 300)):
+    """Load and resize image for faster display"""
+    try:
+        img = Image.open(image_path)
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        return img
+    except Exception as e:
+        return None
 
 
 # Page config
@@ -23,6 +32,7 @@ st.set_page_config(
     page_icon="🐺",
     layout="wide"
 )
+
 
 # Initialize session state
 if 'current_group_idx' not in st.session_state:
@@ -42,9 +52,19 @@ class PelageLabelingApp:
         
     def connect_db(self):
         """Connect to database"""
-        if self.conn is None:
+        if self.conn is None or not self._is_connection_valid():
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         return self.conn
+    
+    def _is_connection_valid(self):
+        """Check if connection is still valid"""
+        if self.conn is None:
+            return False
+        try:
+            self.conn.execute("SELECT 1")
+            return True
+        except:
+            return False
     
     def get_unlabeled_groups(self):
         """Get unique ID/color/date groups with unlabeled images"""
@@ -113,25 +133,50 @@ class PelageLabelingApp:
         df = pd.read_sql_query(query, conn, params=params)
         return df
     
-    def get_embeddings_matrix(self, df):
-        """Extract embeddings matrix from dataframe"""
-        embeddings = []
-        for _, row in df.iterrows():
-            embedding_blob = row['embedding']
-            embedding = pickle.loads(embedding_blob)
-            embeddings.append(embedding)
-        
-        return np.array(embeddings)
     
-    def perform_clustering(self, embeddings, k):
-        """Perform K-means clustering on embeddings"""
-        if len(embeddings) < k:
-            k = len(embeddings)
+    def get_available_k_values(self, id_val, color_val, ymdh_val):
+        """Get available precomputed K values for this group"""
+        conn = self.connect_db()
         
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(embeddings)
+        # Ensure proper types for SQLite
+        ymdh_val = str(ymdh_val)
+        color_val = int(color_val)
         
-        return cluster_labels, kmeans
+        query = '''
+            SELECT DISTINCT k_value
+            FROM precomputed_clusters 
+            WHERE id = ? AND color = ? AND ymdh = ?
+            ORDER BY k_value
+        '''
+        
+        df = pd.read_sql_query(query, conn, params=[id_val, color_val, ymdh_val])
+        
+        return df['k_value'].tolist()
+    
+    def get_precomputed_clusters(self, id_val, color_val, ymdh_val, k_value):
+        """Get precomputed cluster assignments for a group at specific K"""
+        conn = self.connect_db()
+        
+        # Ensure proper types for SQLite
+        ymdh_val = str(ymdh_val)
+        color_val = int(color_val)
+        k_value = int(k_value)
+        
+        query = '''
+            SELECT image_path, cluster_id
+            FROM precomputed_clusters 
+            WHERE id = ? AND color = ? AND ymdh = ? AND k_value = ?
+            ORDER BY image_path
+        '''
+        
+        df = pd.read_sql_query(query, conn, params=[id_val, color_val, ymdh_val, k_value])
+        
+        # Convert to dictionary for easy lookup
+        cluster_assignments = {}
+        for _, row in df.iterrows():
+            cluster_assignments[row['image_path']] = row['cluster_id']
+        
+        return cluster_assignments
     
     def save_labels(self, image_paths, label_value, k_value, cluster_assignments):
         """Save labels to database"""
@@ -151,6 +196,7 @@ class PelageLabelingApp:
             ''', (int(label_value), current_time, int(k_value), cluster_id, image_path))
         
         conn.commit()
+        conn.close()
         return len(image_paths)
     
     def remove_labels(self, image_paths):
@@ -166,6 +212,7 @@ class PelageLabelingApp:
             ''', (image_path,))
         
         conn.commit()
+        conn.close()
         return len(image_paths)
     
     def get_progress_stats(self):
@@ -191,17 +238,15 @@ class PelageLabelingApp:
         }
 
 
-def display_image_grid_by_clusters(df, embeddings, cluster_labels, k):
+def display_image_grid_by_clusters(df, cluster_assignments, k):
     """Display images organized by clusters in rows"""
     
-    # Group images by cluster
+    # Add cluster assignments to dataframe
     df_with_clusters = df.copy()
-    df_with_clusters['cluster'] = cluster_labels
+    df_with_clusters['cluster'] = df_with_clusters['image_path'].map(cluster_assignments)
     
-    st.session_state.cluster_assignments = {
-        row['image_path']: row['cluster'] 
-        for _, row in df_with_clusters.iterrows()
-    }
+    # Update session state
+    st.session_state.cluster_assignments = cluster_assignments
     
     # Display each cluster as a row
     for cluster_id in range(k):
@@ -236,10 +281,10 @@ def display_image_grid_by_clusters(df, embeddings, cluster_labels, k):
             
             for col_idx, (_, row) in enumerate(cluster_df.iloc[start_idx:end_idx].iterrows()):
                 with cols[col_idx]:
-                    # Load and display image
-                    try:
-                        img = Image.open(row['image_path'])
-                        
+                    # Load and display image with caching
+                    img = load_and_resize_image(row['image_path'])
+                    
+                    if img is not None:
                         # Create checkbox for selection
                         is_selected = row['image_path'] in st.session_state.selected_images
                         selected = st.checkbox(
@@ -248,13 +293,12 @@ def display_image_grid_by_clusters(df, embeddings, cluster_labels, k):
                             key=f"select_{row['image_path']}"
                         )
                         
-                        # Handle checkbox state changes with immediate rerun for responsiveness
+                        # Handle checkbox state changes (no immediate rerun for better performance)
                         if selected != is_selected:
                             if selected:
                                 st.session_state.selected_images.add(row['image_path'])
                             else:
                                 st.session_state.selected_images.discard(row['image_path'])
-                            st.rerun()
                         
                         # Display image with cluster color border
                         border_colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
@@ -282,9 +326,8 @@ def display_image_grid_by_clusters(df, embeddings, cluster_labels, k):
                                 st.warning(f"Labeled: {label_text}")
                             else:
                                 st.success(f"Labeled: {label_text}")
-                        
-                    except Exception as e:
-                        st.error(f"Error loading image: {e}")
+                    else:
+                        st.error(f"Error loading image: {row['image_path']}")
         
         st.divider()
 
@@ -306,15 +349,7 @@ def main():
     with st.sidebar:
         st.header("Controls")
         
-        # K value slider
-        k_value = st.slider("Number of Clusters (K)", min_value=2, max_value=100, value=st.session_state.k_value)
-        if k_value != st.session_state.k_value:
-            st.session_state.k_value = k_value
-        
-        # Recluster button
-        if st.button("🔄 Recluster", use_container_width=True):
-            st.session_state.cluster_assignments = {}
-            st.rerun()
+        # K value selector will be populated dynamically based on current group
         
         # Progress stats
         st.header("Progress")
@@ -370,39 +405,33 @@ def main():
         selected_count = len(st.session_state.selected_images)
         st.metric("Selected Images", selected_count)
         
-        # Always show buttons but disable when no selection
-        no_selection = selected_count == 0
-        
+        # Always show buttons - let user click anytime
         if st.button("🔴 None (0) - No pelage visible", 
                     use_container_width=True, 
-                    key="none_pelage_sidebar",
-                    disabled=no_selection):
+                    key="none_pelage_sidebar"):
             st.session_state.label_action = ('none', 0)
             st.rerun()
         
         if st.button("🟡 Partial (1) - Some pelage visible", 
                     use_container_width=True, 
-                    key="partial_pelage_sidebar",
-                    disabled=no_selection):
+                    key="partial_pelage_sidebar"):
             st.session_state.label_action = ('partial', 1)
             st.rerun()
         
         if st.button("🟢 Full (2) - Full pelage visible", 
                     use_container_width=True, 
-                    key="full_pelage_sidebar",
-                    disabled=no_selection):
+                    key="full_pelage_sidebar"):
             st.session_state.label_action = ('full', 2)
             st.rerun()
         
         if st.button("🗑️ Clear Selection", 
                     use_container_width=True, 
-                    key="clear_selection_sidebar",
-                    disabled=no_selection):
+                    key="clear_selection_sidebar"):
             st.session_state.selected_images = set()
             st.rerun()
         
         # Review mode specific controls
-        if review_mode and selected_count > 0:
+        if review_mode:
             st.divider()
             if st.button("🔄 Remove Labels", 
                         use_container_width=True, 
@@ -411,8 +440,9 @@ def main():
                 st.session_state.label_action = ('remove', None)
                 st.rerun()
         
-        if no_selection:
-            mode_text = "reviewing" if review_mode else "labeling"
+        # Show current mode
+        mode_text = "reviewing" if review_mode else "labeling"
+        if selected_count == 0:
             st.info(f"Select images for {mode_text}")
         
     # Get appropriate groups based on mode
@@ -477,6 +507,35 @@ def main():
             with col3:
                 st.metric("🟢 Full", current_group['full_count'])
         
+        # Get available K values for this group
+        available_k_values = app.get_available_k_values(
+            current_group['id'],
+            current_group['color'],
+            current_group['ymdh']
+        )
+        
+        if not available_k_values:
+            st.error("No precomputed clusters found for this group. Please run 02_prepare_labeling_data.py first.")
+            return
+        
+        # Update sidebar with K selector
+        with st.sidebar:
+            st.subheader("Clustering")
+            
+            # Set default K value if not available
+            if st.session_state.k_value not in available_k_values:
+                st.session_state.k_value = available_k_values[0]
+            
+            k_value = st.select_slider(
+                "Number of Clusters (K)",
+                options=available_k_values,
+                value=st.session_state.k_value if st.session_state.k_value in available_k_values else available_k_values[0]
+            )
+            
+            if k_value != st.session_state.k_value:
+                st.session_state.k_value = k_value
+                st.rerun()
+        
         # Load group images
         group_images_df = app.get_group_images(
             current_group['id'], 
@@ -494,17 +553,22 @@ def main():
                 st.warning("No unlabeled images in this group")
             return
         
-        # Generate embeddings matrix
-        embeddings = app.get_embeddings_matrix(group_images_df)
+        # Get precomputed cluster assignments
+        cluster_assignments = app.get_precomputed_clusters(
+            current_group['id'],
+            current_group['color'], 
+            current_group['ymdh'],
+            st.session_state.k_value
+        )
         
-        # Perform clustering
-        k = min(st.session_state.k_value, len(group_images_df))
-        cluster_labels, kmeans_model = app.perform_clustering(embeddings, k)
+        if not cluster_assignments:
+            st.error(f"No precomputed clusters found for K={st.session_state.k_value}. Please run 02_prepare_labeling_data.py again.")
+            return
         
         # Display images by cluster
         mode_text = "Review" if review_mode else "Label"
-        st.header(f"{mode_text}: Images Clustered into {k} Groups")
-        display_image_grid_by_clusters(group_images_df, embeddings, cluster_labels, k)
+        st.header(f"{mode_text}: Images Clustered into {st.session_state.k_value} Groups")
+        display_image_grid_by_clusters(group_images_df, cluster_assignments, st.session_state.k_value)
         
         # Handle labeling/review actions from sidebar
         if hasattr(st.session_state, 'label_action') and st.session_state.label_action:
@@ -519,7 +583,7 @@ def main():
                     saved_count = app.save_labels(
                         list(st.session_state.selected_images), 
                         label_value, 
-                        k, 
+                        st.session_state.k_value, 
                         st.session_state.cluster_assignments
                     )
                     # Map label values to descriptive text

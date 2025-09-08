@@ -2,9 +2,9 @@
 """
 Script 03: Make Figures
 Generate visualizations for the pelage sorting experiments:
-- Bar charts with 95% CI for resize size sweep (script 00)
-- Line plots with CI ribbons for learning rate sweep (script 01)
-- Performance curves for final test (script 02)
+- Line plots with CI ribbons for learning rate sweep (script 00)
+- Performance curves for test evaluation (script 01)
+- Production model training curves (script 02)
 """
 
 import sys
@@ -66,54 +66,7 @@ def load_and_aggregate_results(results_dir: str, group_by: List[str]) -> Dict[tu
     return grouped
 
 
-def make_resize_figure(results_dir: str, output_path: str):
-    """Create bar chart for resize size sweep results"""
-    print("Creating resize size figure...")
-    
-    # Load and group results by resize_size
-    grouped = load_and_aggregate_results(results_dir, ['resize_size'])
-    
-    if not grouped:
-        print(f"No results found in {results_dir}")
-        return
-    
-    # Extract data for plotting
-    resize_sizes = []
-    f1_means = []
-    f1_cis = []
-    
-    for (resize_size,), results in sorted(grouped.items()):
-        if resize_size is None:
-            continue
-        
-        f1_scores = [r['final_val_f1'] for r in results]
-        mean, ci, _ = calculate_confidence_interval(f1_scores)
-        
-        resize_sizes.append(resize_size)
-        f1_means.append(mean)
-        f1_cis.append(ci)
-    
-    # Create figure
-    plt.figure(figsize=(12, 8))
-    bars = plt.bar(range(len(resize_sizes)), f1_means, yerr=f1_cis, 
-                   capsize=5, alpha=0.7, color='steelblue')
-    
-    plt.xlabel('Resize Size', fontsize=14)
-    plt.ylabel('Validation F1 Score', fontsize=14)
-    plt.title('Resize Size Sweep: Effect of Image Resize Size on Performance', fontsize=16)
-    plt.xticks(range(len(resize_sizes)), resize_sizes)
-    plt.grid(axis='y', alpha=0.3)
-    
-    # Add value labels on bars
-    for i, (bar, mean, ci) in enumerate(zip(bars, f1_means, f1_cis)):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + ci + 0.005,
-                f'{mean:.3f}', ha='center', va='bottom', fontsize=10)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"✓ Resize size figure saved to: {output_path}")
+# Note: make_resize_figure() removed - no longer doing resize sweeps (fixed at 224x224)
 
 
 
@@ -344,8 +297,8 @@ def main():
                        default='figures',
                        help='Output directory for figures')
     parser.add_argument('--experiments', nargs='+',
-                       choices=['00_resize', '01_learning_rate', '02_test'],
-                       default=['00_resize', '01_learning_rate', '02_test'],
+                       choices=['00_learning_rate', '01_test', '02_production'],
+                       default=['00_learning_rate', '01_test', '02_production'],
                        help='Which experiments to create figures for')
     
     args = parser.parse_args()
@@ -362,19 +315,19 @@ def main():
     sns.set_palette("husl")
     
     # Generate figures for each experiment
-    if '00_resize' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '00_resize')
-        output_path = os.path.join(args.output_dir, '00_resize_results.png')
-        make_resize_figure(results_dir, output_path)
-    
-    if '01_learning_rate' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '01_learning_rate')
-        output_path = os.path.join(args.output_dir, '01_learning_rate_results.png')
+    if '00_learning_rate' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '00_learning_rate')
+        output_path = os.path.join(args.output_dir, '00_learning_rate_results.png')
         make_learning_rate_figure(results_dir, output_path)
     
-    if '02_test' in args.experiments:
-        results_dir = os.path.join(args.results_base_dir, '02_test')
-        output_path = os.path.join(args.output_dir, '02_final_performance.png')
+    if '01_test' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '01_test')
+        output_path = os.path.join(args.output_dir, '01_test_performance.png')
+        make_final_performance_figure(results_dir, output_path)
+    
+    if '02_production' in args.experiments:
+        results_dir = os.path.join(args.results_base_dir, '02_production')
+        output_path = os.path.join(args.output_dir, '02_production_training.png')
         make_final_performance_figure(results_dir, output_path)
     
     print(f"\n✓ All figures generated successfully!")

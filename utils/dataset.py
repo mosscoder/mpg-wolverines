@@ -35,9 +35,9 @@ class WolverinesDataset(Dataset):
 
 
 def load_wolverines_dataset():
-    """Load the wolverines dataset from HuggingFace"""
-    dataset = load_dataset("kdoherty/wolverines", split="train")
-    test_dataset = load_dataset("kdoherty/wolverines", split="test")
+    """Load the wolverines dataset from HuggingFace using pelage config"""
+    dataset = load_dataset("kdoherty/wolverines", name="pelage", split="train")
+    test_dataset = load_dataset("kdoherty/wolverines", name="pelage", split="test")
     return dataset, test_dataset
 
 

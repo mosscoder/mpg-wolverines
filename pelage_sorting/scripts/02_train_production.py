@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Script 03: Test Performance
-Final training with optimal hyperparameters on full train/test split.
-Records performance at each epoch.
+Script 02: Train Production Model
+Trains final model on combined train+test sets using optimal hyperparameters.
+Saves only the linear classifier head (frozen backbone not saved).
+Uses optimal learning rate and epochs from script 00.
 """
 
 import sys
@@ -10,6 +11,7 @@ import os
 import argparse
 import time
 import json
+import torch
 from pathlib import Path
 
 # Add utils to path (assumes we cd to pelage_sorting in sbatch)
@@ -20,29 +22,26 @@ sys.path.append(wolverines_root)
 from utils.dataset import (
     load_wolverines_dataset, create_dataloaders, set_all_seeds
 )
-from utils.preprocessing import get_best_resize_size, get_standard_transform
+from utils.preprocessing import get_standard_transform
 from utils.models import create_model
 from utils.training import (
     ModelTrainer, check_result_exists
 )
 
 
-def get_optimal_params_from_experiments():
+def get_optimal_params_from_lr_sweep():
     """
-    Load optimal parameters from all previous experiments using proper cross-validation.
+    Load optimal parameters from script 00 learning rate sweep using proper cross-validation.
     """
     import json
     import glob
     import numpy as np
     from collections import defaultdict
     
-    # Get best resize size from script 00
-    best_resize = get_best_resize_size()
-    
-    # Get best learning rate and optimal epochs from script 01 (proper cross-validation)
+    # Get best learning rate and optimal epochs from script 00 (proper cross-validation)
     best_lr = 0.001  # Default fallback
     optimal_epochs = 30  # Default fallback
-    results_pattern = "results/01_learning_rate/*.json"
+    results_pattern = "results/00_learning_rate/*.json"
     result_files = glob.glob(results_pattern)
     
     if result_files:
@@ -104,74 +103,99 @@ def get_optimal_params_from_experiments():
         print("No learning rate results found, using defaults")
     
     optimal_params = {
-        # From script 00
-        'resize_size': best_resize,
+        # Fixed parameters
+        'resize_size': 224,
+        'batch_size': 32,
+        'weight_decay': 0.01,
+        'seed': 0,
         
-        # From script 01 (cross-validated)
+        # From script 00 (cross-validated)
         'learning_rate': best_lr,
         'optimal_epochs': optimal_epochs,
-        
-        # Fixed params
-        'batch_size': 16,
-        'weight_decay': 0.01,
-        'seed': 0
     }
     
     print("=" * 60)
-    print("OPTIMAL PARAMETERS FROM PREVIOUS EXPERIMENTS:")
-    print(f"Resize size (from 00): {best_resize}")
-    print(f"Learning rate (from 01, CV): {best_lr}")
+    print("OPTIMAL PARAMETERS FOR PRODUCTION MODEL:")
+    print(f"Resize size (fixed): 224")
+    print(f"Batch size (fixed): 32") 
+    print(f"Learning rate (from script 00, CV): {best_lr}")
     print(f"Optimal epochs (from CV): {optimal_epochs}")
     print("=" * 60)
     
     return optimal_params
 
 
-
-
-def train_final_model(args: argparse.Namespace) -> dict:
-    """Train the final model with optimal parameters"""
+def combine_train_test_datasets(train_dataset, test_dataset):
+    """
+    Combine train and test datasets for production training.
     
-    # Get optimal parameters
-    optimal_params = get_optimal_params_from_experiments()
+    Returns:
+        combined_dataset: Combined dataset for training
+        dataset_stats: Statistics about the combined dataset
+    """
+    from datasets import concatenate_datasets
+    
+    # Combine datasets
+    combined_dataset = concatenate_datasets([train_dataset, test_dataset])
+    
+    # Calculate statistics
+    train_labels = [item['label'] for item in train_dataset]
+    test_labels = [item['label'] for item in test_dataset]
+    combined_labels = [item['label'] for item in combined_dataset]
+    
+    dataset_stats = {
+        'train_samples': len(train_dataset),
+        'test_samples': len(test_dataset),
+        'combined_samples': len(combined_dataset),
+        'train_label_dist': [train_labels.count(0), train_labels.count(1)],
+        'test_label_dist': [test_labels.count(0), test_labels.count(1)],
+        'combined_label_dist': [combined_labels.count(0), combined_labels.count(1)]
+    }
+    
+    return combined_dataset, dataset_stats
+
+
+def train_production_model(args: argparse.Namespace) -> dict:
+    """Train the production model with optimal parameters on combined data"""
+    
+    # Get optimal parameters from script 00
+    optimal_params = get_optimal_params_from_lr_sweep()
     
     # Set seed
     set_all_seeds(optimal_params['seed'])
     
     # Create output filename
-    filename = "final_test_performance.json"
+    filename = "production_model_results.json"
     output_path = os.path.join(args.output_dir, filename)
+    model_path = os.path.join(args.output_dir, "production_model_classifier.pth")
     
     # Check if should skip
     if check_result_exists(output_path) and not args.overwrite:
         print(f"Skipping existing result: {filename}")
         return None
     
-    print("Training final model with optimal parameters:")
+    print("Training production model with optimal parameters:")
     for key, value in optimal_params.items():
         print(f"  {key}: {value}")
     
-    # Load full datasets
-    print("Loading full datasets...")
+    # Load train and test datasets
+    print("Loading train and test datasets...")
     train_dataset, test_dataset = load_wolverines_dataset()
     
-    # Dataset will be processed lazily in transforms
+    # Combine datasets for production training
+    print("Combining train and test datasets...")
+    combined_dataset, dataset_stats = combine_train_test_datasets(train_dataset, test_dataset)
     
-    print(f"Train samples: {len(train_dataset)}")
-    print(f"Test samples: {len(test_dataset)}")
-    
-    # Calculate label distributions from datasets
-    train_labels = [item['label'] for item in train_dataset]
-    test_labels = [item['label'] for item in test_dataset]
-    print(f"Train label distribution: {[train_labels.count(0), train_labels.count(1)]}")
-    print(f"Test label distribution: {[test_labels.count(0), test_labels.count(1)]}")
+    print(f"Combined dataset: {dataset_stats['combined_samples']} samples")
+    print(f"Label distribution: {dataset_stats['combined_label_dist']}")
     
     # Create transforms with resize and normalization
     transform = get_standard_transform(resize_size=optimal_params['resize_size'])
     
-    # Create dataloaders
-    train_loader, test_loader = create_dataloaders(
-        train_dataset, test_dataset,
+    # Create dataloader for combined dataset (we'll use it as both train and val for final metrics)
+    # Note: For production, we train on all data without validation split
+    train_loader, val_loader = create_dataloaders(
+        combined_dataset, combined_dataset,  # Same dataset for train and val
         transform, transform, optimal_params['batch_size']
     )
     
@@ -191,45 +215,44 @@ def train_final_model(args: argparse.Namespace) -> dict:
         weight_decay=optimal_params['weight_decay']
     )
     
-    # Train with detailed tracking
+    # Train production model
     start_time = time.time()
-    print(f"\nStarting training for {optimal_params['optimal_epochs']} epochs...")
+    print(f"\nStarting production training for {optimal_params['optimal_epochs']} epochs...")
     
     results = trainer.train(
         train_loader=train_loader,
-        val_loader=test_loader,  # Use test set as validation for final evaluation
+        val_loader=val_loader,  # Using same data for final metrics
         epochs=optimal_params['optimal_epochs'],
         verbose=True
     )
     
     training_time = time.time() - start_time
     
+    # Save only the classifier head (linear layer) using trainer method
+    trainer.save_classifier_head(model_path)
+    
     # Prepare comprehensive results
     final_results = {
         'job_idx': args.idx,
+        'model_type': 'production',
         'optimal_params': optimal_params,
         'training_time': training_time,
-        'dataset_stats': {
-            'train_samples': len(train_images),
-            'test_samples': len(test_images),
-            'train_label_dist': [train_labels.count(0), train_labels.count(1)],
-            'test_label_dist': [test_labels.count(0), test_labels.count(1)]
-        },
+        'dataset_stats': dataset_stats,
         'model_stats': {
             'total_parameters': sum(p.numel() for p in model.parameters()),
-            'trainable_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad)
+            'trainable_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad),
+            'classifier_saved_path': model_path
         },
         'final_performance': {
             'epochs_trained': results['epochs_trained'],
-            'best_test_f1': results['best_val_f1'],  # This is actually test F1
-            'final_test_f1': results['final_val_metrics']['f1_score'],
-            'final_test_precision': results['final_val_metrics']['precision'],
-            'final_test_recall': results['final_val_metrics']['recall'],
-            'final_test_accuracy': results['final_val_metrics']['accuracy']
+            'final_f1': results['final_val_metrics']['f1_score'],
+            'final_precision': results['final_val_metrics']['precision'],
+            'final_recall': results['final_val_metrics']['recall'],
+            'final_accuracy': results['final_val_metrics']['accuracy']
         },
         # Include complete epoch-by-epoch history
         'train_history': trainer.train_history,
-        'test_history': trainer.val_history,  # This is actually test history
+        'val_history': trainer.val_history,  # Same as train for production
         'timestamp': time.time()
     }
     
@@ -238,27 +261,28 @@ def train_final_model(args: argparse.Namespace) -> dict:
     with open(output_path, 'w') as f:
         json.dump(final_results, f, indent=2)
     
-    print(f"\n✓ Final model training completed!")
+    print(f"\n✓ Production model training completed!")
     print(f"✓ Results saved to: {filename}")
-    print(f"\n=== FINAL PERFORMANCE ===")
-    print(f"Best test F1 score: {final_results['final_performance']['best_test_f1']:.4f}")
-    print(f"Final test F1 score: {final_results['final_performance']['final_test_f1']:.4f}")
-    print(f"Final test precision: {final_results['final_performance']['final_test_precision']:.4f}")
-    print(f"Final test recall: {final_results['final_performance']['final_test_recall']:.4f}")
-    print(f"Final test accuracy: {final_results['final_performance']['final_test_accuracy']:.4f}")
+    print(f"✓ Classifier model saved to: {model_path}")
+    print(f"\n=== PRODUCTION MODEL PERFORMANCE ===")
+    print(f"Final F1 score: {final_results['final_performance']['final_f1']:.4f}")
+    print(f"Final precision: {final_results['final_performance']['final_precision']:.4f}")
+    print(f"Final recall: {final_results['final_performance']['final_recall']:.4f}")
+    print(f"Final accuracy: {final_results['final_performance']['final_accuracy']:.4f}")
     print(f"Training time: {training_time/60:.1f} minutes")
+    print(f"Trained on: {dataset_stats['combined_samples']} samples (train+test combined)")
     
     return final_results
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Final test performance evaluation')
+    parser = argparse.ArgumentParser(description='Train production model on combined train+test data')
     parser.add_argument('--idx', type=int, required=True, 
                        help='Job index (should be 0)')
     parser.add_argument('--overwrite', action='store_true',
                        help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                       default='results/02_test',
+                       default='results/02_production',
                        help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                        default='gpu', help='Device to use for training')
@@ -266,21 +290,22 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("FINAL TEST PERFORMANCE EVALUATION")
+    print("PRODUCTION MODEL TRAINING")
     print("=" * 60)
     
     if args.idx != 0:
         print(f"Warning: This script should typically run with --idx 0, got {args.idx}")
     
     try:
-        result = train_final_model(args)
+        result = train_production_model(args)
         if result:
-            print(f"\n🎯 Final test evaluation completed successfully!")
+            print(f"\n🎯 Production model training completed successfully!")
+            print(f"📁 Model and results saved to: {args.output_dir}")
         else:
             print("Skipped: Results already exist (use --overwrite to rerun)")
     
     except Exception as e:
-        print(f"Error during final test evaluation: {e}")
+        print(f"Error during production model training: {e}")
         raise
 
 

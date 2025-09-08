@@ -148,6 +148,36 @@ class ModelTrainer:
             'training_time': training_time,
             'epochs_trained': len(self.train_history)
         }
+    
+    def save_classifier_head(self, save_path: str):
+        """
+        Save only the classifier head (linear layer) weights.
+        The frozen backbone is not saved since it's pretrained and unchanging.
+        
+        Args:
+            save_path: Path to save the classifier weights (.pth file)
+        """
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Save only the classifier state dict
+        torch.save(self.model.classifier.state_dict(), save_path)
+        print(f"Classifier head saved to: {save_path}")
+    
+    def load_classifier_head(self, load_path: str):
+        """
+        Load classifier head weights.
+        
+        Args:
+            load_path: Path to load the classifier weights from (.pth file)
+        """
+        if not os.path.exists(load_path):
+            raise FileNotFoundError(f"Classifier weights not found at: {load_path}")
+        
+        # Load classifier state dict
+        classifier_state = torch.load(load_path, map_location=self.device)
+        self.model.classifier.load_state_dict(classifier_state)
+        print(f"Classifier head loaded from: {load_path}")
 
 
 def save_results(results: Dict[str, Any], 
