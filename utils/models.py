@@ -45,8 +45,23 @@ def create_model(model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
     
     model = WolverinesModel(backbone, classifier)
     
-    # Move to device
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    # Move to device - handle string device parameter properly
+    if isinstance(device, str):
+        if device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "gpu":
+            # Auto-select best GPU device
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device("cpu")
+    
     model = model.to(device)
     
     return model
