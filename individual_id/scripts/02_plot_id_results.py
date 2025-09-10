@@ -266,6 +266,127 @@ def plot_results(metrics, performance_df, output_path):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Figure saved to: {output_path}")
 
+def plot_bin_results(metrics, performance_df, output_dir):
+    """Create separate line charts for each validation quality bin"""
+    
+    sample_sizes = sorted(performance_df['sample_size'].unique())
+    thresholds = [0.0, 0.25, 0.5, 0.75]
+    
+    # Colors for different quality thresholds
+    colors = {
+        0.0: '#e74c3c',    # Red - lowest quality
+        0.25: '#f39c12',   # Orange 
+        0.5: '#f1c40f',    # Yellow
+        0.75: '#27ae60',   # Green - highest quality
+    }
+    
+    # Quality bins to plot separately
+    bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
+    bin_display_names = {
+        '[0.75,1.0]': 'High Quality (0.75-1.0)',
+        '[0.5,0.75)': 'Medium-High Quality (0.5-0.75)', 
+        '[0.25,0.5)': 'Medium-Low Quality (0.25-0.5)',
+        '[0,0.25)': 'Low Quality (0.0-0.25)'
+    }
+    
+    for bin_name in bin_names:
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        legend_handles = []
+        legend_labels = []
+        all_ci_lower = []
+        all_ci_upper = []
+        
+        for threshold in thresholds:
+            x_vals = []
+            y_vals = []
+            ci_lower = []
+            ci_upper = []
+            
+            for sample_size in sample_sizes:
+                key = (sample_size, threshold)
+                
+                if key in metrics:
+                    data = metrics[key]
+                    bin_metrics = data.get('bin_metrics', {})
+                    
+                    if bin_name in bin_metrics:
+                        bin_data = bin_metrics[bin_name]
+                        mean_f1 = bin_data['mean_f1']
+                        std_f1 = bin_data['std_f1']
+                        n_seeds = bin_data['n_seeds']
+                        
+                        # Calculate 95% confidence interval
+                        if n_seeds > 1:
+                            sem = std_f1 / np.sqrt(n_seeds)
+                            ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
+                        else:
+                            ci_range = 0
+                        
+                        x_vals.append(sample_size)
+                        y_vals.append(mean_f1)
+                        ci_lower_val = mean_f1 - ci_range
+                        ci_upper_val = mean_f1 + ci_range
+                        ci_lower.append(ci_lower_val)
+                        ci_upper.append(ci_upper_val)
+                        
+                        # Collect CI bounds for y-axis scaling
+                        all_ci_lower.append(ci_lower_val)
+                        all_ci_upper.append(ci_upper_val)
+            
+            if x_vals:  # Only plot if we have data
+                # Plot main line
+                line = ax.plot(x_vals, y_vals, color=colors[threshold], linewidth=2.5, 
+                              marker='o', markersize=8, label=f'threshold_{threshold}')[0]
+                
+                # Add confidence interval ribbon
+                ax.fill_between(x_vals, ci_lower, ci_upper, 
+                               color=colors[threshold], alpha=0.2)
+                
+                legend_handles.append(line)
+                if threshold == 0.0:
+                    legend_labels.append(f"Training threshold ≥ {threshold:.0f} (all data)")
+                else:
+                    legend_labels.append(f"Training threshold ≥ {threshold:.2f}")
+        
+        # Styling
+        ax.set_xlabel('Images per Individual', fontsize=14)
+        ax.set_ylabel(f'F1 Score - {bin_display_names[bin_name]}', fontsize=14)
+        ax.set_title(f'Individual ID Performance: Validation Bin {bin_display_names[bin_name]}\n(Cross-validated best epoch F1 across seeds)', fontsize=16, pad=20)
+        
+        # Set x-axis based on actual sample sizes
+        if sample_sizes:
+            ax.set_xticks(sample_sizes)
+            ax.set_xlim(min(sample_sizes) - 1, max(sample_sizes) + 1)
+        
+        # Add legend if we have data
+        if legend_handles:
+            legend = ax.legend(legend_handles, legend_labels, loc='lower right')
+            legend.set_title("Training data quality:", prop={'weight': 'bold'})
+        
+        # Set dynamic y-axis limits based on confidence interval bounds
+        if all_ci_lower and all_ci_upper:
+            min_f1 = min(all_ci_lower)
+            max_f1 = max(all_ci_upper)
+            y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
+            y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
+            ax.set_ylim(y_min, y_max)
+        else:
+            ax.set_ylim(0.0, 1.0)  # Fallback
+        
+        # Add horizontal gridlines
+        ax.grid(True, alpha=0.3, axis='y', color='lightgray')
+        
+        plt.tight_layout()
+        
+        # Create bin-specific filename
+        bin_suffix = bin_name.replace('[', '').replace(']', '').replace(')', '').replace(',', '_')
+        output_path = os.path.join(output_dir, f'individual_id_threshold_f1_performance_bin_{bin_suffix}.png')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Bin-specific figure saved to: {output_path}")
+        
+        plt.close()  # Close figure to free memory
+
 def print_summary_table(metrics):
     """Print summary table of results"""
     
@@ -347,13 +468,18 @@ def main():
         print("No valid results found")
         return
     
-    # Create plot
+    # Create overall plot
     plot_results(metrics, performance_df, output_path)
+    
+    # Create bin-specific plots
+    print("\nGenerating bin-specific performance plots...")
+    plot_bin_results(metrics, performance_df, args.output_dir)
     
     # Print summary table
     print_summary_table(metrics)
     
-    print(f"\nAnalysis complete! Figure saved to: {output_path}")
+    print(f"\nAnalysis complete! Overall figure saved to: {output_path}")
+    print("Additional bin-specific figures saved to same directory.")
 
 if __name__ == "__main__":
     main()
