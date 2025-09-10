@@ -22,7 +22,7 @@ os.environ["HF_DATASETS_OFFLINE"] = "1"  # Use cached data only
 # Assume script is run from wolverines root directory
 sys.path.append('.')
 
-from utils.dataset import set_all_seeds, create_dataloaders
+from utils.dataset import set_all_seeds
 from utils.models import create_model
 from utils.training import check_result_exists, MultiClassTrainer
 from datasets import load_dataset
@@ -431,13 +431,9 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     # Show individual details
     for ind_id in feasible_individuals:
         pelage_score = config['individual_pelage_scores'][ind_id]
-        compat = config['validation_compatibility'][ind_id]
-        threshold_compat = compat['threshold_compatibility'][threshold_key]
-        max_train = threshold_compat['max_training_size']
-        eligible = threshold_compat['eligible_samples']
-        val_used = threshold_compat['validation_samples']
-        
-        print(f"  {ind_id}: pelage_score={pelage_score:.3f}, {eligible} eligible, {val_used} val, max train: {max_train}")
+        # Get validation count from actual validation_indices
+        val_indices = config['validation_indices'][ind_id][threshold_key]['indices']
+        print(f"  {ind_id}: pelage_score={pelage_score:.3f}, {len(val_indices)} validation samples")
     
     # Create quality threshold dataset splits
     try:
