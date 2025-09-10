@@ -95,7 +95,7 @@ def extract_threshold_metrics(results):
         if len(group_results) < 8:
             print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, threshold={threshold}")
         
-        best_epoch_accs = []
+        best_epoch_f1s = []
         best_epochs = []
         bin_metrics_per_seed = defaultdict(list)  # Track bin performance across seeds
         
@@ -106,62 +106,62 @@ def extract_threshold_metrics(results):
                 print(f"Warning: No epoch data for {result['filename']}")
                 continue
                 
-            # Find best epoch based on overall validation accuracy
+            # Find best epoch based on overall validation F1 score
             best_epoch_idx = 0
-            best_val_acc = 0.0
+            best_val_f1 = 0.0
             
             for i, epoch_data in enumerate(epochs_data):
-                val_acc = epoch_data.get('val_acc_overall', 0.0)
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
+                val_f1 = epoch_data.get('val_f1_overall', 0.0)
+                if val_f1 > best_val_f1:
+                    best_val_f1 = val_f1
                     best_epoch_idx = i
             
             best_epoch_data = epochs_data[best_epoch_idx]
-            best_epoch_accs.append(best_val_acc)
+            best_epoch_f1s.append(best_val_f1)
             best_epochs.append(best_epoch_data['epoch'])
             
             # Add to performance data with bin-specific metrics
             performance_data.append({
                 'sample_size': sample_size,
                 'threshold': threshold,
-                'accuracy': best_val_acc,
+                'f1_score': best_val_f1,
                 'best_epoch': best_epoch_data['epoch'],
                 'seed': result['seed']
             })
             
             # Collect bin metrics for this seed
-            for bin_col, bin_name in [('val_acc_bin_0.75_1.0', '[0.75,1.0]'),
-                                    ('val_acc_bin_0.5_0.75', '[0.5,0.75)'),
-                                    ('val_acc_bin_0.25_0.5', '[0.25,0.5)'),
-                                    ('val_acc_bin_0_0.25', '[0,0.25)')]:
-                bin_acc = best_epoch_data.get(bin_col, 0.0)
-                if bin_acc > 0.0:  # Only add if we have real data
-                    bin_metrics_per_seed[bin_name].append(bin_acc)
+            for bin_col, bin_name in [('val_f1_bin_0.75_1.0', '[0.75,1.0]'),
+                                    ('val_f1_bin_0.5_0.75', '[0.5,0.75)'),
+                                    ('val_f1_bin_0.25_0.5', '[0.25,0.5)'),
+                                    ('val_f1_bin_0_0.25', '[0,0.25)')]:
+                bin_f1 = best_epoch_data.get(bin_col, 0.0)
+                if bin_f1 > 0.0:  # Only add if we have real data
+                    bin_metrics_per_seed[bin_name].append(bin_f1)
         
         # Store metrics for this configuration
-        if best_epoch_accs:
+        if best_epoch_f1s:
             # Aggregate bin metrics across seeds
             aggregated_bin_metrics = {}
-            for bin_name, bin_accs in bin_metrics_per_seed.items():
-                if bin_accs:
+            for bin_name, bin_f1s in bin_metrics_per_seed.items():
+                if bin_f1s:
                     aggregated_bin_metrics[bin_name] = {
-                        'mean_accuracy': np.mean(bin_accs),
-                        'std_accuracy': np.std(bin_accs, ddof=1) if len(bin_accs) > 1 else 0.0,
-                        'n_seeds': len(bin_accs)
+                        'mean_f1': np.mean(bin_f1s),
+                        'std_f1': np.std(bin_f1s, ddof=1) if len(bin_f1s) > 1 else 0.0,
+                        'n_seeds': len(bin_f1s)
                     }
             
             metrics[(sample_size, threshold)] = {
-                'accuracies': best_epoch_accs,
-                'mean_accuracy': np.mean(best_epoch_accs),
-                'std_accuracy': np.std(best_epoch_accs, ddof=1),
-                'n_seeds': len(best_epoch_accs),
+                'f1_scores': best_epoch_f1s,
+                'mean_f1': np.mean(best_epoch_f1s),
+                'std_f1': np.std(best_epoch_f1s, ddof=1),
+                'n_seeds': len(best_epoch_f1s),
                 'mean_best_epoch': np.mean(best_epochs),
                 'best_epochs': best_epochs,
                 'bin_metrics': aggregated_bin_metrics
             }
             
             print(f"samples={sample_size}, threshold={threshold}: "
-                  f"Acc={np.mean(best_epoch_accs):.4f} (n={len(best_epoch_accs)} seeds, "
+                  f"F1={np.mean(best_epoch_f1s):.4f} (n={len(best_epoch_f1s)} seeds, "
                   f"avg best epoch={np.mean(best_epochs):.1f})")
     
     return metrics, pd.DataFrame(performance_data)
@@ -199,20 +199,20 @@ def plot_results(metrics, performance_df, output_path):
             
             if key in metrics:
                 data = metrics[key]
-                mean_acc = data['mean_accuracy']
-                accuracies = data['accuracies']
+                mean_f1 = data['mean_f1']
+                f1_scores = data['f1_scores']
                 
                 # Calculate 95% confidence interval
-                if len(accuracies) > 1:
-                    sem = stats.sem(accuracies)
-                    ci_range = stats.t.ppf(0.975, len(accuracies)-1) * sem
+                if len(f1_scores) > 1:
+                    sem = stats.sem(f1_scores)
+                    ci_range = stats.t.ppf(0.975, len(f1_scores)-1) * sem
                 else:
                     ci_range = 0
                 
                 x_vals.append(sample_size)
-                y_vals.append(mean_acc)
-                ci_lower_val = mean_acc - ci_range
-                ci_upper_val = mean_acc + ci_range
+                y_vals.append(mean_f1)
+                ci_lower_val = mean_f1 - ci_range
+                ci_upper_val = mean_f1 + ci_range
                 ci_lower.append(ci_lower_val)
                 ci_upper.append(ci_upper_val)
                 
@@ -237,8 +237,8 @@ def plot_results(metrics, performance_df, output_path):
     
     # Styling
     ax.set_xlabel('Images per Individual', fontsize=14)
-    ax.set_ylabel('Cross-Validated Best Epoch Accuracy', fontsize=14)
-    ax.set_title('Individual ID Performance by Training Quality Threshold\n(Cross-validated best epoch across seeds)', fontsize=16, pad=20)
+    ax.set_ylabel('Cross-Validated Best Epoch F1 Score', fontsize=14)
+    ax.set_title('Individual ID Performance by Training Quality Threshold\n(Cross-validated best epoch F1 across seeds)', fontsize=16, pad=20)
     
     # Set x-axis based on actual sample sizes
     if sample_sizes:
@@ -272,7 +272,7 @@ def print_summary_table(metrics):
     print("\n" + "="*100)
     print("SUMMARY TABLE - Cross-Validated Best Epoch Performance")
     print("="*100)
-    print(f"{'Config':<25} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3} {'Avg Best Epoch':<15}")
+    print(f"{'Config':<25} {'Mean F1':<10} {'Std F1':<10} {'95% CI':<15} {'N':<3} {'Avg Best Epoch':<15}")
     print("-"*100)
     
     for (sample_size, threshold), data in sorted(metrics.items()):
@@ -307,14 +307,14 @@ def print_summary_table(metrics):
             bin_metrics = data.get('bin_metrics', {})
             
             print(f"\n{sample_size} samples, threshold ≥{threshold:.2f}:")
-            print(f"{'Bin':<15} {'Mean Acc':<10} {'Std Acc':<10} {'N Seeds':<8}")
+            print(f"{'Bin':<15} {'Mean F1':<10} {'Std F1':<10} {'N Seeds':<8}")
             print("-"*50)
             
             for bin_name in ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']:
                 if bin_name in bin_metrics:
                     bin_data = bin_metrics[bin_name]
-                    print(f"{bin_name:<15} {bin_data['mean_accuracy']:.4f}{'':>4} "
-                          f"{bin_data['std_accuracy']:.4f}{'':>4} {bin_data['n_seeds']:<8}")
+                    print(f"{bin_name:<15} {bin_data['mean_f1']:.4f}{'':>4} "
+                          f"{bin_data['std_f1']:.4f}{'':>4} {bin_data['n_seeds']:<8}")
                 else:
                     print(f"{bin_name:<15} {'No data':<20}")
 
@@ -329,7 +329,7 @@ def main():
     
     # Ensure output directory exists
     os.makedirs(args.output_dir, exist_ok=True)
-    output_path = os.path.join(args.output_dir, 'individual_id_threshold_performance.png')
+    output_path = os.path.join(args.output_dir, 'individual_id_threshold_f1_performance.png')
     
     print("="*60)
     print("Individual ID Temporal Validation Analysis")
