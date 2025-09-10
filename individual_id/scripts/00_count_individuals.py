@@ -131,38 +131,49 @@ def save_config(individuals, individual_stats, validation_indices, validation_co
     ]
     individuals_with_scores.sort(key=lambda x: x[1], reverse=True)
     
-    # Identify valid individuals who can support max_examples_per_class
+    # Identify valid individuals who can support max_examples_per_class at ALL thresholds
     max_size = max(training_sizes)
     valid_individuals = []
     
     for ind_id in individuals:
-        max_supported = max(validation_compatibility[ind_id]['overall_compatible_training_sizes'], default=0)
-        if max_supported >= max_size:
+        can_support_all_thresholds = True
+        for threshold in [0.8, 0.6, 0.4, 0.2, 0.0]:
+            threshold_key = f'threshold_{threshold:.1f}'
+            threshold_compat = validation_compatibility[ind_id]['threshold_compatibility'][threshold_key]
+            if max_size not in threshold_compat['compatible_training_sizes']:
+                can_support_all_thresholds = False
+                break
+        
+        if can_support_all_thresholds:
             valid_individuals.append(ind_id)
     
     # Sort valid individuals by pelage score
     valid_individuals.sort(key=lambda x: individual_stats[x]['pelage_score_mean'], reverse=True)
     
+    # Create minimal validation_compatibility for script 01 (only threshold keys needed)
+    minimal_validation_compatibility = {}
+    for ind_id in valid_individuals:
+        minimal_validation_compatibility[ind_id] = {
+            'threshold_compatibility': {
+                threshold_key: {} for threshold_key in validation_compatibility[ind_id]['threshold_compatibility'].keys()
+            }
+        }
+    
     config = {
-        'individuals_sorted_by_pelage': [ind[0] for ind in individuals_with_scores],
         'valid_individuals': valid_individuals,
         'max_examples_per_class': max_size,
+        'training_sizes': training_sizes,
         'individual_pelage_scores': {
             ind_id: individual_stats[ind_id]['pelage_score_mean'] 
-            for ind_id in individuals
+            for ind_id in valid_individuals  # Only include valid individuals
         },
-        'individual_total_counts': {
-            ind_id: individual_stats[ind_id]['total_samples'] 
-            for ind_id in individuals
+        'validation_indices': {
+            ind_id: validation_indices[ind_id] 
+            for ind_id in valid_individuals  # Only include valid individuals
         },
-        'validation_indices': validation_indices,
-        'validation_compatibility': validation_compatibility,
-        'training_sizes': training_sizes,
+        'validation_compatibility': minimal_validation_compatibility,
         'validation_strategy': {
-            'type': 'cumulative_by_threshold',
-            'thresholds': [0.8, 0.6, 0.4, 0.2, 0.0],
-            'training_sizes': training_sizes,
-            'max_per_range': 10
+            'type': 'cumulative_by_threshold'
         }
     }
     
