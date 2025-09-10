@@ -148,7 +148,7 @@ def create_quality_threshold_dataset(dataset, individuals, sample_size, threshol
                     # Find the dataset index that corresponds to this pandas index
                     matching_rows = ind_data[ind_data.index == val_idx]
                     if len(matching_rows) == 1:
-                        dataset_idx = matching_rows.iloc[0]['index']
+                        dataset_idx = int(matching_rows.iloc[0]['index'])  # Convert to Python int for JSON serialization
                         all_val_indices.add(dataset_idx)
                         
                         # Track which thresholds this sample belongs to
@@ -209,11 +209,20 @@ def create_quality_threshold_dataset(dataset, individuals, sample_size, threshol
     
     # Create subset datasets
     train_subset = dataset.select(train_dataset_indices)
-    val_subset = dataset.select(list(all_val_indices))
+    val_indices_list = list(all_val_indices)
+    val_subset = dataset.select(val_indices_list)
+    
+    # Remap val_threshold_memberships to use new validation dataset indices
+    # val_indices_list[new_idx] = original_dataset_idx
+    remapped_val_threshold_memberships = {}
+    for new_idx, original_idx in enumerate(val_indices_list):
+        if original_idx in val_threshold_memberships:
+            remapped_val_threshold_memberships[new_idx] = val_threshold_memberships[original_idx]
     
     print(f"Final datasets: {len(train_subset)} train, {len(val_subset)} validation")
+    print(f"Remapped {len(remapped_val_threshold_memberships)} validation threshold memberships")
     
-    return train_subset, val_subset, individual_to_class, dataset_info, val_threshold_memberships
+    return train_subset, val_subset, individual_to_class, dataset_info, remapped_val_threshold_memberships
 
 
 def create_dinov3_transform():
@@ -269,7 +278,7 @@ def calculate_bin_metrics_from_scores(predictions, labels, pelage_scores):
     return bin_metrics
 
 
-def validate_all_thresholds(model, val_loader, device):
+def validate_all_thresholds(model, val_loader, device, debug=False):
     """Single validation pass that computes metrics for all threshold levels"""
     from sklearn.metrics import f1_score
     
@@ -282,7 +291,7 @@ def validate_all_thresholds(model, val_loader, device):
     all_threshold_memberships = []
     
     with torch.no_grad():
-        for batch in val_loader:
+        for batch_idx, batch in enumerate(val_loader):
             images, labels, pelage_scores, threshold_memberships = batch
             images = images.to(device)
             outputs = model(images)
@@ -292,11 +301,31 @@ def validate_all_thresholds(model, val_loader, device):
             all_labels.extend(labels.numpy())
             all_pelage_scores.extend(pelage_scores.numpy())
             all_threshold_memberships.extend(threshold_memberships)
+            
+            # Debug: Print first batch's threshold memberships and validate data
+            if batch_idx == 0 and debug:
+                print(f"DEBUG: First batch threshold_memberships sample: {threshold_memberships[0] if len(threshold_memberships) > 0 else 'EMPTY'}")
+                print(f"DEBUG: Val batch labels range: [{labels.min()}, {labels.max()}]")
+                print(f"DEBUG: Val batch predictions range: [{preds.min()}, {preds.max()}]")
+                print(f"DEBUG: Val batch size: {len(labels)}, threshold_memberships count: {len(threshold_memberships)}")
     
     # Convert to numpy arrays
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
     all_pelage_scores = np.array(all_pelage_scores)
+    
+    if debug:
+        print(f"DEBUG: Total validation samples: {len(all_preds)}")
+        print(f"DEBUG: Validation class distribution: {np.bincount(all_labels)}")
+        print(f"DEBUG: Prediction class distribution: {np.bincount(all_preds)}")
+        print(f"DEBUG: Threshold memberships count: {len(all_threshold_memberships)}")
+        
+        # Check threshold membership statistics
+        threshold_counts = {}
+        for memberships in all_threshold_memberships:
+            for threshold in memberships:
+                threshold_counts[threshold] = threshold_counts.get(threshold, 0) + 1
+        print(f"DEBUG: Threshold membership counts: {threshold_counts}")
     
     # Compute metrics for each threshold
     threshold_metrics = {}
@@ -311,9 +340,18 @@ def validate_all_thresholds(model, val_loader, device):
             threshold_labels = all_labels[threshold_indices]
             threshold_pelage = all_pelage_scores[threshold_indices]
             
-            # Compute overall metrics
-            accuracy = (threshold_preds == threshold_labels).mean()
-            f1_macro = f1_score(threshold_labels, threshold_preds, average='macro', zero_division=0)
+            # Debug: Check if we have valid predictions and labels
+            if len(threshold_preds) == 0 or len(threshold_labels) == 0:
+                if debug:
+                    print(f"DEBUG: {threshold_key} has empty predictions or labels")
+                accuracy = 0.0
+                f1_macro = 0.0
+            else:
+                # Compute overall metrics
+                accuracy = (threshold_preds == threshold_labels).mean()
+                f1_macro = f1_score(threshold_labels, threshold_preds, average='macro', zero_division=0)
+                if debug:
+                    print(f"DEBUG: {threshold_key} - {len(threshold_indices)} samples, accuracy: {accuracy:.4f}")
             
             # Compute bin-specific metrics
             bin_metrics = calculate_bin_metrics_from_scores(
@@ -372,16 +410,16 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     threshold_value = float(threshold_approach.split('_')[1])
     threshold_key = f'threshold_{threshold_value:.1f}'
     
-    # Get the list of valid individuals from config
-    valid_individuals = config.get('valid_individuals', config['individuals_sorted_by_pelage'])
+    # Get the list of valid individuals from config (already filtered for max_examples_per_class)
+    valid_individuals = config.get('valid_individuals', [])
     
+    # Use only valid individuals - they are already filtered to support max_examples_per_class
+    # We don't need to double-check compatible_training_sizes since valid_individuals are pre-filtered
     feasible_individuals = []
     for ind_id in valid_individuals:
         compat = config['validation_compatibility'][ind_id]
         if threshold_key in compat['threshold_compatibility']:
-            threshold_compat = compat['threshold_compatibility'][threshold_key]
-            if sample_size in threshold_compat['compatible_training_sizes']:
-                feasible_individuals.append(ind_id)
+            feasible_individuals.append(ind_id)
     
     if not feasible_individuals:
         print(f"No feasible individuals for {sample_size} samples at threshold ≥{threshold_value:.1f}")
@@ -456,6 +494,17 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
             
             return image, class_label, pelage_score, threshold_memberships
     
+    # Validate that all individuals in validation set are in the class mapping
+    val_individuals = set()
+    for sample in ind_val_dataset:
+        val_individuals.add(sample['id'])
+    
+    missing_individuals = val_individuals - set(individual_to_class.keys())
+    if missing_individuals:
+        raise ValueError(f"Validation set contains individuals not in class mapping: {missing_individuals}")
+    
+    print(f"✓ Class mapping validation passed: all {len(val_individuals)} validation individuals are in the mapping")
+    
     train_dataset_torch = ReidentificationDataset(ind_train_dataset, transform, individual_to_class)
     val_dataset_torch = ReidentificationDataset(ind_val_dataset, transform, individual_to_class, val_threshold_memberships)
     
@@ -486,8 +535,21 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
         # Training
         train_loss, train_acc = trainer.train_epoch(train_loader)
         
+        # Add validation checks for first epoch
+        if epoch == 0:
+            print(f"Validation checks - Model has {num_classes} classes")
+            # Check a sample batch to ensure data integrity
+            for batch_idx, batch in enumerate(train_loader):
+                images, labels, _, _ = batch
+                assert torch.all(labels >= 0) and torch.all(labels < num_classes), f"Invalid train labels: min={labels.min()}, max={labels.max()}, expected range [0, {num_classes-1}]"
+                outputs = model(images.to(device))
+                assert outputs.shape == (len(labels), num_classes), f"Model output shape {outputs.shape} != expected ({len(labels)}, {num_classes})"
+                if batch_idx == 0:  # Only check first batch
+                    print(f"✓ Data validation passed: labels in [0,{num_classes-1}], model outputs shape {outputs.shape}")
+                break
+        
         # Validation across all threshold levels
-        val_metrics_all_thresholds = validate_all_thresholds(model, val_loader, device)
+        val_metrics_all_thresholds = validate_all_thresholds(model, val_loader, device, epoch == 0)
         
         # Use the training threshold's validation metrics for primary reporting
         training_threshold_key = f'threshold_{threshold_value:.1f}'
@@ -559,7 +621,7 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
         'individual_to_class': individual_to_class,
         'individual_scores': {ind_id: config['individual_pelage_scores'][ind_id] for ind_id in feasible_individuals},
         'dataset_info': dataset_info,
-        'validation_threshold_memberships': val_threshold_memberships,
+        'validation_threshold_memberships': {int(k): v for k, v in val_threshold_memberships.items()},
         'dataset_stats': {
             'total_samples_used': len(ind_train_dataset) + len(ind_val_dataset),
             'train_samples': len(ind_train_dataset),
