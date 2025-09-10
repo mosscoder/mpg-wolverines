@@ -10,6 +10,7 @@ import os
 import argparse
 import time
 import json
+import csv
 import torch
 import numpy as np
 from pathlib import Path
@@ -383,7 +384,7 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     set_all_seeds(seed)
     
     # Create output filename
-    filename = f"samples={sample_size}_threshold={threshold_approach}_seed={seed}.json"
+    filename = f"samples={sample_size}_threshold={threshold_approach}_seed={seed}.csv"
     output_path = os.path.join(args.output_dir, filename)
     
     # Check if should skip
@@ -606,60 +607,40 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
         'accuracy': 0.0, 'f1_macro': 0.0, 'sample_count': 0, 'bin_metrics': {}
     })
     
-    results = {
-        'epochs_trained': epochs,
-        'training_threshold': threshold_value,
-        'final_validation_by_threshold': final_val_metrics_all_thresholds,
-        'final_training_threshold_validation': final_primary_metrics,
-        'best_epoch_by_threshold': {}  # Could track best epoch per threshold if needed
-    }
-    
-    # Prepare comprehensive results
-    final_results = {
-        'job_idx': args.idx,
-        'sample_size': sample_size,
-        'threshold_approach': threshold_approach,
-        'threshold_value': threshold_value,
-        'seed': seed,
-        'num_classes': num_classes,
-        'num_individuals': len(feasible_individuals),
-        'individual_ids': feasible_individuals,
-        'individual_to_class': individual_to_class,
-        'individual_scores': {ind_id: config['individual_pelage_scores'][ind_id] for ind_id in feasible_individuals},
-        'dataset_info': dataset_info,
-        'validation_threshold_memberships': {int(k): v for k, v in val_threshold_memberships.items()},
-        'dataset_stats': {
-            'total_samples_used': len(ind_train_dataset) + len(ind_val_dataset),
-            'train_samples': len(ind_train_dataset),
-            'val_samples': len(ind_val_dataset),
-            'samples_per_individual': sample_size,
-            'threshold_used': threshold_value
-        },
-        'training_time': training_time,
-        'performance': results,
-        'train_history': trainer.train_history,
-        'val_history': trainer.val_history,
-        'experimental_params': {
-            'threshold_approach': threshold_approach,
-            'approach_details': f'Quality threshold approach: train on samples with pelage_score ≥ {threshold_value:.1f}, validate on all five cumulative threshold levels',
-            'dataset_config': 'reidentification',
-            'quality_bins': '[0.0,0.2), [0.2,0.4), [0.4,0.6), [0.6,0.8), [0.8,1.0]',
-            'validation_strategy': 'cross_threshold_unified_validation',
-            'validation_thresholds': ['0.8', '0.6', '0.4', '0.2', '0.0'],
-            'batch_size': batch_size,
-            'epochs': epochs,
-            'learning_rate': 0.001,
-            'weight_decay': 0.01
-        }
-    }
-    
-    # Save results
+    # Write CSV with epoch metrics
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
-        json.dump(final_results, f, indent=2)
+    with open(output_path, 'w', newline='') as csvfile:
+        fieldnames = ['epoch', 'train_acc', 
+                      'val_acc_0.8', 'val_n_0.8',
+                      'val_acc_0.6', 'val_n_0.6', 
+                      'val_acc_0.4', 'val_n_0.4',
+                      'val_acc_0.2', 'val_n_0.2',
+                      'val_acc_0.0', 'val_n_0.0']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        # Write each epoch's metrics
+        for i, (train_hist, val_hist) in enumerate(zip(trainer.train_history, trainer.val_history)):
+            row = {
+                'epoch': i + 1,
+                'train_acc': train_hist['accuracy']
+            }
+            
+            # Add validation metrics for each threshold
+            for threshold in [0.8, 0.6, 0.4, 0.2, 0.0]:
+                threshold_key = f'threshold_{threshold:.1f}'
+                if threshold_key in val_hist['val_by_threshold']:
+                    metrics = val_hist['val_by_threshold'][threshold_key]
+                    row[f'val_acc_{threshold:.1f}'] = metrics['accuracy']
+                    row[f'val_n_{threshold:.1f}'] = metrics['sample_count']
+                else:
+                    row[f'val_acc_{threshold:.1f}'] = 0.0
+                    row[f'val_n_{threshold:.1f}'] = 0
+            
+            writer.writerow(row)
     
     print(f"✓ Saved results to: {filename}")
-    print(f"  Final validation accuracy: {results['final_val_accuracy']:.4f}")
+    print(f"  Final validation accuracy: {final_primary_metrics['accuracy']:.4f}")
     
     # Show quality bin-specific performance if available
     if final_bin_metrics:
@@ -674,7 +655,7 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     
     print(f"  Training time: {training_time/60:.1f} minutes")
     
-    return final_results
+    return filename  # Return filename for confirmation
 
 
 def main():
@@ -750,16 +731,8 @@ def main():
     print(f"Job {args.idx} completed!")
     print(f"Successfully processed {len(results_summary)} configurations")
     
-    if results_summary:
-        avg_acc = sum(r['performance']['final_val_accuracy'] for r in results_summary) / len(results_summary)
-        best_acc = max(r['performance']['final_val_accuracy'] for r in results_summary)
-        avg_f1 = sum(r['performance']['final_val_f1_macro'] for r in results_summary) / len(results_summary)
-        best_f1 = max(r['performance']['final_val_f1_macro'] for r in results_summary)
-        print(f"Average final validation accuracy: {avg_acc:.4f}")
-        print(f"Best final validation accuracy: {best_acc:.4f}")
-        print(f"Average final validation F1 (macro): {avg_f1:.4f}")
-        print(f"Best final validation F1 (macro): {best_f1:.4f}")
-        print(f"Results saved to: {args.output_dir}")
+    print(f"Results saved to: {args.output_dir}")
+    print("CSV files contain epoch-by-epoch metrics for analysis")
 
 if __name__ == "__main__":
     main()
