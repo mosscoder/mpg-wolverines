@@ -95,9 +95,16 @@ def extract_threshold_metrics(results):
         if len(group_results) < 8:
             print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, threshold={threshold}")
         
-        best_epoch_f1s = []
-        best_epochs = []
-        bin_metrics_per_seed = defaultdict(list)  # Track bin performance across seeds
+        # Track metrics for overall F1 and each bin separately
+        best_epoch_f1s = []  # Overall F1 best epochs
+        best_epochs = []     # Overall F1 best epoch numbers
+        bin_metrics_per_seed = defaultdict(lambda: defaultdict(list))  # bin_name -> seed -> [f1_scores, best_epochs]
+        
+        # Define validation bins
+        bin_definitions = [('val_f1_bin_0.75_1.0', '[0.75,1.0]'),
+                          ('val_f1_bin_0.5_0.75', '[0.5,0.75)'),
+                          ('val_f1_bin_0.25_0.5', '[0.25,0.5)'),
+                          ('val_f1_bin_0_0.25', '[0,0.25)')]
         
         for result in group_results:
             epochs_data = result['epochs_data']
@@ -106,48 +113,62 @@ def extract_threshold_metrics(results):
                 print(f"Warning: No epoch data for {result['filename']}")
                 continue
                 
-            # Find best epoch based on overall validation F1 score
-            best_epoch_idx = 0
-            best_val_f1 = 0.0
+            # Find best epoch based on overall validation F1 score (for overall metrics)
+            best_epoch_idx_overall = 0
+            best_val_f1_overall = 0.0
             
             for i, epoch_data in enumerate(epochs_data):
                 val_f1 = epoch_data.get('val_f1_overall', 0.0)
-                if val_f1 > best_val_f1:
-                    best_val_f1 = val_f1
-                    best_epoch_idx = i
+                if val_f1 > best_val_f1_overall:
+                    best_val_f1_overall = val_f1
+                    best_epoch_idx_overall = i
             
-            best_epoch_data = epochs_data[best_epoch_idx]
-            best_epoch_f1s.append(best_val_f1)
-            best_epochs.append(best_epoch_data['epoch'])
+            best_epoch_data_overall = epochs_data[best_epoch_idx_overall]
+            best_epoch_f1s.append(best_val_f1_overall)
+            best_epochs.append(best_epoch_data_overall['epoch'])
             
-            # Add to performance data with bin-specific metrics
+            # Add to performance data with overall metrics
             performance_data.append({
                 'sample_size': sample_size,
                 'threshold': threshold,
-                'f1_score': best_val_f1,
-                'best_epoch': best_epoch_data['epoch'],
+                'f1_score': best_val_f1_overall,
+                'best_epoch': best_epoch_data_overall['epoch'],
                 'seed': result['seed']
             })
             
-            # Collect bin metrics for this seed
-            for bin_col, bin_name in [('val_f1_bin_0.75_1.0', '[0.75,1.0]'),
-                                    ('val_f1_bin_0.5_0.75', '[0.5,0.75)'),
-                                    ('val_f1_bin_0.25_0.5', '[0.25,0.5)'),
-                                    ('val_f1_bin_0_0.25', '[0,0.25)')]:
-                bin_f1 = best_epoch_data.get(bin_col, 0.0)
-                if bin_f1 > 0.0:  # Only add if we have real data
-                    bin_metrics_per_seed[bin_name].append(bin_f1)
+            # For each bin, find its own best epoch and collect metrics
+            for bin_col, bin_name in bin_definitions:
+                best_epoch_idx_bin = 0
+                best_val_f1_bin = 0.0
+                
+                # Find epoch with best F1 for this specific bin
+                for i, epoch_data in enumerate(epochs_data):
+                    bin_f1 = epoch_data.get(bin_col, 0.0)
+                    if bin_f1 > best_val_f1_bin:
+                        best_val_f1_bin = bin_f1
+                        best_epoch_idx_bin = i
+                
+                # Store the best F1 and epoch for this bin
+                if best_val_f1_bin > 0.0:  # Only add if we have real data
+                    bin_metrics_per_seed[bin_name]['f1_scores'].append(best_val_f1_bin)
+                    bin_metrics_per_seed[bin_name]['best_epochs'].append(epochs_data[best_epoch_idx_bin]['epoch'])
         
         # Store metrics for this configuration
         if best_epoch_f1s:
-            # Aggregate bin metrics across seeds
+            # Aggregate bin metrics across seeds (using bin-specific best epochs)
             aggregated_bin_metrics = {}
-            for bin_name, bin_f1s in bin_metrics_per_seed.items():
-                if bin_f1s:
+            for bin_name, bin_data in bin_metrics_per_seed.items():
+                f1_scores = bin_data['f1_scores']
+                best_epochs_bin = bin_data['best_epochs']
+                
+                if f1_scores:
                     aggregated_bin_metrics[bin_name] = {
-                        'mean_f1': np.mean(bin_f1s),
-                        'std_f1': np.std(bin_f1s, ddof=1) if len(bin_f1s) > 1 else 0.0,
-                        'n_seeds': len(bin_f1s)
+                        'mean_f1': np.mean(f1_scores),
+                        'std_f1': np.std(f1_scores, ddof=1) if len(f1_scores) > 1 else 0.0,
+                        'n_seeds': len(f1_scores),
+                        'mean_best_epoch': np.mean(best_epochs_bin),
+                        'f1_scores': f1_scores,  # Store individual scores for CI calculation
+                        'best_epochs': best_epochs_bin
                     }
             
             metrics[(sample_size, threshold)] = {
@@ -161,8 +182,13 @@ def extract_threshold_metrics(results):
             }
             
             print(f"samples={sample_size}, threshold={threshold}: "
-                  f"F1={np.mean(best_epoch_f1s):.4f} (n={len(best_epoch_f1s)} seeds, "
+                  f"Overall F1={np.mean(best_epoch_f1s):.4f} (n={len(best_epoch_f1s)} seeds, "
                   f"avg best epoch={np.mean(best_epochs):.1f})")
+            
+            # Print bin-specific metrics summary
+            for bin_name, bin_data in aggregated_bin_metrics.items():
+                print(f"  Bin {bin_name}: F1={bin_data['mean_f1']:.4f} "
+                      f"(avg best epoch={bin_data['mean_best_epoch']:.1f})")
     
     return metrics, pd.DataFrame(performance_data)
 
@@ -266,8 +292,8 @@ def plot_results(metrics, performance_df, output_path):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Figure saved to: {output_path}")
 
-def plot_bin_results(metrics, performance_df, output_dir):
-    """Create separate line charts for each validation quality bin"""
+def plot_bin_results(metrics, performance_df, output_path):
+    """Create single figure with 4 columns showing performance for each validation quality bin"""
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
     thresholds = [0.0, 0.25, 0.5, 0.75]
@@ -280,22 +306,55 @@ def plot_bin_results(metrics, performance_df, output_dir):
         0.75: '#27ae60',   # Green - highest quality
     }
     
-    # Quality bins to plot separately
+    # Quality bins to plot
     bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
     bin_display_names = {
-        '[0.75,1.0]': 'High Quality (0.75-1.0)',
-        '[0.5,0.75)': 'Medium-High Quality (0.5-0.75)', 
-        '[0.25,0.5)': 'Medium-Low Quality (0.25-0.5)',
-        '[0,0.25)': 'Low Quality (0.0-0.25)'
+        '[0.75,1.0]': 'High Quality\n(0.75-1.0)',
+        '[0.5,0.75)': 'Medium-High Quality\n(0.5-0.75)', 
+        '[0.25,0.5)': 'Medium-Low Quality\n(0.25-0.5)',
+        '[0,0.25)': 'Low Quality\n(0.0-0.25)'
     }
     
-    for bin_name in bin_names:
-        fig, ax = plt.subplots(figsize=(12, 10))
+    # Create figure with 4 subplots (1 row, 4 columns)
+    fig, axes = plt.subplots(1, 4, figsize=(24, 8), sharey=True)
+    fig.suptitle('Individual ID Performance by Validation Quality Bin\n(Bin-specific best epoch F1 across seeds)', 
+                 fontsize=18, y=0.95)
+    
+    # Collect all CI bounds for consistent y-axis scaling
+    global_ci_lower = []
+    global_ci_upper = []
+    
+    # First pass: collect all CI bounds
+    for bin_idx, bin_name in enumerate(bin_names):
+        for threshold in thresholds:
+            for sample_size in sample_sizes:
+                key = (sample_size, threshold)
+                
+                if key in metrics:
+                    data = metrics[key]
+                    bin_metrics = data.get('bin_metrics', {})
+                    
+                    if bin_name in bin_metrics:
+                        bin_data = bin_metrics[bin_name]
+                        mean_f1 = bin_data['mean_f1']
+                        f1_scores = bin_data['f1_scores']
+                        
+                        # Calculate 95% confidence interval using individual scores
+                        if len(f1_scores) > 1:
+                            sem = stats.sem(f1_scores)
+                            ci_range = stats.t.ppf(0.975, len(f1_scores)-1) * sem
+                        else:
+                            ci_range = 0
+                        
+                        global_ci_lower.append(mean_f1 - ci_range)
+                        global_ci_upper.append(mean_f1 + ci_range)
+    
+    # Second pass: create plots
+    for bin_idx, bin_name in enumerate(bin_names):
+        ax = axes[bin_idx]
         
         legend_handles = []
         legend_labels = []
-        all_ci_lower = []
-        all_ci_upper = []
         
         for threshold in thresholds:
             x_vals = []
@@ -313,31 +372,24 @@ def plot_bin_results(metrics, performance_df, output_dir):
                     if bin_name in bin_metrics:
                         bin_data = bin_metrics[bin_name]
                         mean_f1 = bin_data['mean_f1']
-                        std_f1 = bin_data['std_f1']
-                        n_seeds = bin_data['n_seeds']
+                        f1_scores = bin_data['f1_scores']
                         
-                        # Calculate 95% confidence interval
-                        if n_seeds > 1:
-                            sem = std_f1 / np.sqrt(n_seeds)
-                            ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
+                        # Calculate 95% confidence interval using individual scores
+                        if len(f1_scores) > 1:
+                            sem = stats.sem(f1_scores)
+                            ci_range = stats.t.ppf(0.975, len(f1_scores)-1) * sem
                         else:
                             ci_range = 0
                         
                         x_vals.append(sample_size)
                         y_vals.append(mean_f1)
-                        ci_lower_val = mean_f1 - ci_range
-                        ci_upper_val = mean_f1 + ci_range
-                        ci_lower.append(ci_lower_val)
-                        ci_upper.append(ci_upper_val)
-                        
-                        # Collect CI bounds for y-axis scaling
-                        all_ci_lower.append(ci_lower_val)
-                        all_ci_upper.append(ci_upper_val)
+                        ci_lower.append(mean_f1 - ci_range)
+                        ci_upper.append(mean_f1 + ci_range)
             
             if x_vals:  # Only plot if we have data
                 # Plot main line
                 line = ax.plot(x_vals, y_vals, color=colors[threshold], linewidth=2.5, 
-                              marker='o', markersize=8, label=f'threshold_{threshold}')[0]
+                              marker='o', markersize=6, label=f'threshold_{threshold}')[0]
                 
                 # Add confidence interval ribbon
                 ax.fill_between(x_vals, ci_lower, ci_upper, 
@@ -345,47 +397,44 @@ def plot_bin_results(metrics, performance_df, output_dir):
                 
                 legend_handles.append(line)
                 if threshold == 0.0:
-                    legend_labels.append(f"Training threshold ≥ {threshold:.0f} (all data)")
+                    legend_labels.append(f"≥ {threshold:.0f} (all data)")
                 else:
-                    legend_labels.append(f"Training threshold ≥ {threshold:.2f}")
+                    legend_labels.append(f"≥ {threshold:.2f}")
         
-        # Styling
-        ax.set_xlabel('Images per Individual', fontsize=14)
-        ax.set_ylabel(f'F1 Score - {bin_display_names[bin_name]}', fontsize=14)
-        ax.set_title(f'Individual ID Performance: Validation Bin {bin_display_names[bin_name]}\n(Cross-validated best epoch F1 across seeds)', fontsize=16, pad=20)
+        # Styling for each subplot
+        ax.set_xlabel('Images per Individual', fontsize=12)
+        if bin_idx == 0:  # Only leftmost plot gets y-label
+            ax.set_ylabel('F1 Score (Bin-Specific Best Epoch)', fontsize=12)
+        ax.set_title(bin_display_names[bin_name], fontsize=14, pad=15)
         
         # Set x-axis based on actual sample sizes
         if sample_sizes:
             ax.set_xticks(sample_sizes)
             ax.set_xlim(min(sample_sizes) - 1, max(sample_sizes) + 1)
         
-        # Add legend if we have data
-        if legend_handles:
-            legend = ax.legend(legend_handles, legend_labels, loc='lower right')
-            legend.set_title("Training data quality:", prop={'weight': 'bold'})
-        
-        # Set dynamic y-axis limits based on confidence interval bounds
-        if all_ci_lower and all_ci_upper:
-            min_f1 = min(all_ci_lower)
-            max_f1 = max(all_ci_upper)
-            y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
-            y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
-            ax.set_ylim(y_min, y_max)
-        else:
-            ax.set_ylim(0.0, 1.0)  # Fallback
+        # Add legend to rightmost plot only
+        if bin_idx == len(bin_names) - 1 and legend_handles:
+            legend = ax.legend(legend_handles, legend_labels, loc='lower right', fontsize=10)
+            legend.set_title("Training threshold:", prop={'size': 10, 'weight': 'bold'})
         
         # Add horizontal gridlines
         ax.grid(True, alpha=0.3, axis='y', color='lightgray')
-        
-        plt.tight_layout()
-        
-        # Create bin-specific filename
-        bin_suffix = bin_name.replace('[', '').replace(']', '').replace(')', '').replace(',', '_')
-        output_path = os.path.join(output_dir, f'individual_id_threshold_f1_performance_bin_{bin_suffix}.png')
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"Bin-specific figure saved to: {output_path}")
-        
-        plt.close()  # Close figure to free memory
+    
+    # Set consistent y-axis limits across all subplots
+    if global_ci_lower and global_ci_upper:
+        min_f1 = min(global_ci_lower)
+        max_f1 = max(global_ci_upper)
+        y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
+        y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
+        for ax in axes:
+            ax.set_ylim(y_min, y_max)
+    else:
+        for ax in axes:
+            ax.set_ylim(0.0, 1.0)  # Fallback
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Bin-specific figure saved to: {output_path}")
 
 def print_summary_table(metrics):
     """Print summary table of results"""
@@ -450,7 +499,8 @@ def main():
     
     # Ensure output directory exists
     os.makedirs(args.output_dir, exist_ok=True)
-    output_path = os.path.join(args.output_dir, 'individual_id_threshold_f1_performance.png')
+    output_path_overall = os.path.join(args.output_dir, 'individual_id_threshold_f1_performance.png')
+    output_path_bins = os.path.join(args.output_dir, 'individual_id_threshold_f1_performance_by_bin.png')
     
     print("="*60)
     print("Individual ID Temporal Validation Analysis")
@@ -469,17 +519,18 @@ def main():
         return
     
     # Create overall plot
-    plot_results(metrics, performance_df, output_path)
+    plot_results(metrics, performance_df, output_path_overall)
     
-    # Create bin-specific plots
-    print("\nGenerating bin-specific performance plots...")
-    plot_bin_results(metrics, performance_df, args.output_dir)
+    # Create bin-specific plot (single figure with 4 columns)
+    print("\nGenerating bin-specific performance plot...")
+    plot_bin_results(metrics, performance_df, output_path_bins)
     
     # Print summary table
     print_summary_table(metrics)
     
-    print(f"\nAnalysis complete! Overall figure saved to: {output_path}")
-    print("Additional bin-specific figures saved to same directory.")
+    print(f"\nAnalysis complete!")
+    print(f"Overall F1 figure saved to: {output_path_overall}")
+    print(f"Bin-specific F1 figure saved to: {output_path_bins}")
 
 if __name__ == "__main__":
     main()
