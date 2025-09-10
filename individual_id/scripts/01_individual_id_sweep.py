@@ -504,8 +504,18 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     train_dataset_torch = ReidentificationDataset(ind_train_dataset, transform, individual_to_class)
     val_dataset_torch = ReidentificationDataset(ind_val_dataset, transform, individual_to_class, val_threshold_memberships)
     
-    train_loader = DataLoader(train_dataset_torch, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset_torch, batch_size=batch_size, shuffle=False, num_workers=0)
+    # Custom collate function to handle variable-length threshold_memberships
+    def custom_collate_fn(batch):
+        images = torch.stack([item[0] for item in batch])
+        labels = torch.tensor([item[1] for item in batch])
+        pelage_scores = torch.tensor([item[2] for item in batch])
+        threshold_memberships = [item[3] for item in batch]  # Keep as list of lists
+        return images, labels, pelage_scores, threshold_memberships
+    
+    train_loader = DataLoader(train_dataset_torch, batch_size=batch_size, shuffle=True, 
+                             num_workers=0, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset_torch, batch_size=batch_size, shuffle=False, 
+                           num_workers=0, collate_fn=custom_collate_fn)
     
     # Create model (modify for multi-class)
     device = "cuda" if args.device == "gpu" else "cpu"
