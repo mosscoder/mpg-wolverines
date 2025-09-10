@@ -131,8 +131,22 @@ def save_config(individuals, individual_stats, validation_indices, validation_co
     ]
     individuals_with_scores.sort(key=lambda x: x[1], reverse=True)
     
+    # Identify valid individuals who can support max_examples_per_class
+    max_size = max(training_sizes)
+    valid_individuals = []
+    
+    for ind_id in individuals:
+        max_supported = max(validation_compatibility[ind_id]['overall_compatible_training_sizes'], default=0)
+        if max_supported >= max_size:
+            valid_individuals.append(ind_id)
+    
+    # Sort valid individuals by pelage score
+    valid_individuals.sort(key=lambda x: individual_stats[x]['pelage_score_mean'], reverse=True)
+    
     config = {
         'individuals_sorted_by_pelage': [ind[0] for ind in individuals_with_scores],
+        'valid_individuals': valid_individuals,
+        'max_examples_per_class': max_size,
         'individual_pelage_scores': {
             ind_id: individual_stats[ind_id]['pelage_score_mean'] 
             for ind_id in individuals
@@ -216,6 +230,28 @@ def main():
     # Feasibility Summary
     print(f"\nFeasibility Summary (up to {args.max_examples_per_class} examples per class):")
     print("=" * 60)
+    
+    # Show valid individuals who can support max_examples_per_class
+    max_size = max(training_sizes)
+    valid_individuals = []
+    for ind_id in individuals:
+        max_supported = max(validation_compatibility[ind_id]['overall_compatible_training_sizes'], default=0)
+        if max_supported >= max_size:
+            valid_individuals.append(ind_id)
+    
+    valid_individuals.sort(key=lambda x: individual_stats[x]['pelage_score_mean'], reverse=True)
+    
+    print(f"\nFound {len(individuals)} total individuals")
+    print(f"Only {len(valid_individuals)} individuals can support max_examples_per_class={max_size}:")
+    if valid_individuals:
+        for ind_id in valid_individuals:
+            score = individual_stats[ind_id]['pelage_score_mean']
+            max_supported = max(validation_compatibility[ind_id]['overall_compatible_training_sizes'], default=0)
+            print(f"  - {ind_id}: pelage_score={score:.3f}, max_training={max_supported}")
+    else:
+        print("  (none)")
+    
+    print(f"\nScript 01 will use only these {len(valid_individuals)} valid individuals for all experiments.")
     
     # Generate powers of 2 for display, starting from 4 to avoid too much detail
     max_power = int(math.log2(args.max_examples_per_class))

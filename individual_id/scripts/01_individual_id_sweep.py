@@ -15,6 +15,10 @@ import numpy as np
 from pathlib import Path
 from sklearn.metrics import confusion_matrix
 
+# Control parallelism to prevent OOM issues
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Disable tokenizer parallelism
+os.environ["HF_DATASETS_OFFLINE"] = "1"  # Use cached data only
+
 # Assume script is run from wolverines root directory
 sys.path.append('.')
 
@@ -24,6 +28,10 @@ from utils.training import check_result_exists, MultiClassTrainer
 from datasets import load_dataset
 import torchvision.transforms as T
 from PIL import Image
+
+# Configure datasets library to use single process
+import datasets
+datasets.config.NUM_PROC = 1
 
 
 def load_feasibility_config():
@@ -366,11 +374,15 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
         return None
     
     # Find ALL individuals feasible for this sample_size/threshold combination
+    # Use only the valid individuals that can support max_examples_per_class
     threshold_value = float(threshold_approach.split('_')[1])
     threshold_key = f'threshold_{threshold_value:.1f}'
     
+    # Get the list of valid individuals from config
+    valid_individuals = config.get('valid_individuals', config['individuals_sorted_by_pelage'])
+    
     feasible_individuals = []
-    for ind_id in config['individuals_sorted_by_pelage']:
+    for ind_id in valid_individuals:
         compat = config['validation_compatibility'][ind_id]
         if threshold_key in compat['threshold_compatibility']:
             threshold_compat = compat['threshold_compatibility'][threshold_key]
@@ -381,7 +393,8 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
         print(f"No feasible individuals for {sample_size} samples at threshold ≥{threshold_value:.1f}")
         return None
     
-    print(f"Using {len(feasible_individuals)} feasible individuals at threshold ≥{threshold_value:.1f}: {', '.join(feasible_individuals)}")
+    max_examples_per_class = config.get('max_examples_per_class', 'unknown')
+    print(f"Using {len(feasible_individuals)} feasible individuals (from {len(valid_individuals)} valid for max_examples_per_class={max_examples_per_class}) at threshold ≥{threshold_value:.1f}: {', '.join(feasible_individuals)}")
     
     # Show individual details
     for ind_id in feasible_individuals:
@@ -452,8 +465,8 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     train_dataset_torch = ReidentificationDataset(ind_train_dataset, transform, individual_to_class)
     val_dataset_torch = ReidentificationDataset(ind_val_dataset, transform, individual_to_class, val_threshold_memberships)
     
-    train_loader = DataLoader(train_dataset_torch, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset_torch, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset_torch, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset_torch, batch_size=batch_size, shuffle=False, num_workers=0)
     
     # Create model (modify for multi-class)
     device = "cuda" if args.device == "gpu" else "cpu"
