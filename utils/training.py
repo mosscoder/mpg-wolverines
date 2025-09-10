@@ -273,7 +273,9 @@ class MultiClassTrainer:
         total = 0
         
         for batch_data in train_loader:
-            if len(batch_data) == 3:  # Has pelage info
+            if len(batch_data) == 4:  # Has pelage info and threshold memberships
+                batch_images, batch_labels, _, _ = batch_data
+            elif len(batch_data) == 3:  # Has pelage info
                 batch_images, batch_labels, _ = batch_data
             else:
                 batch_images, batch_labels = batch_data
@@ -305,7 +307,9 @@ class MultiClassTrainer:
         
         with torch.no_grad():
             for batch_data in val_loader:
-                if len(batch_data) == 3:
+                if len(batch_data) == 4:  # Has pelage info and threshold memberships
+                    batch_images, batch_labels, _, _ = batch_data
+                elif len(batch_data) == 3:
                     batch_images, batch_labels, _ = batch_data
                 else:
                     batch_images, batch_labels = batch_data
