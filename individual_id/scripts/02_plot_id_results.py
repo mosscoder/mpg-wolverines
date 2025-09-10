@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Script 02: Plot Individual ID Results
-Creates bar charts with color-alpha design comparing pelage ratio training approaches.
-Analyzes performance across overall, visible, and invisible validation sets.
+Creates line charts showing individual ID performance across quality thresholds.
+Analyzes cross-validated best epoch performance for each configuration.
 """
 
 import os
@@ -18,27 +18,57 @@ from collections import defaultdict
 import argparse
 
 def load_results(results_dir):
-    """Load all result JSON files from results directory"""
+    """Load all result CSV files from results directory"""
     
-    pattern = os.path.join(results_dir, "samples=*_approach=*_seed=*.json")
-    json_files = glob.glob(pattern)
+    pattern = os.path.join(results_dir, "samples=*_threshold=*_seed=*.csv")
+    csv_files = glob.glob(pattern)
     
-    if not json_files:
+    if not csv_files:
         print(f"No result files found in {results_dir}")
         return None
     
-    print(f"Found {len(json_files)} result files")
+    print(f"Found {len(csv_files)} result files")
     
     results = []
     failed_files = []
     
-    for json_file in json_files:
+    for csv_file in csv_files:
         try:
-            with open(json_file, 'r') as f:
-                result = json.load(f)
-                results.append(result)
-        except (json.JSONDecodeError, FileNotFoundError) as e:
-            failed_files.append((json_file, str(e)))
+            # Parse filename to extract parameters
+            basename = os.path.basename(csv_file)
+            # Format: samples=X_threshold=Y.ZZ_seed=N.csv
+            parts = basename.replace('.csv', '').split('_')
+            
+            sample_size = None
+            threshold = None
+            seed = None
+            
+            for part in parts:
+                if part.startswith('samples='):
+                    sample_size = int(part.split('=')[1])
+                elif part.startswith('threshold='):
+                    threshold = float(part.split('=')[1])  # Now a float
+                elif part.startswith('seed='):
+                    seed = int(part.split('=')[1])
+            
+            if sample_size is None or threshold is None or seed is None:
+                failed_files.append((csv_file, "Could not parse filename"))
+                continue
+                
+            # Load CSV data
+            df = pd.read_csv(csv_file)
+            
+            result = {
+                'sample_size': sample_size,
+                'threshold': threshold,
+                'seed': seed,
+                'epochs_data': df.to_dict('records'),
+                'filename': basename
+            }
+            results.append(result)
+            
+        except Exception as e:
+            failed_files.append((csv_file, str(e)))
             continue
     
     if failed_files:
@@ -49,156 +79,123 @@ def load_results(results_dir):
     print(f"Successfully loaded {len(results)} results")
     return results
 
-def extract_pelage_metrics(results):
-    """Extract overall, visible, and invisible pelage metrics from results"""
+def extract_threshold_metrics(results):
+    """Extract cross-validated best epoch metrics from CSV results"""
     
-    # Group results by (sample_size, approach)
+    # Group results by (sample_size, threshold)
     grouped = defaultdict(list)
     for result in results:
-        key = (result['sample_size'], result['approach'])
+        key = (result['sample_size'], result['threshold'])
         grouped[key].append(result)
     
     metrics = {}
     performance_data = []
     
-    for (sample_size, approach), group_results in grouped.items():
+    for (sample_size, threshold), group_results in grouped.items():
         if len(group_results) < 8:
-            print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, approach={approach}")
+            print(f"Warning: Only {len(group_results)} seeds for samples={sample_size}, threshold={threshold}")
         
-        # Extract three types of validation metrics
-        overall_accs = []
-        visible_accs = []
-        invisible_accs = []
+        best_epoch_accs = []
+        best_epochs = []
+        bin_metrics_per_seed = defaultdict(list)  # Track bin performance across seeds
         
         for result in group_results:
-            # Overall F1 score from performance (primary metric)
-            if 'performance' in result and 'final_val_f1_macro' in result['performance']:
-                overall_accs.append(result['performance']['final_val_f1_macro'])
+            epochs_data = result['epochs_data']
             
-            # Pelage-specific accuracies from final metrics
-            if 'performance' in result and 'final_pelage_metrics' in result['performance']:
-                pelage_metrics = result['performance']['final_pelage_metrics']
+            if not epochs_data:
+                print(f"Warning: No epoch data for {result['filename']}")
+                continue
                 
-                if 'visible' in pelage_metrics:
-                    # Use F1 score if available, fallback to accuracy
-                    if 'f1_score' in pelage_metrics['visible']:
-                        visible_accs.append(pelage_metrics['visible']['f1_score'])
-                    else:
-                        visible_accs.append(pelage_metrics['visible']['accuracy'])
-                
-                if 'invisible' in pelage_metrics:
-                    # Use F1 score if available, fallback to accuracy
-                    if 'f1_score' in pelage_metrics['invisible']:
-                        invisible_accs.append(pelage_metrics['invisible']['f1_score'])
-                    else:
-                        invisible_accs.append(pelage_metrics['invisible']['accuracy'])
+            # Find best epoch based on overall validation accuracy
+            best_epoch_idx = 0
+            best_val_acc = 0.0
+            
+            for i, epoch_data in enumerate(epochs_data):
+                val_acc = epoch_data.get('val_acc_overall', 0.0)
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_epoch_idx = i
+            
+            best_epoch_data = epochs_data[best_epoch_idx]
+            best_epoch_accs.append(best_val_acc)
+            best_epochs.append(best_epoch_data['epoch'])
+            
+            # Add to performance data with bin-specific metrics
+            performance_data.append({
+                'sample_size': sample_size,
+                'threshold': threshold,
+                'accuracy': best_val_acc,
+                'best_epoch': best_epoch_data['epoch'],
+                'seed': result['seed']
+            })
+            
+            # Collect bin metrics for this seed
+            for bin_col, bin_name in [('val_acc_bin_0.75_1.0', '[0.75,1.0]'),
+                                    ('val_acc_bin_0.5_0.75', '[0.5,0.75)'),
+                                    ('val_acc_bin_0.25_0.5', '[0.25,0.5)'),
+                                    ('val_acc_bin_0_0.25', '[0,0.25)')]:
+                bin_acc = best_epoch_data.get(bin_col, 0.0)
+                if bin_acc > 0.0:  # Only add if we have real data
+                    bin_metrics_per_seed[bin_name].append(bin_acc)
         
-        # Store metrics for each validation type
-        config_key = (sample_size, approach)
-        
-        if overall_accs:
-            metrics[(config_key, 'overall')] = {
-                'accuracies': overall_accs,
-                'mean_accuracy': np.mean(overall_accs),
-                'std_accuracy': np.std(overall_accs, ddof=1),
-                'n_seeds': len(overall_accs)
+        # Store metrics for this configuration
+        if best_epoch_accs:
+            # Aggregate bin metrics across seeds
+            aggregated_bin_metrics = {}
+            for bin_name, bin_accs in bin_metrics_per_seed.items():
+                if bin_accs:
+                    aggregated_bin_metrics[bin_name] = {
+                        'mean_accuracy': np.mean(bin_accs),
+                        'std_accuracy': np.std(bin_accs, ddof=1) if len(bin_accs) > 1 else 0.0,
+                        'n_seeds': len(bin_accs)
+                    }
+            
+            metrics[(sample_size, threshold)] = {
+                'accuracies': best_epoch_accs,
+                'mean_accuracy': np.mean(best_epoch_accs),
+                'std_accuracy': np.std(best_epoch_accs, ddof=1),
+                'n_seeds': len(best_epoch_accs),
+                'mean_best_epoch': np.mean(best_epochs),
+                'best_epochs': best_epochs,
+                'bin_metrics': aggregated_bin_metrics
             }
             
-            # Add to performance data
-            for acc in overall_accs:
-                performance_data.append({
-                    'sample_size': sample_size,
-                    'approach': approach,
-                    'val_type': 'overall',
-                    'f1_score': acc
-                })
-        
-        if visible_accs:
-            metrics[(config_key, 'visible')] = {
-                'accuracies': visible_accs,
-                'mean_accuracy': np.mean(visible_accs),
-                'std_accuracy': np.std(visible_accs, ddof=1),
-                'n_seeds': len(visible_accs)
-            }
-            
-            # Add to performance data
-            for acc in visible_accs:
-                performance_data.append({
-                    'sample_size': sample_size,
-                    'approach': approach,
-                    'val_type': 'visible',
-                    'f1_score': acc
-                })
-        
-        if invisible_accs:
-            metrics[(config_key, 'invisible')] = {
-                'accuracies': invisible_accs,
-                'mean_accuracy': np.mean(invisible_accs),
-                'std_accuracy': np.std(invisible_accs, ddof=1),
-                'n_seeds': len(invisible_accs)
-            }
-            
-            # Add to performance data
-            for acc in invisible_accs:
-                performance_data.append({
-                    'sample_size': sample_size,
-                    'approach': approach,
-                    'val_type': 'invisible',
-                    'f1_score': acc
-                })
-        
-        print(f"samples={sample_size}, approach={approach}: "
-              f"F1={np.mean(overall_accs):.4f} (n={len(overall_accs)} seeds)")
+            print(f"samples={sample_size}, threshold={threshold}: "
+                  f"Acc={np.mean(best_epoch_accs):.4f} (n={len(best_epoch_accs)} seeds, "
+                  f"avg best epoch={np.mean(best_epochs):.1f})")
     
     return metrics, pd.DataFrame(performance_data)
 
 def plot_results(metrics, performance_df, output_path):
-    """Create bar chart with color-alpha design"""
+    """Create line chart showing performance across quality thresholds"""
     
     fig, ax = plt.subplots(figsize=(12, 10))
     
     sample_sizes = sorted(performance_df['sample_size'].unique())
-    approaches = ['pelage', 'pelage_abs', 'pelage_masked', 'pelage_abs_masked']
+    thresholds = [0.0, 0.25, 0.5, 0.75]  # New threshold values
     
-    # Colors and styles for training approaches
+    # Colors for different quality thresholds
     colors = {
-        'pelage': '#27ae60',           # Green - pelage visible
-        'pelage_abs': '#e74c3c',       # Red - pelage absent
-        'pelage_masked': '#27ae60',    # Green - pelage visible masked
-        'pelage_abs_masked': '#e74c3c' # Red - pelage absent masked
+        0.0: '#e74c3c',    # Red - lowest quality
+        0.25: '#f39c12',   # Orange 
+        0.5: '#f1c40f',    # Yellow
+        0.75: '#27ae60',   # Green - highest quality
     }
     
-    # Line styles to distinguish masked from unmasked
-    line_styles = {
-        'pelage': '-',           # Solid line - unmasked
-        'pelage_abs': '-',       # Solid line - unmasked
-        'pelage_masked': '--',   # Dashed line - masked
-        'pelage_abs_masked': '--' # Dashed line - masked
-    }
-    
-    # Markers to distinguish masked from unmasked
-    markers = {
-        'pelage': 'o',           # Circle - unmasked
-        'pelage_abs': 'o',       # Circle - unmasked
-        'pelage_masked': 's',    # Square - masked
-        'pelage_abs_masked': 's' # Square - masked
-    }
-    
-    # Plot lines with confidence interval ribbons and collect CI bounds for y-axis scaling
+    # Plot lines with confidence interval ribbons
     legend_handles = []
     legend_labels = []
     all_ci_lower = []
     all_ci_upper = []
     
-    for approach in approaches:
+    for threshold in thresholds:
         x_vals = []
         y_vals = []
         ci_lower = []
         ci_upper = []
         
         for sample_size in sample_sizes:
-            # Use overall accuracy since validation matches training condition
-            key = ((sample_size, approach), 'overall')
+            key = (sample_size, threshold)
             
             if key in metrics:
                 data = metrics[key]
@@ -225,42 +222,39 @@ def plot_results(metrics, performance_df, output_path):
         
         if x_vals:  # Only plot if we have data
             # Plot main line
-            line = ax.plot(x_vals, y_vals, color=colors[approach], linewidth=2.5, 
-                          marker=markers[approach], markersize=8, 
-                          linestyle=line_styles[approach], label=approach)[0]
+            line = ax.plot(x_vals, y_vals, color=colors[threshold], linewidth=2.5, 
+                          marker='o', markersize=8, label=f'threshold_{threshold}')[0]
             
             # Add confidence interval ribbon
             ax.fill_between(x_vals, ci_lower, ci_upper, 
-                           color=colors[approach], alpha=0.2)
+                           color=colors[threshold], alpha=0.2)
             
             legend_handles.append(line)
-            # Add descriptive labels
-            if approach == 'pelage':
-                legend_labels.append("Clear pelage (unmasked)")
-            elif approach == 'pelage_abs':
-                legend_labels.append("Obscured pelage (unmasked)")
-            elif approach == 'pelage_masked':
-                legend_labels.append("Clear pelage (SAM masked)")
-            elif approach == 'pelage_abs_masked':
-                legend_labels.append("Obscured pelage (SAM masked)")
+            if threshold == 0.0:
+                legend_labels.append(f"Training threshold ≥ {threshold:.0f} (all data)")
+            else:
+                legend_labels.append(f"Training threshold ≥ {threshold:.2f}")
     
     # Styling
-    ax.set_xlabel('Image Count per Individual', fontsize=14)
-    ax.set_ylabel('Validation F1 Score', fontsize=14)
+    ax.set_xlabel('Images per Individual', fontsize=14)
+    ax.set_ylabel('Cross-Validated Best Epoch Accuracy', fontsize=14)
+    ax.set_title('Individual ID Performance by Training Quality Threshold\n(Cross-validated best epoch across seeds)', fontsize=16, pad=20)
     
-    # Set explicit x-axis ticks every 2 examples per class
-    ax.set_xticks(range(2, 34, 2))  # Every 2 from 2 to 32
-    ax.set_xlim(0, 34)
-    # Add legend with title
+    # Set x-axis based on actual sample sizes
+    if sample_sizes:
+        ax.set_xticks(sample_sizes)
+        ax.set_xlim(min(sample_sizes) - 1, max(sample_sizes) + 1)
+    
+    # Add legend
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
-    legend.set_title("Training approach:", prop={'weight': 'bold'})
+    legend.set_title("Training data quality:", prop={'weight': 'bold'})
     
     # Set dynamic y-axis limits based on confidence interval bounds
     if all_ci_lower and all_ci_upper:
-        min_f1 = min(all_ci_lower)
-        max_f1 = max(all_ci_upper)
-        y_min = max(0.0, min_f1 - 0.02)  # Don't go below 0
-        y_max = min(1.0, max_f1 + 0.02)  # Don't go above 1
+        min_acc = min(all_ci_lower)
+        max_acc = max(all_ci_upper)
+        y_min = max(0.0, min_acc - 0.02)  # Don't go below 0
+        y_max = min(1.0, max_acc + 0.02)  # Don't go above 1
         ax.set_ylim(y_min, y_max)
     else:
         ax.set_ylim(0.0, 1.0)  # Fallback
@@ -275,30 +269,54 @@ def plot_results(metrics, performance_df, output_path):
 def print_summary_table(metrics):
     """Print summary table of results"""
     
-    print("\n" + "="*80)
-    print("SUMMARY TABLE")
-    print("="*80)
-    print(f"{'Config':<25} {'Mean F1':<10} {'Std F1':<10} {'95% CI':<15} {'N':<3}")
-    print("-"*80)
+    print("\n" + "="*100)
+    print("SUMMARY TABLE - Cross-Validated Best Epoch Performance")
+    print("="*100)
+    print(f"{'Config':<25} {'Mean Acc':<10} {'Std Acc':<10} {'95% CI':<15} {'N':<3} {'Avg Best Epoch':<15}")
+    print("-"*100)
     
-    # Only show overall metrics (no val_type separation)
-    for ((sample_size, approach), val_type), data in sorted(metrics.items()):
-        if val_type == 'overall':  # Only show overall results
-            config = f"{sample_size} {approach}"
-            mean_acc = data['mean_accuracy']
-            std_acc = data['std_accuracy']
-            n_seeds = data['n_seeds']
+    for (sample_size, threshold), data in sorted(metrics.items()):
+        config = f"{sample_size} samples ≥{threshold:.2f}"
+        mean_f1 = data['mean_f1']
+        std_f1 = data['std_f1']
+        n_seeds = data['n_seeds']
+        mean_best_epoch = data['mean_best_epoch']
+        
+        # Calculate 95% CI
+        if n_seeds > 1:
+            sem = std_f1 / np.sqrt(n_seeds)
+            ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
+            ci_str = f"±{ci_range:.3f}"
+        else:
+            ci_str = "N/A"
+        
+        print(f"{config:<25} {mean_f1:.4f}{'':>4} {std_f1:.4f}{'':>4} "
+              f"{ci_str:<15} {n_seeds:<3} {mean_best_epoch:.1f}{'':>13}")
+    
+    # Print bin-specific summary for some configurations
+    print("\n" + "="*100)
+    print("BIN-SPECIFIC PERFORMANCE (selected configurations)")
+    print("="*100)
+    
+    # Show bin performance for a few key configurations
+    key_configs = [(8, 0.0), (16, 0.0), (32, 0.0)] if metrics else []
+    
+    for sample_size, threshold in key_configs:
+        if (sample_size, threshold) in metrics:
+            data = metrics[(sample_size, threshold)]
+            bin_metrics = data.get('bin_metrics', {})
             
-            # Calculate 95% CI
-            if n_seeds > 1:
-                sem = std_acc / np.sqrt(n_seeds)
-                ci_range = stats.t.ppf(0.975, n_seeds-1) * sem
-                ci_str = f"±{ci_range:.3f}"
-            else:
-                ci_str = "N/A"
+            print(f"\n{sample_size} samples, threshold ≥{threshold:.2f}:")
+            print(f"{'Bin':<15} {'Mean Acc':<10} {'Std Acc':<10} {'N Seeds':<8}")
+            print("-"*50)
             
-            print(f"{config:<25} {mean_acc:.4f}{'':>4} {std_acc:.4f}{'':>4} "
-                  f"{ci_str:<15} {n_seeds:<3}")
+            for bin_name in ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']:
+                if bin_name in bin_metrics:
+                    bin_data = bin_metrics[bin_name]
+                    print(f"{bin_name:<15} {bin_data['mean_accuracy']:.4f}{'':>4} "
+                          f"{bin_data['std_accuracy']:.4f}{'':>4} {bin_data['n_seeds']:<8}")
+                else:
+                    print(f"{bin_name:<15} {'No data':<20}")
 
 def main():
     parser = argparse.ArgumentParser(description='Plot Individual ID results')
@@ -311,10 +329,10 @@ def main():
     
     # Ensure output directory exists
     os.makedirs(args.output_dir, exist_ok=True)
-    output_path = os.path.join(args.output_dir, 'individual_id_performance.png')
+    output_path = os.path.join(args.output_dir, 'individual_id_threshold_performance.png')
     
     print("="*60)
-    print("Individual ID Pelage Ratio Analysis")
+    print("Individual ID Temporal Validation Analysis")
     print("="*60)
     
     # Load results
@@ -322,8 +340,8 @@ def main():
     if not results:
         return
     
-    # Extract pelage metrics and create performance dataframe
-    metrics, performance_df = extract_pelage_metrics(results)
+    # Extract threshold metrics and create performance dataframe
+    metrics, performance_df = extract_threshold_metrics(results)
     
     if not metrics:
         print("No valid results found")
