@@ -114,15 +114,15 @@ def create_quality_threshold_dataset(dataset, individuals, sample_size, threshol
     
     print(f"Creating quality threshold dataset: {sample_size} samples per class, training threshold≥{threshold_value:.1f}")
     
-    # Convert dataset to DataFrame for easier processing
+    # Convert dataset to DataFrame for easier processing (indices and metadata only)
     data_list = []
     for i, sample in enumerate(dataset):
         data_list.append({
             'index': i,
             'id': sample['id'],
             'ymdh': sample['ymdh'],
-            'pelage_score': sample['pelage_score'],
-            'sample': sample
+            'pelage_score': sample['pelage_score']
+            # Removed 'sample': sample to prevent storing image data in memory
         })
     
     import pandas as pd
@@ -338,7 +338,7 @@ def validate_all_thresholds(model, val_loader, device):
     return threshold_metrics
 
 
-def train_single_config(sample_size: int, threshold_approach: str, seed: int, args: argparse.Namespace) -> dict:
+def train_single_config(sample_size: int, threshold_approach: str, seed: int, args: argparse.Namespace, dataset, config) -> dict:
     """Train one configuration and return results"""
     
     # Set seed
@@ -355,13 +355,7 @@ def train_single_config(sample_size: int, threshold_approach: str, seed: int, ar
     
     print(f"Training: samples={sample_size}, threshold={threshold_approach}, seed={seed}")
     
-    # Load reidentification dataset
-    dataset = load_reidentification_dataset()
-
-    # Load feasibility configuration
-    config = load_feasibility_config()
-    if config is None:
-        return None
+    # Dataset and config are passed as parameters (loaded once in main)
     
     # Check if we have validation indices
     if 'validation_indices' not in config:
@@ -633,26 +627,33 @@ def main():
     print(f"Individual ID Classification - Job {args.idx}")
     print("=" * 80)
     
-    # Show distribution info
+    # Load dataset and config once for all configurations
+    print("Loading dataset once for all configurations...")
+    dataset = load_reidentification_dataset()
     config = load_feasibility_config()
-    if config:
-        sample_sizes = config.get('training_sizes', [1, 2, 4, 8, 16, 32, 64])
-        thresholds = ['threshold_0.0', 'threshold_0.2', 'threshold_0.4', 'threshold_0.6', 'threshold_0.8']
-        seeds = [0, 1, 2, 3, 4, 5, 6, 7]
-        total_combinations = len(sample_sizes) * len(thresholds) * len(seeds)
-        
-        configs_per_job = total_combinations // 24
-        remainder = total_combinations % 24
-        
-        print(f"Total experiment combinations: {total_combinations}")
-        print(f"Training sizes: {sample_sizes}")
-        print(f"Distribution: {remainder} jobs get {configs_per_job + 1} configs, {24 - remainder} jobs get {configs_per_job} configs")
-        
-        if args.idx < remainder:
-            expected_configs = configs_per_job + 1
-        else:
-            expected_configs = configs_per_job
-        print(f"Job {args.idx} expected to process: {expected_configs} configurations")
+    
+    if not config:
+        print("Failed to load feasibility config")
+        return
+    
+    # Show distribution info
+    sample_sizes = config.get('training_sizes', [1, 2, 4, 8, 16, 32, 64])
+    thresholds = ['threshold_0.0', 'threshold_0.2', 'threshold_0.4', 'threshold_0.6', 'threshold_0.8']
+    seeds = [0, 1, 2, 3, 4, 5, 6, 7]
+    total_combinations = len(sample_sizes) * len(thresholds) * len(seeds)
+    
+    configs_per_job = total_combinations // 24
+    remainder = total_combinations % 24
+    
+    print(f"Total experiment combinations: {total_combinations}")
+    print(f"Training sizes: {sample_sizes}")
+    print(f"Distribution: {remainder} jobs get {configs_per_job + 1} configs, {24 - remainder} jobs get {configs_per_job} configs")
+    
+    if args.idx < remainder:
+        expected_configs = configs_per_job + 1
+    else:
+        expected_configs = configs_per_job
+    print(f"Job {args.idx} expected to process: {expected_configs} configurations")
     
     # Get combinations for this job
     combinations = get_job_combinations(args.idx)
@@ -665,12 +666,12 @@ def main():
     for sample_size, threshold, seed in combinations:
         print(f"  Samples: {sample_size}, Threshold: {threshold}, Seed: {seed}")
     
-    # Train each combination
+    # Train each combination using the shared dataset and config
     results_summary = []
     for i, (sample_size, threshold, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(sample_size, threshold, seed, args)
+            result = train_single_config(sample_size, threshold, seed, args, dataset, config)
             if result:
                 results_summary.append(result)
         except Exception as e:
