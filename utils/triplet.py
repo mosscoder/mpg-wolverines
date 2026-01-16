@@ -329,9 +329,10 @@ def compute_recall_at_k(query_embeddings: torch.Tensor,
                         gallery_labels: torch.Tensor,
                         k: int = 1) -> float:
     """
-    Compute Recall@K for retrieval evaluation.
+    Compute macro-averaged Rank-K (mean of per-individual Rank-K accuracy).
+    Each individual contributes equally regardless of sample count.
 
-    For each query, check if any of the K nearest gallery samples share the same label.
+    Rank-1: fraction of queries where top-1 match is correct
 
     Args:
         query_embeddings: Query embeddings (n_query, embedding_dim)
@@ -341,27 +342,34 @@ def compute_recall_at_k(query_embeddings: torch.Tensor,
         k: Number of nearest neighbors to consider
 
     Returns:
-        Recall@K score in [0, 1]
+        Macro-averaged Rank-K score in [0, 1]
     """
     if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
         return 0.0
 
     # Compute pairwise distances
-    # Using L2 distance since embeddings are L2-normalized
     distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
-
-    # Get top-K nearest gallery indices for each query
     _, top_k_indices = distances.topk(k, dim=1, largest=False)
 
-    # Check if any of top-K match the query label
-    correct = 0
+    # Group by individual
+    individual_correct = defaultdict(int)
+    individual_total = defaultdict(int)
+
     for i in range(query_embeddings.size(0)):
         query_label = query_labels[i].item()
+        individual_total[query_label] += 1
+
         top_k_labels = gallery_labels[top_k_indices[i]].tolist()
         if query_label in top_k_labels:
-            correct += 1
+            individual_correct[query_label] += 1
 
-    return correct / query_embeddings.size(0)
+    # Per-individual Rank-K, then mean
+    per_individual_rank_k = [
+        individual_correct[label] / individual_total[label]
+        for label in individual_total
+    ]
+
+    return np.mean(per_individual_rank_k)
 
 
 def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
@@ -371,7 +379,8 @@ def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
                                        query_quality_scores: np.ndarray,
                                        k: int = 1) -> Dict[str, Dict[str, float]]:
     """
-    Compute Recall@K by query quality bin.
+    Compute macro-averaged Rank-K by query quality bin.
+    Within each bin, compute per-individual Rank-K then take the mean.
 
     Args:
         query_embeddings: Query embeddings (n_query, embedding_dim)
@@ -382,7 +391,7 @@ def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
         k: Number of nearest neighbors
 
     Returns:
-        Dict mapping bin name to {'recall_at_k': float, 'count': int}
+        Dict mapping bin name to {'recall_at_1': float, 'recall_at_5': float, 'count': int}
     """
     if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
         return {}
@@ -390,8 +399,9 @@ def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
     # Compute pairwise distances
     distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
 
-    # Get top-K nearest indices
-    _, top_k_indices = distances.topk(k, dim=1, largest=False)
+    # Get top-K nearest indices (get enough for recall@5)
+    k_max = min(5, gallery_embeddings.size(0))
+    _, top_k_indices = distances.topk(k_max, dim=1, largest=False)
 
     # Define quality bins
     quality_bins = [
@@ -415,23 +425,37 @@ def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
             bin_metrics[bin_name] = {'recall_at_1': 0.0, 'recall_at_5': 0.0, 'count': 0}
             continue
 
-        correct_at_1 = 0
-        correct_at_5 = 0
-        k_for_5 = min(5, gallery_embeddings.size(0))
+        # Group by individual within this bin
+        individual_correct_at_1 = defaultdict(int)
+        individual_correct_at_5 = defaultdict(int)
+        individual_total = defaultdict(int)
 
         for idx in bin_indices:
             query_label = query_labels[idx].item()
+            individual_total[query_label] += 1
+
             # Recall@1
             if gallery_labels[top_k_indices[idx, 0]].item() == query_label:
-                correct_at_1 += 1
+                individual_correct_at_1[query_label] += 1
+
             # Recall@5
-            top_5_labels = gallery_labels[top_k_indices[idx, :k_for_5]].tolist()
+            top_5_labels = gallery_labels[top_k_indices[idx, :k_max]].tolist()
             if query_label in top_5_labels:
-                correct_at_5 += 1
+                individual_correct_at_5[query_label] += 1
+
+        # Per-individual Rank-K, then mean
+        per_individual_rank_1 = [
+            individual_correct_at_1[label] / individual_total[label]
+            for label in individual_total
+        ]
+        per_individual_rank_5 = [
+            individual_correct_at_5[label] / individual_total[label]
+            for label in individual_total
+        ]
 
         bin_metrics[bin_name] = {
-            'recall_at_1': correct_at_1 / len(bin_indices),
-            'recall_at_5': correct_at_5 / len(bin_indices),
+            'recall_at_1': np.mean(per_individual_rank_1) if per_individual_rank_1 else 0.0,
+            'recall_at_5': np.mean(per_individual_rank_5) if per_individual_rank_5 else 0.0,
             'count': len(bin_indices)
         }
 
@@ -443,7 +467,8 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
                                    query_labels: torch.Tensor,
                                    gallery_labels: torch.Tensor) -> float:
     """
-    Compute Mean Average Precision (mAP) for retrieval evaluation.
+    Compute macro-averaged Mean Average Precision (mAP) for retrieval evaluation.
+    Each individual contributes equally regardless of sample count.
 
     Args:
         query_embeddings: Query embeddings (n_query, embedding_dim)
@@ -452,7 +477,7 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
         gallery_labels: Gallery labels (n_gallery,)
 
     Returns:
-        mAP score in [0, 1]
+        Macro-averaged mAP score in [0, 1]
     """
     if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
         return 0.0
@@ -463,7 +488,9 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
     # Sort gallery by distance for each query
     sorted_indices = distances.argsort(dim=1)
 
-    aps = []
+    # Group APs by individual
+    individual_aps = defaultdict(list)
+
     for i in range(query_embeddings.size(0)):
         query_label = query_labels[i].item()
         sorted_gallery_labels = gallery_labels[sorted_indices[i]].tolist()
@@ -473,7 +500,7 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
         if n_relevant == 0:
             continue
 
-        # Compute AP
+        # Compute AP for this query
         relevant_count = 0
         precision_sum = 0.0
         for rank, label in enumerate(sorted_gallery_labels, 1):
@@ -482,6 +509,11 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
                 precision_sum += relevant_count / rank
 
         ap = precision_sum / n_relevant
-        aps.append(ap)
+        individual_aps[query_label].append(ap)
 
-    return np.mean(aps) if aps else 0.0
+    # Mean AP per individual, then mean across individuals
+    per_individual_map = [
+        np.mean(aps) for aps in individual_aps.values()
+    ]
+
+    return np.mean(per_individual_map) if per_individual_map else 0.0
