@@ -531,16 +531,17 @@ def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samp
         per_combo = combo_metrics[key]['per_combo']
         offset = (i - len(min_weights) / 2 + 0.5) * width
         means = [per_combo[c]['mean'] for c in combo_names]
+        stds = [per_combo[c]['std'] for c in combo_names]
 
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
-        ax3.bar(x + offset, means, width, label=label, color=colors[mw])
+        ax3.bar(x + offset, means, width, yerr=stds, label=label, color=colors[mw], capsize=3)
 
     ax3.set_xticks(x)
     ax3.set_xticklabels(combo_display)
     ax3.set_ylabel('Recall@1')
     title_suffix = '' if has_panel_c_data else '\n(no data)'
     ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch){title_suffix}')
-    ax3.legend(fontsize=7, loc='upper right')
+    ax3.legend(fontsize=7, loc='lower right')
     ax3.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
