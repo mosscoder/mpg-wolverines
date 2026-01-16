@@ -371,8 +371,9 @@ def plot_query_gallery_matrix(combo_metrics: dict, output_path: str, samples_fil
     x = np.arange(len(combo_names))
     width = 0.8 / len(min_weights)
 
-    # Track best epochs used for subtitle
+    # Track best epochs and min values for y-axis
     best_epochs_info = {}
+    all_lower_bounds = []
 
     for i, mw in enumerate(min_weights):
         key = (mw, samples_filter)
@@ -385,6 +386,11 @@ def plot_query_gallery_matrix(combo_metrics: dict, output_path: str, samples_fil
         means = [per_combo[c]['mean'] for c in combo_names]
         stds = [per_combo[c]['std'] for c in combo_names]
 
+        # Track lower bounds (mean - std) for y-axis
+        for m, s in zip(means, stds):
+            if m > 0:  # Only consider valid data
+                all_lower_bounds.append(m - s)
+
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax.bar(x + offset, means, width, yerr=stds, label=label,
                color=colors[mw], capsize=3)
@@ -395,13 +401,16 @@ def plot_query_gallery_matrix(combo_metrics: dict, output_path: str, samples_fil
                 best_epochs_info[c] = []
             best_epochs_info[c].append(per_combo[c]['best_epoch'])
 
+    # Set y-axis bottom to (min lower bound) - 0.05
+    y_bottom = min(all_lower_bounds) - 0.05 if all_lower_bounds else 0
+
     ax.set_xticks(x)
     ax.set_xticklabels(combo_display)
     ax.set_ylabel('Recall@1')
     ax.set_xlabel('Query Quality → Gallery Quality')
     ax.set_title(f'Performance by Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch)')
     ax.legend(loc='lower right')
-    ax.set_ylim(bottom=0.5)
+    ax.set_ylim(bottom=y_bottom)
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -523,6 +532,7 @@ def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samp
     width = 0.8 / len(min_weights)
 
     has_panel_c_data = any((mw, samples_filter) in combo_metrics for mw in min_weights)
+    all_lower_bounds = []
 
     for i, mw in enumerate(min_weights):
         key = (mw, samples_filter)
@@ -534,8 +544,16 @@ def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samp
         means = [per_combo[c]['mean'] for c in combo_names]
         stds = [per_combo[c]['std'] for c in combo_names]
 
+        # Track lower bounds (mean - std) for y-axis
+        for m, s in zip(means, stds):
+            if m > 0:
+                all_lower_bounds.append(m - s)
+
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax3.bar(x + offset, means, width, yerr=stds, label=label, color=colors[mw], capsize=3)
+
+    # Set y-axis bottom to (min lower bound) - 0.05
+    y_bottom = min(all_lower_bounds) - 0.05 if all_lower_bounds else 0
 
     ax3.set_xticks(x)
     ax3.set_xticklabels(combo_display)
@@ -543,7 +561,7 @@ def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samp
     title_suffix = '' if has_panel_c_data else '\n(no data)'
     ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch){title_suffix}')
     ax3.legend(fontsize=7, loc='lower right')
-    ax3.set_ylim(bottom=0.5)
+    ax3.set_ylim(bottom=y_bottom)
     ax3.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
