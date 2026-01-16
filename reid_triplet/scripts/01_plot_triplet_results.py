@@ -6,7 +6,7 @@ Generates publication-quality figures from triplet sweep experiment.
 Figures:
 A) Line plot: Recall@1 vs samples_per_class, lines by min_weight value
 B) Heatmap: min_weight × samples → Recall@1 parameter space
-C) Grouped bars: Recall@1 by validation quality bin, baseline vs best min_weight
+C) Grouped bars: Recall@1 by validation quality bin, all min_weight values
 """
 
 import os
@@ -252,81 +252,63 @@ def plot_parameter_heatmap(metrics: dict, output_path: str):
 def plot_quality_bin_comparison(metrics: dict, output_path: str):
     """
     Panel C: Grouped bars showing Recall@1 by validation quality bin.
-    Compares baseline (min_weight=1.0) vs best min_weight<1.0.
+    Shows all min_weight values as grouped bars per quality bin.
     """
-    # Find best non-baseline min_weight across all sample sizes
-    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)  # 1.0 first
     samples = sorted(set(k[1] for k in metrics.keys()))
-    non_baseline_weights = [mw for mw in min_weights if mw < 1.0]
 
-    if not non_baseline_weights:
-        print("No non-baseline min_weight values found, skipping bin comparison plot")
+    if len(min_weights) == 0:
+        print("No min_weight values found, skipping bin comparison plot")
         return
-
-    # Find best min_weight by averaging across sample sizes
-    weight_means = {}
-    for mw in non_baseline_weights:
-        recalls = []
-        for sample in samples:
-            key = (mw, sample)
-            if key in metrics:
-                recalls.append(metrics[key]['mean_recall_at_1'])
-        if recalls:
-            weight_means[mw] = np.mean(recalls)
-
-    best_weight = max(weight_means, key=weight_means.get) if weight_means else non_baseline_weights[0]
-    print(f"Best non-baseline min_weight: {best_weight}")
 
     # Quality bins
     bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
     bin_display = ['High\n(0.75-1.0)', 'Med-High\n(0.5-0.75)',
                    'Med-Low\n(0.25-0.5)', 'Low\n(0-0.25)']
 
-    # Aggregate across sample sizes for cleaner comparison
-    baseline_bins = defaultdict(list)
-    best_bins = defaultdict(list)
+    # Color scheme: gray for baseline, blue gradient for others (matching Panel A)
+    colors = {1.0: '#888888'}
+    other_weights = [mw for mw in min_weights if mw < 1.0]
+    if other_weights:
+        blues = plt.cm.Blues(np.linspace(0.4, 0.9, len(other_weights)))
+        for i, mw in enumerate(other_weights):
+            colors[mw] = blues[i]
+
+    # Collect bin metrics for all min_weights
+    all_weight_bins = {mw: defaultdict(list) for mw in min_weights}
 
     for sample in samples:
-        # Baseline (min_weight=1.0)
-        key_base = (1.0, sample)
-        if key_base in metrics:
-            for bin_name in bin_names:
-                bin_data = metrics[key_base].get('bin_metrics', {}).get(bin_name, {})
-                if 'mean' in bin_data:
-                    baseline_bins[bin_name].append(bin_data['mean'])
-
-        # Best min_weight
-        key_best = (best_weight, sample)
-        if key_best in metrics:
-            for bin_name in bin_names:
-                bin_data = metrics[key_best].get('bin_metrics', {}).get(bin_name, {})
-                if 'mean' in bin_data:
-                    best_bins[bin_name].append(bin_data['mean'])
-
-    # Compute means and stds
-    baseline_means = [np.mean(baseline_bins.get(b, [0])) for b in bin_names]
-    baseline_stds = [np.std(baseline_bins.get(b, [0]), ddof=1) if len(baseline_bins.get(b, [])) > 1 else 0 for b in bin_names]
-    best_means = [np.mean(best_bins.get(b, [0])) for b in bin_names]
-    best_stds = [np.std(best_bins.get(b, [0]), ddof=1) if len(best_bins.get(b, [])) > 1 else 0 for b in bin_names]
+        for mw in min_weights:
+            key = (mw, sample)
+            if key in metrics:
+                for bin_name in bin_names:
+                    bin_data = metrics[key].get('bin_metrics', {}).get(bin_name, {})
+                    if 'mean' in bin_data:
+                        all_weight_bins[mw][bin_name].append(bin_data['mean'])
 
     # Plot
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     x = np.arange(len(bin_names))
-    width = 0.35
+    width = 0.8 / len(min_weights)
 
-    bars1 = ax.bar(x - width/2, baseline_means, width, yerr=baseline_stds,
-                   label=f'mw = 1.0 (baseline)', color='#888888', capsize=5)
-    bars2 = ax.bar(x + width/2, best_means, width, yerr=best_stds,
-                   label=f'mw = {best_weight} (best)', color='#2980b9', capsize=5)
+    for i, mw in enumerate(min_weights):
+        offset = (i - len(min_weights) / 2 + 0.5) * width
+        means = [np.mean(all_weight_bins[mw].get(b, [0])) for b in bin_names]
+        stds = [np.std(all_weight_bins[mw].get(b, [0]), ddof=1)
+                if len(all_weight_bins[mw].get(b, [])) > 1 else 0 for b in bin_names]
+
+        label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
+        ax.bar(x + offset, means, width, yerr=stds, label=label,
+               color=colors[mw], capsize=3)
 
     ax.set_ylabel('Recall@1', fontsize=12)
     ax.set_xlabel('Validation Image Quality Bin', fontsize=12)
-    ax.set_title(f'Performance by Query Quality: Baseline vs Confidence-Weighted (mw={best_weight})\n'
-                 f'(averaged across sample sizes)', fontsize=14, pad=15)
+    ax.set_title('Performance by Query Quality Across Min Weight Values\n'
+                 '(averaged across sample sizes)', fontsize=14, pad=15)
     ax.set_xticks(x)
     ax.set_xticklabels(bin_display)
-    ax.legend()
+    ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -439,39 +421,40 @@ def create_main_figure(metrics: dict, output_dir: str):
     ax2.set_ylabel('Min Weight')
     ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch R@1)')
 
-    # Panel C: Quality bin comparison
+    # Panel C: Quality bin comparison (all min_weights)
     ax3 = fig.add_subplot(133)
 
-    non_baseline_weights = [mw for mw in min_weights if mw < 1.0]
-    if non_baseline_weights:
-        weight_means = {}
-        for mw in non_baseline_weights:
-            recalls = [metrics[(mw, s)]['mean_recall_at_1'] for s in samples if (mw, s) in metrics]
-            weight_means[mw] = np.mean(recalls) if recalls else 0
-        best_weight = max(weight_means, key=weight_means.get)
+    bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
+    bin_display = ['High', 'Med-High', 'Med-Low', 'Low']
 
-        bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
-        bin_display = ['High', 'Med-High', 'Med-Low', 'Low']
+    # Collect bin metrics for all min_weights
+    all_weight_bins = {mw: defaultdict(list) for mw in min_weights}
 
-        baseline_means, best_means = [], []
-        for bin_name in bin_names:
-            base_vals = [metrics[(1.0, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
-                        for s in samples if (1.0, s) in metrics]
-            best_vals = [metrics[(best_weight, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
-                        for s in samples if (best_weight, s) in metrics]
-            baseline_means.append(np.mean(base_vals) if base_vals else 0)
-            best_means.append(np.mean(best_vals) if best_vals else 0)
+    for sample in samples:
+        for mw in min_weights:
+            key = (mw, sample)
+            if key in metrics:
+                for bin_name in bin_names:
+                    bin_data = metrics[key].get('bin_metrics', {}).get(bin_name, {})
+                    if 'mean' in bin_data:
+                        all_weight_bins[mw][bin_name].append(bin_data['mean'])
 
-        x = np.arange(len(bin_names))
-        width = 0.35
-        ax3.bar(x - width/2, baseline_means, width, label='mw=1.0', color='#888888')
-        ax3.bar(x + width/2, best_means, width, label=f'mw={best_weight}', color='#2980b9')
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(bin_display)
-        ax3.set_ylabel('Recall@1')
-        ax3.set_title('C) Performance by Query Quality')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3, axis='y')
+    x = np.arange(len(bin_names))
+    width = 0.8 / len(min_weights)
+
+    for i, mw in enumerate(min_weights):
+        offset = (i - len(min_weights) / 2 + 0.5) * width
+        means = [np.mean(all_weight_bins[mw].get(b, [0])) for b in bin_names]
+
+        label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
+        ax3.bar(x + offset, means, width, label=label, color=colors[mw])
+
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(bin_display)
+    ax3.set_ylabel('Recall@1')
+    ax3.set_title('C) Performance by Query Quality')
+    ax3.legend(fontsize=7, loc='upper right')
+    ax3.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'triplet_quality_weighting_performance.png')
