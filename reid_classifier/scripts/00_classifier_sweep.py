@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Script 00: Quality-Weighted Triplet Loss Sweep
-Re-identification experiment with triplet loss weighted by anchor image quality.
+Script 00: Quality-Weighted Classification Sweep
+Classification experiment with cross-entropy loss weighted by anchor image quality.
 
-Hypothesis: High-quality anchor images (pelage visible) provide more reliable
-training signal, improving individual wolverine re-identification.
+Comparison experiment to reid_triplet to test if quality weighting helps
+classification but not retrieval.
 
-Grid: 6 alpha values × 6 sample sizes × 8 seeds = 288 configurations
-Distributed across 24 SLURM jobs (12 configs/job).
+Grid: 4 alpha values × 6 sample sizes × 8 seeds = 192 configurations
+Distributed across 24 SLURM jobs (8 configs/job).
 """
 
 import sys
@@ -16,13 +16,16 @@ import argparse
 import time
 import json
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 from torch.utils.data import DataLoader, Dataset as TorchDataset
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 import torchvision.transforms as T
 from PIL import Image
+from sklearn.metrics import f1_score, accuracy_score
 
 # Control parallelism and set HuggingFace cache location
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -33,15 +36,7 @@ os.environ["HF_HOME"] = "/data/hf_cache"
 sys.path.append('.')
 
 from utils.dataset import set_all_seeds
-from utils.triplet import (
-    create_embedding_model,
-    QualityWeightedTripletLoss,
-    PKBatchSampler,
-    mine_random_triplets,
-    compute_recall_at_k,
-    compute_recall_at_k_by_quality_bin,
-    compute_mean_average_precision
-)
+from utils.models import create_model
 from utils.training import check_result_exists
 
 import datasets
@@ -52,12 +47,24 @@ datasets.config.NUM_PROC = 1
 ALPHA_VALUES = [0, 0.5, 1, 2]
 SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
-MARGIN = 0.3
-EMBEDDING_DIM = 128
 LEARNING_RATE = 0.001
 EPOCHS = 50
-BATCH_K = 8  # Samples per identity in PK batch
-MIN_P = 5  # Minimum identities per batch
+BATCH_SIZE = 16
+
+
+class QualityWeightedCrossEntropyLoss(nn.Module):
+    """Cross-entropy loss weighted by sample quality score."""
+
+    def __init__(self, alpha=0.0):
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, predictions, labels, quality_scores):
+        # Per-sample cross-entropy (no reduction)
+        ce_loss = F.cross_entropy(predictions, labels, reduction='none')
+        # Quality weighting: weight = 1 + alpha * quality
+        weights = 1 + self.alpha * quality_scores
+        return (weights * ce_loss).mean()
 
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
@@ -95,7 +102,7 @@ def load_feasibility_config():
         with open(config_path, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        print(f"Error: {config_path} not found. Please run individual_id/00_count_individuals.py first.")
+        print(f"Error: {config_path} not found.")
         return None
 
 
@@ -122,19 +129,17 @@ def build_id_to_indices(dataset):
 
 def create_temporal_dataset(dataset, individuals, sample_size, seed, config, id_to_indices):
     """
-    Create temporal train/val split for triplet learning.
+    Create temporal train/val split for classification.
 
     Training: N samples per individual from all years except final
-    Validation: All samples from final year (used as queries)
+    Validation: All samples from final year
     """
     import random
 
     set_all_seeds(seed)
 
-    # Pool all data
     print(f"Creating temporal dataset: {sample_size} samples/class, seed={seed}")
 
-    # Build training and validation sets using pre-computed indices
     all_train_indices = []
     all_val_indices = []
     individual_to_class = {ind: i for i, ind in enumerate(sorted(individuals))}
@@ -177,20 +182,13 @@ def create_temporal_dataset(dataset, individuals, sample_size, seed, config, id_
     return train_dataset, val_dataset, individual_to_class, dataset_info
 
 
-class TripletDataset(TorchDataset):
-    """PyTorch dataset for triplet learning with quality scores."""
+class ClassificationDataset(TorchDataset):
+    """PyTorch dataset for classification with quality scores."""
 
     def __init__(self, hf_dataset, transform, individual_to_class):
         self.dataset = hf_dataset
         self.transform = transform
         self.individual_to_class = individual_to_class
-
-        # Pre-compute labels and quality scores
-        self.labels = []
-        self.quality_scores = []
-        for sample in hf_dataset:
-            self.labels.append(individual_to_class[sample['id']])
-            self.quality_scores.append(sample['pelage_score'])
 
     def __len__(self):
         return len(self.dataset)
@@ -201,9 +199,6 @@ class TripletDataset(TorchDataset):
         label = self.individual_to_class[sample['id']]
         quality = sample['pelage_score']
         return image, label, quality
-
-    def get_labels(self):
-        return self.labels
 
 
 def create_dinov3_transform():
@@ -216,112 +211,86 @@ def create_dinov3_transform():
 
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
-    """Train for one epoch with triplet loss."""
+    """Train for one epoch with quality-weighted cross-entropy."""
     model.train()
     total_loss = 0
-    num_batches = 0
+    correct = 0
+    total = 0
 
-    for batch_idx, (images, labels, quality_scores) in enumerate(train_loader):
+    for images, labels, quality_scores in train_loader:
         images = images.to(device)
         labels = labels.to(device)
         quality_scores = quality_scores.to(device).float()
 
-        # Get embeddings
-        embeddings = model(images)
-
-        # Mine triplets
-        anchor_emb, pos_emb, neg_emb, anchor_quality = mine_random_triplets(
-            embeddings, labels, quality_scores
-        )
-
-        if anchor_emb.size(0) == 0:
-            continue
-
-        # Compute loss
         optimizer.zero_grad()
-        loss = criterion(anchor_emb, pos_emb, neg_emb, anchor_quality)
+        outputs = model(images)
+        loss = criterion(outputs, labels, quality_scores)
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        num_batches += 1
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
 
-    return total_loss / max(num_batches, 1)
+    return total_loss / len(train_loader), correct / total
 
 
-def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, device, batch_size=32):
-    """
-    Evaluate model using Recall@K.
-
-    Gallery: All training embeddings
-    Queries: All validation embeddings
-    """
+def evaluate(model, val_loader, device):
+    """Evaluate model on validation set with per-bin metrics."""
     model.eval()
 
-    # Create datasets
-    train_torch = TripletDataset(train_dataset, transform, individual_to_class)
-    val_torch = TripletDataset(val_dataset, transform, individual_to_class)
-
-    train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    # Compute gallery embeddings
-    gallery_embeddings = []
-    gallery_labels = []
+    all_preds = []
+    all_labels = []
+    all_quality = []
 
     with torch.no_grad():
-        for images, labels, _ in train_loader:
+        for images, labels, quality_scores in val_loader:
             images = images.to(device)
-            emb = model(images)
-            gallery_embeddings.append(emb.cpu())
-            gallery_labels.extend(labels.tolist())
+            outputs = model(images)
+            _, predicted = outputs.max(1)
 
-    gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
-    gallery_labels = torch.tensor(gallery_labels)
+            all_preds.extend(predicted.cpu().tolist())
+            all_labels.extend(labels.tolist())
+            all_quality.extend(quality_scores.tolist())
 
-    # Compute query embeddings
-    query_embeddings = []
-    query_labels = []
-    query_quality = []
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    all_quality = np.array(all_quality)
 
-    with torch.no_grad():
-        for images, labels, quality in val_loader:
-            images = images.to(device)
-            emb = model(images)
-            query_embeddings.append(emb.cpu())
-            query_labels.extend(labels.tolist())
-            query_quality.extend(quality.tolist())
+    # Overall metrics
+    f1_macro = f1_score(all_labels, all_preds, average='macro')
+    accuracy = accuracy_score(all_labels, all_preds)
 
-    query_embeddings = torch.cat(query_embeddings, dim=0)
-    query_labels = torch.tensor(query_labels)
-    query_quality = np.array(query_quality)
+    # Per-bin metrics
+    bins = [
+        ('[0.75,1.0]', 0.75, 1.01),
+        ('[0.5,0.75)', 0.5, 0.75),
+        ('[0.25,0.5)', 0.25, 0.5),
+        ('[0,0.25)', 0.0, 0.25)
+    ]
 
-    # Compute metrics
-    recall_at_1 = compute_recall_at_k(query_embeddings, gallery_embeddings,
-                                      query_labels, gallery_labels, k=1)
-    mAP = compute_mean_average_precision(query_embeddings, gallery_embeddings,
-                                         query_labels, gallery_labels)
-
-    # Compute by quality bin
-    bin_metrics = compute_recall_at_k_by_quality_bin(
-        query_embeddings, gallery_embeddings,
-        query_labels, gallery_labels,
-        query_quality, k=1
-    )
-
-    # Compute distances for raw predictions (optional, for post-hoc analysis)
-    distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
+    bin_metrics = {}
+    for bin_name, low, high in bins:
+        mask = (all_quality >= low) & (all_quality < high)
+        count = mask.sum()
+        if count > 0:
+            bin_preds = all_preds[mask]
+            bin_labels = all_labels[mask]
+            bin_f1 = f1_score(bin_labels, bin_preds, average='macro')
+            bin_acc = accuracy_score(bin_labels, bin_preds)
+            bin_metrics[bin_name] = {
+                'f1_macro': float(bin_f1),
+                'accuracy': float(bin_acc),
+                'count': int(count)
+            }
+        else:
+            bin_metrics[bin_name] = {'f1_macro': 0.0, 'accuracy': 0.0, 'count': 0}
 
     return {
-        'recall_at_1': recall_at_1,
-        'mean_avg_precision': mAP,
-        'by_quality_bin': bin_metrics,
-        'raw_predictions': {
-            'distances': distances.numpy().tolist(),
-            'query_labels': query_labels.tolist(),
-            'gallery_labels': gallery_labels.tolist(),
-            'query_quality_scores': query_quality.tolist()
-        }
+        'f1_macro': float(f1_macro),
+        'accuracy': float(accuracy),
+        'by_quality_bin': bin_metrics
     }
 
 
@@ -353,8 +322,8 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         if sample_size in compatible_sizes:
             feasible_individuals.append(ind_id)
 
-    if len(feasible_individuals) < MIN_P:
-        print(f"Not enough individuals ({len(feasible_individuals)}) for PK sampling (need {MIN_P})")
+    if len(feasible_individuals) < 2:
+        print(f"Not enough individuals ({len(feasible_individuals)}) for classification")
         return None
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
@@ -364,32 +333,17 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         dataset, feasible_individuals, sample_size, seed, config, id_to_indices
     )
 
-    # Use effective_k based on sample_size for small datasets
-    effective_k = min(BATCH_K, sample_size)
-    if len(train_dataset) < MIN_P * effective_k:
-        print(f"Not enough training samples ({len(train_dataset)}) for PK batching")
-        return None
+    num_classes = len(feasible_individuals)
 
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model = create_embedding_model(embedding_dim=EMBEDDING_DIM, device=device)
+    model = create_model(num_classes=num_classes, device=device)
     print(f"Using device: {device}")
 
-    # Create transforms and dataset
+    # Create transforms and datasets
     transform = create_dinov3_transform()
-    train_torch_dataset = TripletDataset(train_dataset, transform, individual_to_class)
-
-    # Create PK batch sampler
-    try:
-        pk_sampler = PKBatchSampler(
-            labels=train_torch_dataset.get_labels(),
-            p=min(MIN_P, len(feasible_individuals)),
-            k=effective_k,
-            drop_last=True
-        )
-    except ValueError as e:
-        print(f"Cannot create PK sampler: {e}")
-        return None
+    train_torch_dataset = ClassificationDataset(train_dataset, transform, individual_to_class)
+    val_torch_dataset = ClassificationDataset(val_dataset, transform, individual_to_class)
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -399,39 +353,54 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
 
     train_loader = DataLoader(
         train_torch_dataset,
-        batch_sampler=pk_sampler,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=0,
+        collate_fn=collate_fn
+    )
+
+    val_loader = DataLoader(
+        val_torch_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
         num_workers=0,
         collate_fn=collate_fn
     )
 
     # Create loss and optimizer
-    criterion = QualityWeightedTripletLoss(margin=MARGIN, alpha=alpha)
-    optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=LEARNING_RATE)
+    criterion = QualityWeightedCrossEntropyLoss(alpha=alpha)
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=LEARNING_RATE,
+        weight_decay=0.01
+    )
 
     # Training loop
     start_time = time.time()
     epoch_history = []
-    best_recall = 0.0
+    best_f1 = 0.0
     best_epoch = 0
 
     for epoch in range(EPOCHS):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
 
-        # Evaluate every epoch for best epoch selection
-        metrics = evaluate(model, train_dataset, val_dataset, individual_to_class,
-                           transform, device)
-        recall_1 = metrics['recall_at_1']
+        # Evaluate every epoch
+        metrics = evaluate(model, val_loader, device)
+        val_f1 = metrics['f1_macro']
 
-        if recall_1 > best_recall:
-            best_recall = recall_1
+        if val_f1 > best_f1:
+            best_f1 = val_f1
             best_epoch = epoch + 1
 
-        print(f"Epoch {epoch+1:2d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}")
+        print(f"Epoch {epoch+1:2d}/{EPOCHS}: Loss={train_loss:.4f}, "
+              f"Train Acc={train_acc:.4f}, Val F1={val_f1:.4f}")
 
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
-            'val_recall_at_1': recall_1,
+            'train_accuracy': train_acc,
+            'val_f1_macro': val_f1,
+            'val_accuracy': metrics['accuracy'],
             'learning_rate': LEARNING_RATE
         })
 
@@ -439,8 +408,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
 
     # Final evaluation
     print("\nFinal evaluation...")
-    final_metrics = evaluate(model, train_dataset, val_dataset, individual_to_class,
-                             transform, device)
+    final_metrics = evaluate(model, val_loader, device)
 
     # Prepare result
     result = {
@@ -448,33 +416,31 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
             'alpha': alpha,
             'samples_per_class': sample_size,
             'seed': seed,
-            'margin': MARGIN,
-            'embedding_dim': EMBEDDING_DIM,
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
-            'batch_size_k': BATCH_K
+            'batch_size': BATCH_SIZE
         },
         'dataset': {
             'individuals': feasible_individuals,
             'train_samples_per_individual': {k: v['train_samples'] for k, v in dataset_info.items()},
             'val_samples_per_individual': {k: v['val_samples'] for k, v in dataset_info.items()},
-            'gallery_size': len(train_dataset),
-            'query_size': len(val_dataset)
+            'train_size': len(train_dataset),
+            'val_size': len(val_dataset),
+            'num_classes': num_classes
         },
         'final_metrics': {
-            'recall_at_1': final_metrics['recall_at_1'],
-            'mean_avg_precision': final_metrics['mean_avg_precision'],
+            'f1_macro': final_metrics['f1_macro'],
+            'accuracy': final_metrics['accuracy'],
             'by_quality_bin': final_metrics['by_quality_bin']
         },
         'epoch_history': epoch_history,
-        'raw_predictions': final_metrics['raw_predictions'],
         'metadata': {
             'created_at': datetime.now().isoformat(),
             'training_time_seconds': training_time,
             'job_idx': args.idx,
             'transform': 'resize_224_imagenet_norm',
             'best_epoch': best_epoch,
-            'best_recall_at_1': best_recall
+            'best_f1_macro': best_f1
         }
     }
 
@@ -484,21 +450,21 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Final R@1={final_metrics['recall_at_1']:.4f}, mAP={final_metrics['mean_avg_precision']:.4f}")
+    print(f"Final F1={final_metrics['f1_macro']:.4f}, Acc={final_metrics['accuracy']:.4f}")
     print(f"By quality bin:")
     for bin_name, bin_data in final_metrics['by_quality_bin'].items():
         if bin_data['count'] > 0:
-            print(f"  {bin_name}: R@1={bin_data['recall_at_1']:.4f} (n={bin_data['count']})")
+            print(f"  {bin_name}: F1={bin_data['f1_macro']:.4f} (n={bin_data['count']})")
 
     return filename
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Quality-weighted triplet loss sweep')
+    parser = argparse.ArgumentParser(description='Quality-weighted classification sweep')
     parser.add_argument('--idx', type=int, required=True, help='Job index (0-23)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                        default='reid_triplet/results/triplet_sweep',
+                        default='reid_classifier/results/classifier_sweep',
                         help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                         default='gpu', help='Device to use')
@@ -506,13 +472,13 @@ def main():
     args = parser.parse_args()
 
     print("=" * 80)
-    print(f"Quality-Weighted Triplet Loss Experiment - Job {args.idx}")
+    print(f"Quality-Weighted Classification Experiment - Job {args.idx}")
     print("=" * 80)
 
     # Load dataset and config
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
-    id_to_indices = build_id_to_indices(dataset)  # Build index lookup ONCE
+    id_to_indices = build_id_to_indices(dataset)
     config = load_feasibility_config()
 
     if not config:
