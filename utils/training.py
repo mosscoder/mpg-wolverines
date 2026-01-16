@@ -231,19 +231,6 @@ def check_result_exists(output_path: str) -> bool:
     return Path(output_path).exists()
 
 
-def create_result_filename(params: Dict[str, Any], seed: int) -> str:
-    """Create standardized result filename"""
-    param_strs = []
-    for key, value in sorted(params.items()):
-        if isinstance(value, float):
-            param_strs.append(f"{key}={value:.6f}")
-        else:
-            param_strs.append(f"{key}={value}")
-    
-    param_str = "_".join(param_strs)
-    return f"{param_str}_seed={seed}.json"
-
-
 class MultiClassTrainer:
     """Base trainer class for multi-class individual identification"""
     

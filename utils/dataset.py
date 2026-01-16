@@ -59,35 +59,6 @@ def load_wolverines_dataset():
     return dataset, test_dataset
 
 
-def create_stratified_sample(dataset, sample_percentage: float = 0.1, seed: int = 42):
-    """Create a stratified sample from the dataset"""
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Group indices by label
-    label_to_indices = {0: [], 1: []}
-    for idx, item in enumerate(dataset):
-        label = item['label']
-        label_to_indices[label].append(idx)
-    
-    sampled_images = []
-    sampled_labels = []
-    
-    for label in [0, 1]:
-        indices = label_to_indices[label]
-        sample_size = int(len(indices) * sample_percentage)
-        
-        # Randomly sample
-        random.shuffle(indices)
-        sampled_idx = indices[:sample_size]
-        
-        for idx in sampled_idx:
-            sampled_images.append(dataset[idx]['image'])
-            sampled_labels.append(label)
-    
-    return sampled_images, sampled_labels
-
-
 def create_stratified_train_val_split(dataset, 
                                       train_percentage: float = 0.1,
                                       val_percentage: float = 0.1,

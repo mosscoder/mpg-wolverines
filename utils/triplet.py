@@ -1,0 +1,472 @@
+"""
+Triplet loss utilities for wolverine re-identification experiments.
+Includes quality-weighted triplet loss, PK batch sampling, and embedding model.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Sampler
+from transformers import AutoModel
+import numpy as np
+import random
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict
+
+
+class EmbeddingHead(nn.Module):
+    """Linear projection head that outputs L2-normalized embeddings."""
+
+    def __init__(self, input_dim: int = 768, embedding_dim: int = 128):
+        """
+        Args:
+            input_dim: Input feature dimension from backbone (768 for DINOv3-ViT-B)
+            embedding_dim: Output embedding dimension
+        """
+        super().__init__()
+        self.fc = nn.Linear(input_dim, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input features of shape (batch_size, input_dim)
+
+        Returns:
+            L2-normalized embeddings of shape (batch_size, embedding_dim)
+        """
+        return F.normalize(self.fc(x), p=2, dim=1)
+
+
+class QualityWeightedTripletLoss(nn.Module):
+    """
+    Triplet loss weighted by anchor image quality score.
+
+    L = (1 + alpha * q_anchor) * max(0, d(a,p) - d(a,n) + margin)
+
+    Higher quality anchors (higher pelage visibility) contribute more to the loss,
+    providing stronger training signal from reliable examples.
+    """
+
+    def __init__(self, margin: float = 0.3, alpha: float = 0.0):
+        """
+        Args:
+            margin: Triplet loss margin
+            alpha: Quality weighting factor. alpha=0 means standard triplet loss.
+        """
+        super().__init__()
+        self.margin = margin
+        self.alpha = alpha
+
+    def forward(self,
+                anchor: torch.Tensor,
+                positive: torch.Tensor,
+                negative: torch.Tensor,
+                q_anchor: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            anchor: Anchor embeddings (batch_size, embedding_dim)
+            positive: Positive embeddings (batch_size, embedding_dim)
+            negative: Negative embeddings (batch_size, embedding_dim)
+            q_anchor: Quality scores for anchors (batch_size,) in [0, 1]
+
+        Returns:
+            Scalar loss value
+        """
+        # Compute distances
+        d_ap = torch.norm(anchor - positive, p=2, dim=1)
+        d_an = torch.norm(anchor - negative, p=2, dim=1)
+
+        # Standard triplet loss
+        base_loss = torch.clamp(d_ap - d_an + self.margin, min=0)
+
+        # Quality weighting
+        weight = 1.0 + self.alpha * q_anchor
+
+        return (weight * base_loss).mean()
+
+
+class PKBatchSampler(Sampler):
+    """
+    Sampler for P-K batch sampling in metric learning.
+    Each batch contains P identities with K samples each.
+    """
+
+    def __init__(self,
+                 labels: List[int],
+                 p: int = 5,
+                 k: int = 8,
+                 drop_last: bool = True):
+        """
+        Args:
+            labels: List of class labels for each sample
+            p: Number of identities per batch
+            k: Number of samples per identity
+            drop_last: Whether to drop the last incomplete batch
+        """
+        super().__init__(None)
+        self.labels = labels
+        self.p = p
+        self.k = k
+        self.drop_last = drop_last
+
+        # Group indices by label
+        self.label_to_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            self.label_to_indices[label].append(idx)
+
+        # Filter to labels with at least k samples
+        self.valid_labels = [
+            label for label, indices in self.label_to_indices.items()
+            if len(indices) >= k
+        ]
+
+        if len(self.valid_labels) < p:
+            raise ValueError(
+                f"Not enough identities with >= {k} samples. "
+                f"Need {p}, have {len(self.valid_labels)}"
+            )
+
+        self.batch_size = p * k
+
+    def __iter__(self):
+        """Generate batches of P identities × K samples."""
+        # Shuffle valid labels
+        labels = self.valid_labels.copy()
+        random.shuffle(labels)
+
+        # Shuffle indices within each label
+        label_indices = {}
+        for label in labels:
+            indices = self.label_to_indices[label].copy()
+            random.shuffle(indices)
+            label_indices[label] = indices
+
+        # Generate batches
+        batch = []
+        label_idx = 0
+
+        while label_idx + self.p <= len(labels):
+            # Select P labels for this batch
+            batch_labels = labels[label_idx:label_idx + self.p]
+            label_idx += self.p
+
+            # Get K samples from each label
+            for label in batch_labels:
+                indices = label_indices[label]
+
+                # If not enough samples, reshuffle and restart
+                if len(indices) < self.k:
+                    indices = self.label_to_indices[label].copy()
+                    random.shuffle(indices)
+                    label_indices[label] = indices
+
+                # Take K samples
+                batch.extend(indices[:self.k])
+                label_indices[label] = indices[self.k:]
+
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+
+        # Handle remaining labels by cycling back
+        if not self.drop_last and batch:
+            yield batch
+
+    def __len__(self):
+        """Number of batches per epoch."""
+        num_batches = len(self.valid_labels) // self.p
+        return num_batches
+
+
+def create_embedding_model(model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
+                           embedding_dim: int = 128,
+                           device: str = "cuda") -> nn.Module:
+    """
+    Create DINOv3 backbone with embedding head for re-identification.
+
+    Args:
+        model_name: HuggingFace model name for backbone
+        embedding_dim: Output embedding dimension
+        device: Device to place model on
+
+    Returns:
+        Model with frozen backbone and trainable embedding head
+    """
+    # Load backbone
+    backbone = AutoModel.from_pretrained(model_name)
+
+    # Freeze backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval()
+
+    # Get hidden size
+    hidden_size = backbone.config.hidden_size
+
+    # Create embedding head
+    embedding_head = EmbeddingHead(input_dim=hidden_size, embedding_dim=embedding_dim)
+
+    class EmbeddingModel(nn.Module):
+        def __init__(self, backbone, head):
+            super().__init__()
+            self.backbone = backbone
+            self.head = head
+
+        def forward(self, x):
+            with torch.no_grad():
+                outputs = self.backbone(x)
+                features = outputs.last_hidden_state[:, 0, :]  # CLS token
+            return self.head(features)
+
+        def get_trainable_parameters(self):
+            return self.head.parameters()
+
+    model = EmbeddingModel(backbone, embedding_head)
+
+    # Move to device
+    if isinstance(device, str):
+        if device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "gpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device("cpu")
+
+    return model.to(device)
+
+
+def mine_random_triplets(embeddings: torch.Tensor,
+                         labels: torch.Tensor,
+                         quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Mine random triplets from a batch.
+
+    For each sample as anchor:
+    - Positive: Random sample with same label (excluding self)
+    - Negative: Random sample with different label
+
+    Args:
+        embeddings: Batch embeddings (batch_size, embedding_dim)
+        labels: Batch labels (batch_size,)
+        quality_scores: Batch quality scores (batch_size,)
+
+    Returns:
+        Tuple of (anchor_emb, positive_emb, negative_emb, anchor_quality)
+    """
+    batch_size = embeddings.size(0)
+    device = embeddings.device
+
+    anchors = []
+    positives = []
+    negatives = []
+    anchor_qualities = []
+
+    # Group indices by label
+    label_to_indices = defaultdict(list)
+    for idx in range(batch_size):
+        label_to_indices[labels[idx].item()].append(idx)
+
+    unique_labels = list(label_to_indices.keys())
+
+    for anchor_idx in range(batch_size):
+        anchor_label = labels[anchor_idx].item()
+        same_label_indices = [i for i in label_to_indices[anchor_label] if i != anchor_idx]
+        diff_label_indices = [i for label in unique_labels if label != anchor_label
+                              for i in label_to_indices[label]]
+
+        if not same_label_indices or not diff_label_indices:
+            continue
+
+        # Random positive and negative
+        pos_idx = random.choice(same_label_indices)
+        neg_idx = random.choice(diff_label_indices)
+
+        anchors.append(anchor_idx)
+        positives.append(pos_idx)
+        negatives.append(neg_idx)
+        anchor_qualities.append(quality_scores[anchor_idx])
+
+    if not anchors:
+        # Return empty tensors if no valid triplets
+        return (torch.empty(0, embeddings.size(1), device=device),
+                torch.empty(0, embeddings.size(1), device=device),
+                torch.empty(0, embeddings.size(1), device=device),
+                torch.empty(0, device=device))
+
+    anchor_emb = embeddings[anchors]
+    positive_emb = embeddings[positives]
+    negative_emb = embeddings[negatives]
+    anchor_quality = torch.stack(anchor_qualities)
+
+    return anchor_emb, positive_emb, negative_emb, anchor_quality
+
+
+def compute_recall_at_k(query_embeddings: torch.Tensor,
+                        gallery_embeddings: torch.Tensor,
+                        query_labels: torch.Tensor,
+                        gallery_labels: torch.Tensor,
+                        k: int = 1) -> float:
+    """
+    Compute Recall@K for retrieval evaluation.
+
+    For each query, check if any of the K nearest gallery samples share the same label.
+
+    Args:
+        query_embeddings: Query embeddings (n_query, embedding_dim)
+        gallery_embeddings: Gallery embeddings (n_gallery, embedding_dim)
+        query_labels: Query labels (n_query,)
+        gallery_labels: Gallery labels (n_gallery,)
+        k: Number of nearest neighbors to consider
+
+    Returns:
+        Recall@K score in [0, 1]
+    """
+    if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
+        return 0.0
+
+    # Compute pairwise distances
+    # Using L2 distance since embeddings are L2-normalized
+    distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
+
+    # Get top-K nearest gallery indices for each query
+    _, top_k_indices = distances.topk(k, dim=1, largest=False)
+
+    # Check if any of top-K match the query label
+    correct = 0
+    for i in range(query_embeddings.size(0)):
+        query_label = query_labels[i].item()
+        top_k_labels = gallery_labels[top_k_indices[i]].tolist()
+        if query_label in top_k_labels:
+            correct += 1
+
+    return correct / query_embeddings.size(0)
+
+
+def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
+                                       gallery_embeddings: torch.Tensor,
+                                       query_labels: torch.Tensor,
+                                       gallery_labels: torch.Tensor,
+                                       query_quality_scores: np.ndarray,
+                                       k: int = 1) -> Dict[str, Dict[str, float]]:
+    """
+    Compute Recall@K by query quality bin.
+
+    Args:
+        query_embeddings: Query embeddings (n_query, embedding_dim)
+        gallery_embeddings: Gallery embeddings (n_gallery, embedding_dim)
+        query_labels: Query labels (n_query,)
+        gallery_labels: Gallery labels (n_gallery,)
+        query_quality_scores: Quality scores for queries (n_query,)
+        k: Number of nearest neighbors
+
+    Returns:
+        Dict mapping bin name to {'recall_at_k': float, 'count': int}
+    """
+    if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
+        return {}
+
+    # Compute pairwise distances
+    distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
+
+    # Get top-K nearest indices
+    _, top_k_indices = distances.topk(k, dim=1, largest=False)
+
+    # Define quality bins
+    quality_bins = [
+        (0.75, 1.0, '[0.75,1.0]'),
+        (0.50, 0.75, '[0.5,0.75)'),
+        (0.25, 0.50, '[0.25,0.5)'),
+        (0.00, 0.25, '[0,0.25)')
+    ]
+
+    bin_metrics = {}
+
+    for min_q, max_q, bin_name in quality_bins:
+        if bin_name == '[0.75,1.0]':
+            mask = (query_quality_scores >= min_q) & (query_quality_scores <= max_q)
+        else:
+            mask = (query_quality_scores >= min_q) & (query_quality_scores < max_q)
+
+        bin_indices = np.where(mask)[0]
+
+        if len(bin_indices) == 0:
+            bin_metrics[bin_name] = {'recall_at_1': 0.0, 'recall_at_5': 0.0, 'count': 0}
+            continue
+
+        correct_at_1 = 0
+        correct_at_5 = 0
+        k_for_5 = min(5, gallery_embeddings.size(0))
+
+        for idx in bin_indices:
+            query_label = query_labels[idx].item()
+            # Recall@1
+            if gallery_labels[top_k_indices[idx, 0]].item() == query_label:
+                correct_at_1 += 1
+            # Recall@5
+            top_5_labels = gallery_labels[top_k_indices[idx, :k_for_5]].tolist()
+            if query_label in top_5_labels:
+                correct_at_5 += 1
+
+        bin_metrics[bin_name] = {
+            'recall_at_1': correct_at_1 / len(bin_indices),
+            'recall_at_5': correct_at_5 / len(bin_indices),
+            'count': len(bin_indices)
+        }
+
+    return bin_metrics
+
+
+def compute_mean_average_precision(query_embeddings: torch.Tensor,
+                                   gallery_embeddings: torch.Tensor,
+                                   query_labels: torch.Tensor,
+                                   gallery_labels: torch.Tensor) -> float:
+    """
+    Compute Mean Average Precision (mAP) for retrieval evaluation.
+
+    Args:
+        query_embeddings: Query embeddings (n_query, embedding_dim)
+        gallery_embeddings: Gallery embeddings (n_gallery, embedding_dim)
+        query_labels: Query labels (n_query,)
+        gallery_labels: Gallery labels (n_gallery,)
+
+    Returns:
+        mAP score in [0, 1]
+    """
+    if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
+
+    # Sort gallery by distance for each query
+    sorted_indices = distances.argsort(dim=1)
+
+    aps = []
+    for i in range(query_embeddings.size(0)):
+        query_label = query_labels[i].item()
+        sorted_gallery_labels = gallery_labels[sorted_indices[i]].tolist()
+
+        # Count relevant items
+        n_relevant = sum(1 for label in gallery_labels.tolist() if label == query_label)
+        if n_relevant == 0:
+            continue
+
+        # Compute AP
+        relevant_count = 0
+        precision_sum = 0.0
+        for rank, label in enumerate(sorted_gallery_labels, 1):
+            if label == query_label:
+                relevant_count += 1
+                precision_sum += relevant_count / rank
+
+        ap = precision_sum / n_relevant
+        aps.append(ap)
+
+    return np.mean(aps) if aps else 0.0
