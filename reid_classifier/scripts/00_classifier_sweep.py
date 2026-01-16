@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Script 00: Quality-Weighted Classification Sweep
-Classification experiment with cross-entropy loss weighted by anchor image quality.
+Classification experiment with cross-entropy loss using confidence weighting.
 
-Comparison experiment to reid_triplet to test if quality weighting helps
-classification but not retrieval.
+Strategy: Down-weight low-quality samples (suppressing noisy gradients) rather than
+up-weighting high-quality samples.
 
-Grid: 4 alpha values × 6 sample sizes × 8 seeds = 192 configurations
+Grid: 4 min_weight values × 6 sample sizes × 8 seeds = 192 configurations
 Distributed across 24 SLURM jobs (8 configs/job).
 """
 
@@ -44,7 +44,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-ALPHA_VALUES = [0, 10, 50, 100]
+MIN_WEIGHT_VALUES = [1.0, 0.5, 0.2, 0.1]  # 1.0 = no weighting (baseline)
 SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 LEARNING_RATE = 0.001
@@ -53,27 +53,33 @@ BATCH_SIZE = 16
 
 
 class QualityWeightedCrossEntropyLoss(nn.Module):
-    """Cross-entropy loss weighted by sample quality score."""
+    """
+    Cross-entropy loss with confidence weighting (down-weighting low-quality samples).
 
-    def __init__(self, alpha=0.0):
+    weight = min_weight + (1 - min_weight) * quality
+    - High quality (q=1.0): weight = 1.0 (full contribution)
+    - Low quality (q=0.0): weight = min_weight (suppressed)
+    """
+
+    def __init__(self, min_weight: float = 1.0):
         super().__init__()
-        self.alpha = alpha
+        self.min_weight = min_weight
 
     def forward(self, predictions, labels, quality_scores):
         # Per-sample cross-entropy (no reduction)
         ce_loss = F.cross_entropy(predictions, labels, reduction='none')
-        # Quality weighting: weight = 1 + alpha * quality
-        weights = 1 + self.alpha * quality_scores
+        # Confidence weighting: down-weight low-quality samples
+        weights = self.min_weight + (1.0 - self.min_weight) * quality_scores
         return (weights * ce_loss).mean()
 
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
-    """Map job index to list of (alpha, sample_size, seed) tuples."""
+    """Map job index to list of (min_weight, sample_size, seed) tuples."""
     all_combinations = []
-    for alpha in ALPHA_VALUES:
+    for min_weight in MIN_WEIGHT_VALUES:
         for sample_size in SAMPLE_SIZES:
             for seed in SEEDS:
-                all_combinations.append((alpha, sample_size, seed))
+                all_combinations.append((min_weight, sample_size, seed))
 
     total = len(all_combinations)
     configs_per_job = total // max_jobs
@@ -294,12 +300,12 @@ def evaluate(model, val_loader, device):
     }
 
 
-def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
+def train_single_config(min_weight: float, sample_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
     """Train one configuration and return results."""
     set_all_seeds(seed)
 
     # Output path
-    filename = f"alpha={alpha:.2f}_samples={sample_size}_seed={seed}.json"
+    filename = f"min_weight={min_weight:.2f}_samples={sample_size}_seed={seed}.json"
     output_path = os.path.join(args.output_dir, filename)
 
     if check_result_exists(output_path) and not args.overwrite:
@@ -307,7 +313,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         return None
 
     print(f"\n{'='*60}")
-    print(f"Training: alpha={alpha}, samples={sample_size}, seed={seed}")
+    print(f"Training: min_weight={min_weight}, samples={sample_size}, seed={seed}")
     print(f"{'='*60}")
 
     # Get valid individuals from config
@@ -368,7 +374,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
     )
 
     # Create loss and optimizer
-    criterion = QualityWeightedCrossEntropyLoss(alpha=alpha)
+    criterion = QualityWeightedCrossEntropyLoss(min_weight=min_weight)
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=LEARNING_RATE,
@@ -413,7 +419,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
     # Prepare result
     result = {
         'config': {
-            'alpha': alpha,
+            'min_weight': min_weight,
             'samples_per_class': sample_size,
             'seed': seed,
             'learning_rate': LEARNING_RATE,
@@ -486,9 +492,9 @@ def main():
         return
 
     # Show experiment info
-    total_combinations = len(ALPHA_VALUES) * len(SAMPLE_SIZES) * len(SEEDS)
+    total_combinations = len(MIN_WEIGHT_VALUES) * len(SAMPLE_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
-    print(f"  Alpha values: {ALPHA_VALUES}")
+    print(f"  Min weight values: {MIN_WEIGHT_VALUES}")
     print(f"  Sample sizes: {SAMPLE_SIZES}")
     print(f"  Seeds: {SEEDS}")
     print(f"  Total combinations: {total_combinations}")
@@ -502,17 +508,17 @@ def main():
         return
 
     print(f"\nJob {args.idx} processing {len(combinations)} configurations:")
-    for alpha, sample_size, seed in combinations[:5]:
-        print(f"  alpha={alpha}, samples={sample_size}, seed={seed}")
+    for min_weight, sample_size, seed in combinations[:5]:
+        print(f"  min_weight={min_weight}, samples={sample_size}, seed={seed}")
     if len(combinations) > 5:
         print(f"  ... and {len(combinations) - 5} more")
 
     # Train each configuration
     results_summary = []
-    for i, (alpha, sample_size, seed) in enumerate(combinations):
+    for i, (min_weight, sample_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(alpha, sample_size, seed, args, dataset, config, id_to_indices)
+            result = train_single_config(min_weight, sample_size, seed, args, dataset, config, id_to_indices)
             if result:
                 results_summary.append(result)
         except Exception as e:

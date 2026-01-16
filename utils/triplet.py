@@ -39,28 +39,29 @@ class EmbeddingHead(nn.Module):
 
 class QualityWeightedTripletLoss(nn.Module):
     """
-    Triplet loss weighted by anchor-positive quality product.
+    Triplet loss with confidence weighting (down-weighting low-quality pairs).
 
-    L = (1 + alpha * q_anchor * q_positive) * max(0, d(a,p) - d(a,n) + margin)
+    L = weight * max(0, d(a,p) - d(a,n) + margin)
 
-    Product weighting only significantly upweights triplets where BOTH the anchor
-    and positive are high quality, reducing noise from mixed-quality pairs.
+    where weight = min_weight + (1 - min_weight) * q_anchor * q_positive
 
-    Scaling note: Quality scores are pelage_score in [0, 1]. The product of two
-    [0,1] values is typically smaller (e.g., 0.5 * 0.5 = 0.25), so product weighting
-    is more conservative. May need higher alpha values to achieve similar effect
-    as anchor-only weighting.
+    This down-weights noisy gradients from low-quality pairs rather than trying
+    to up-weight good pairs (which often have zero loss anyway due to ReLU).
+
+    - High quality pair (q=1.0): weight = 1.0 (full contribution)
+    - Low quality pair (q=0.0): weight = min_weight (suppressed)
     """
 
-    def __init__(self, margin: float = 0.3, alpha: float = 0.0):
+    def __init__(self, margin: float = 0.3, min_weight: float = 1.0):
         """
         Args:
             margin: Triplet loss margin
-            alpha: Quality weighting factor. alpha=0 means standard triplet loss.
+            min_weight: Minimum weight for lowest quality pairs.
+                        1.0 = no weighting (baseline), 0.1 = 10x suppression.
         """
         super().__init__()
         self.margin = margin
-        self.alpha = alpha
+        self.min_weight = min_weight
 
     def forward(self,
                 anchor: torch.Tensor,
@@ -86,9 +87,11 @@ class QualityWeightedTripletLoss(nn.Module):
         # Standard triplet loss
         base_loss = torch.clamp(d_ap - d_an + self.margin, min=0)
 
-        # Product weighting: only upweight when BOTH anchor and positive are high quality
-        # This reduces noise from mixed-quality pairs where one image is unreliable
-        weight = 1.0 + self.alpha * q_anchor * q_positive
+        # Confidence weighting: down-weight low-quality pairs
+        # High quality (q=1): weight = 1.0
+        # Low quality (q=0): weight = min_weight
+        quality_product = q_anchor * q_positive
+        weight = self.min_weight + (1.0 - self.min_weight) * quality_product
 
         return (weight * base_loss).mean()
 
