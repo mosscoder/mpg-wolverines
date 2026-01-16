@@ -49,7 +49,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-ALPHA_VALUES = [0, 1, 10, 100]
+ALPHA_VALUES = [0, 10, 50, 100]
 SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 MARGIN = 0.3
