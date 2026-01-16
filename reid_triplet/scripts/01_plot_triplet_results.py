@@ -3,10 +3,13 @@
 Script 01: Plot Quality-Weighted Triplet Loss Results
 Generates publication-quality figures from triplet sweep experiment.
 
+All metrics are computed and stored during training (in epoch_history),
+so no GPU inference is needed for plotting.
+
 Figures:
 A) Line plot: Recall@1 vs samples_per_class, lines by min_weight value
 B) Heatmap: min_weight × samples → Recall@1 parameter space
-C) Grouped bars: Recall@1 by validation quality bin, all min_weight values
+C) Grouped bars: Recall@1 by query×gallery quality combo, all min_weight values
 """
 
 import os
@@ -20,9 +23,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from collections import defaultdict
+from typing import Dict, List, Tuple
+from pathlib import Path
 
 sys.path.append('.')
-from utils.results import ResultsCollection, load_json_results
+from utils.results import ResultsCollection
 
 
 def load_triplet_results(results_dir: str) -> ResultsCollection:
@@ -47,8 +52,6 @@ def load_triplet_results(results_dir: str) -> ResultsCollection:
                 data['min_weight'] = data['config']['min_weight']
                 data['samples_per_class'] = data['config']['samples_per_class']
                 data['seed'] = data['config']['seed']
-                # Note: recall_at_1 will be computed from best epoch
-                # in extract_metrics(), not from final_metrics
                 results.append(data)
         except Exception as e:
             failed.append((json_file, str(e)))
@@ -60,86 +63,168 @@ def load_triplet_results(results_dir: str) -> ResultsCollection:
     return ResultsCollection(results)
 
 
+def find_best_epoch_for_combo(all_histories: List[List[dict]], combo: str) -> Tuple[int, float]:
+    """
+    Find the epoch that maximizes mean recall for a specific query/gallery combo.
+
+    Args:
+        all_histories: List of epoch_history lists (one per seed)
+        combo: Quality combo name (e.g., 'HQ_HG', 'LQ_LG')
+
+    Returns:
+        Tuple of (best_epoch, best_mean_recall)
+    """
+    if not all_histories or not all_histories[0]:
+        return 50, 0.0
+
+    # Get all epochs that have query_gallery_matrix
+    epochs_with_matrix = []
+    for h in all_histories[0]:
+        if 'query_gallery_matrix' in h and combo in h.get('query_gallery_matrix', {}):
+            epochs_with_matrix.append(h['epoch'])
+
+    if not epochs_with_matrix:
+        # Fallback to overall recall if no matrix data
+        return find_best_epoch_for_overall_recall(all_histories)
+
+    best_epoch = None
+    best_mean = -1
+
+    for epoch in epochs_with_matrix:
+        recalls = []
+        for history in all_histories:
+            for h in history:
+                if h['epoch'] == epoch:
+                    qg_matrix = h.get('query_gallery_matrix', {})
+                    if combo in qg_matrix:
+                        recalls.append(qg_matrix[combo]['recall_at_1'])
+                    break
+
+        if recalls:
+            mean_recall = np.mean(recalls)
+            if mean_recall > best_mean:
+                best_mean = mean_recall
+                best_epoch = epoch
+
+    return best_epoch or 50, best_mean
+
+
+def find_best_epoch_for_overall_recall(all_histories: List[List[dict]]) -> Tuple[int, float]:
+    """Find epoch with best mean val_recall_at_1 across seeds."""
+    if not all_histories or not all_histories[0]:
+        return 50, 0.0
+
+    eval_epochs = [h['epoch'] for h in all_histories[0] if 'val_recall_at_1' in h]
+
+    best_epoch = None
+    best_mean = -1
+
+    for epoch in eval_epochs:
+        recalls = []
+        for history in all_histories:
+            for h in history:
+                if h['epoch'] == epoch and 'val_recall_at_1' in h:
+                    recalls.append(h['val_recall_at_1'])
+                    break
+
+        if recalls:
+            mean_recall = np.mean(recalls)
+            if mean_recall > best_mean:
+                best_mean = mean_recall
+                best_epoch = epoch
+
+    return best_epoch or 50, best_mean
+
+
 def extract_metrics(results: ResultsCollection) -> dict:
     """
     Extract aggregated metrics for plotting using best-epoch selection.
 
     For each (min_weight, samples) config, finds the epoch with best mean Recall@1
-    across all 8 seeds, then reports that epoch's metrics instead of epoch 50.
+    across all 8 seeds, then reports that epoch's metrics.
     """
-    # Group by (min_weight, samples_per_class)
     groups = results.group_by('min_weight', 'samples_per_class')
 
     metrics = {}
     for (min_weight, samples), group in groups.items():
-        # Get epoch history from all seeds
         all_histories = [r.get('epoch_history', []) for r in group]
 
         if not all_histories or not all_histories[0]:
-            # Fallback to final_metrics if no epoch history
-            recall_values = [r.get('final_metrics', {}).get('recall_at_1', 0) for r in group]
-            mAP_values = [r.get('final_metrics', {}).get('mean_avg_precision', 0) for r in group]
-            best_epoch = 50
-        else:
-            # Find epochs where we have val_recall_at_1
-            eval_epochs = [h['epoch'] for h in all_histories[0] if 'val_recall_at_1' in h]
+            continue
 
-            # For each eval epoch, compute mean recall across seeds
-            best_epoch = None
-            best_mean_recall = -1
+        # Find best epoch for overall recall
+        best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
 
-            for epoch in eval_epochs:
-                epoch_recalls = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == epoch and 'val_recall_at_1' in h:
-                            epoch_recalls.append(h['val_recall_at_1'])
-                            break
-
-                if epoch_recalls:
-                    mean_recall = np.mean(epoch_recalls)
-                    if mean_recall > best_mean_recall:
-                        best_mean_recall = mean_recall
-                        best_epoch = epoch
-
-            # Extract metrics at best epoch for each seed
-            recall_values = []
-            for history in all_histories:
-                for h in history:
-                    if h['epoch'] == best_epoch and 'val_recall_at_1' in h:
-                        recall_values.append(h['val_recall_at_1'])
-                        break
-
-            # mAP not tracked per epoch, use final
-            mAP_values = [r.get('final_metrics', {}).get('mean_avg_precision', 0) for r in group]
+        # Extract recall values at best epoch
+        recall_values = []
+        for history in all_histories:
+            for h in history:
+                if h['epoch'] == best_epoch and 'val_recall_at_1' in h:
+                    recall_values.append(h['val_recall_at_1'])
+                    break
 
         if recall_values:
             metrics[(min_weight, samples)] = {
                 'recall_at_1_values': recall_values,
                 'mean_recall_at_1': np.mean(recall_values),
                 'std_recall_at_1': np.std(recall_values, ddof=1) if len(recall_values) > 1 else 0,
-                'mean_mAP': np.mean(mAP_values) if mAP_values else 0,
                 'n_seeds': len(recall_values),
                 'best_epoch': best_epoch
             }
 
-            # Extract bin-specific metrics from final_metrics
-            # (bin metrics not tracked per-epoch, so use final)
-            bin_metrics = defaultdict(list)
-            for r in group:
-                by_bin = r.get('final_metrics', {}).get('by_quality_bin', {})
-                for bin_name, bin_data in by_bin.items():
-                    if bin_data.get('count', 0) > 0:
-                        bin_metrics[bin_name].append(bin_data.get('recall_at_1', 0))
+    return metrics
 
-            metrics[(min_weight, samples)]['bin_metrics'] = {
-                bin_name: {
-                    'mean': np.mean(vals),
-                    'std': np.std(vals, ddof=1) if len(vals) > 1 else 0,
-                    'values': vals
-                }
-                for bin_name, vals in bin_metrics.items()
+
+def extract_metrics_per_combo(results: ResultsCollection) -> dict:
+    """
+    Extract metrics with per-combo best epoch selection.
+
+    For each (min_weight, samples) config and each quality combo (HQ_HG, etc.),
+    finds the best epoch for that specific combo and extracts per-seed values.
+
+    Returns dict keyed by (min_weight, samples) with:
+        - 'recall_at_1': overall best epoch metrics
+        - 'per_combo': {combo: {'best_epoch': int, 'mean': float, 'std': float, 'values': list}}
+    """
+    groups = results.group_by('min_weight', 'samples_per_class')
+    combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
+
+    metrics = {}
+    for (min_weight, samples), group in groups.items():
+        all_histories = [r.get('epoch_history', []) for r in group]
+
+        if not all_histories or not all_histories[0]:
+            continue
+
+        per_combo = {}
+        for combo in combo_names:
+            # Find best epoch for this combo (mean across seeds)
+            best_epoch, best_mean = find_best_epoch_for_combo(all_histories, combo)
+
+            # Extract per-seed values at best epoch
+            values = []
+            counts = []
+            gallery_sizes = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch:
+                        qg_matrix = h.get('query_gallery_matrix', {})
+                        if combo in qg_matrix:
+                            values.append(qg_matrix[combo]['recall_at_1'])
+                            counts.append(qg_matrix[combo].get('count', 0))
+                            gallery_sizes.append(qg_matrix[combo].get('gallery_size', 0))
+                        break
+
+            per_combo[combo] = {
+                'best_epoch': best_epoch,
+                'mean': np.mean(values) if values else 0,
+                'std': np.std(values, ddof=1) if len(values) > 1 else 0,
+                'values': values,
+                'avg_count': np.mean(counts) if counts else 0,
+                'avg_gallery_size': np.mean(gallery_sizes) if gallery_sizes else 0
             }
+
+        metrics[(min_weight, samples)] = {'per_combo': per_combo}
 
     return metrics
 
@@ -152,7 +237,7 @@ def plot_recall_vs_samples(metrics: dict, output_path: str):
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Get unique values
-    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)  # 1.0 first (baseline)
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)
     samples = sorted(set(k[1] for k in metrics.keys()))
 
     # Color scheme: gray for min_weight=1.0 (baseline), blue gradient for others
@@ -249,18 +334,17 @@ def plot_parameter_heatmap(metrics: dict, output_path: str):
     print(f"Saved: {output_path}")
 
 
-def plot_query_gallery_matrix(metrics: dict, results: 'ResultsCollection', output_path: str, samples_filter: int = 64):
+def plot_query_gallery_matrix(combo_metrics: dict, output_path: str, samples_filter: int = 64):
     """
     Panel C: Grouped bars showing Recall@1 by query×gallery quality combinations.
-    Shows all min_weight values as grouped bars within each quality combo.
+    Each combo uses its own best epoch for selection.
 
     Args:
-        metrics: Dict keyed by (min_weight, samples_per_class)
-        results: ResultsCollection with raw result data
+        combo_metrics: Dict from extract_metrics_per_combo()
         output_path: Where to save the figure
         samples_filter: Which samples_per_class to use (default 64)
     """
-    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)  # 1.0 first
+    min_weights = sorted(set(k[0] for k in combo_metrics.keys()), reverse=True)
     combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
     combo_display = ['HQ→HG', 'HQ→LG', 'LQ→HG', 'LQ→LG']
 
@@ -276,42 +360,46 @@ def plot_query_gallery_matrix(metrics: dict, results: 'ResultsCollection', outpu
         for i, mw in enumerate(other_weights):
             colors[mw] = blues[i]
 
-    # Collect metrics for each mw at the specified samples_filter
-    # Aggregate across seeds by going back to raw results
-    mw_combo_recalls = {mw: {c: [] for c in combo_names} for mw in min_weights}
-
-    for result in results:
-        mw = result.get('min_weight')
-        samples = result.get('samples_per_class')
-        if samples != samples_filter or mw not in min_weights:
-            continue
-
-        matrix = result.get('final_metrics', {}).get('query_gallery_matrix', {})
-        for combo in combo_names:
-            if combo in matrix:
-                mw_combo_recalls[mw][combo].append(matrix[combo]['recall_at_1'])
+    # Check if we have data for the specified samples_filter
+    has_data = any((mw, samples_filter) in combo_metrics for mw in min_weights)
+    if not has_data:
+        print(f"No data found for samples={samples_filter}")
+        return
 
     # Plot grouped bars
     fig, ax = plt.subplots(figsize=(12, 6))
     x = np.arange(len(combo_names))
     width = 0.8 / len(min_weights)
 
+    # Track best epochs used for subtitle
+    best_epochs_info = {}
+
     for i, mw in enumerate(min_weights):
+        key = (mw, samples_filter)
+        if key not in combo_metrics:
+            continue
+
+        per_combo = combo_metrics[key]['per_combo']
         offset = (i - len(min_weights) / 2 + 0.5) * width
-        means = [np.mean(mw_combo_recalls[mw][c]) if mw_combo_recalls[mw][c] else 0
-                 for c in combo_names]
-        stds = [np.std(mw_combo_recalls[mw][c], ddof=1) if len(mw_combo_recalls[mw][c]) > 1 else 0
-                for c in combo_names]
+
+        means = [per_combo[c]['mean'] for c in combo_names]
+        stds = [per_combo[c]['std'] for c in combo_names]
 
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax.bar(x + offset, means, width, yerr=stds, label=label,
                color=colors[mw], capsize=3)
 
+        # Track best epochs
+        for c in combo_names:
+            if c not in best_epochs_info:
+                best_epochs_info[c] = []
+            best_epochs_info[c].append(per_combo[c]['best_epoch'])
+
     ax.set_xticks(x)
     ax.set_xticklabels(combo_display)
     ax.set_ylabel('Recall@1')
     ax.set_xlabel('Query Quality → Gallery Quality')
-    ax.set_title(f'Performance by Query×Gallery Quality (samples={samples_filter}, threshold=0.5)')
+    ax.set_title(f'Performance by Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
 
@@ -325,7 +413,6 @@ def plot_learning_curves(results: ResultsCollection, output_path: str, configs=N
     Optional: Learning curves showing training progress.
     """
     if configs is None:
-        # Default: show curves for min_weight=1.0 and min_weight=0.1 at samples=16, seed=0
         configs = [
             {'min_weight': 1.0, 'samples_per_class': 16, 'seed': 0},
             {'min_weight': 0.1, 'samples_per_class': 16, 'seed': 0}
@@ -366,7 +453,7 @@ def plot_learning_curves(results: ResultsCollection, output_path: str, configs=N
     print(f"Saved: {output_path}")
 
 
-def create_main_figure(metrics: dict, results: 'ResultsCollection', output_dir: str, samples_filter: int = 64):
+def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samples_filter: int = 64):
     """Create combined 3-panel figure."""
     fig = plt.figure(figsize=(18, 6))
 
@@ -425,33 +512,25 @@ def create_main_figure(metrics: dict, results: 'ResultsCollection', output_dir: 
     ax2.set_ylabel('Min Weight')
     ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch R@1)')
 
-    # Panel C: Query×Gallery Quality Matrix
+    # Panel C: Query×Gallery Quality Matrix with per-combo best epochs
     ax3 = fig.add_subplot(133)
 
     combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
     combo_display = ['HQ→HG', 'HQ→LG', 'LQ→HG', 'LQ→LG']
 
-    # Collect metrics for each mw at the specified samples_filter
-    mw_combo_recalls = {mw: {c: [] for c in combo_names} for mw in min_weights}
-
-    for result in results:
-        mw = result.get('min_weight')
-        result_samples = result.get('samples_per_class')
-        if result_samples != samples_filter or mw not in min_weights:
-            continue
-
-        matrix = result.get('final_metrics', {}).get('query_gallery_matrix', {})
-        for combo in combo_names:
-            if combo in matrix:
-                mw_combo_recalls[mw][combo].append(matrix[combo]['recall_at_1'])
-
     x = np.arange(len(combo_names))
     width = 0.8 / len(min_weights)
 
+    has_panel_c_data = any((mw, samples_filter) in combo_metrics for mw in min_weights)
+
     for i, mw in enumerate(min_weights):
+        key = (mw, samples_filter)
+        if key not in combo_metrics:
+            continue
+
+        per_combo = combo_metrics[key]['per_combo']
         offset = (i - len(min_weights) / 2 + 0.5) * width
-        means = [np.mean(mw_combo_recalls[mw][c]) if mw_combo_recalls[mw][c] else 0
-                 for c in combo_names]
+        means = [per_combo[c]['mean'] for c in combo_names]
 
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax3.bar(x + offset, means, width, label=label, color=colors[mw])
@@ -459,7 +538,8 @@ def create_main_figure(metrics: dict, results: 'ResultsCollection', output_dir: 
     ax3.set_xticks(x)
     ax3.set_xticklabels(combo_display)
     ax3.set_ylabel('Recall@1')
-    ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter})')
+    title_suffix = '' if has_panel_c_data else '\n(no data)'
+    ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch){title_suffix}')
     ax3.legend(fontsize=7, loc='upper right')
     ax3.grid(True, alpha=0.3, axis='y')
 
@@ -469,7 +549,7 @@ def create_main_figure(metrics: dict, results: 'ResultsCollection', output_dir: 
     print(f"Saved main figure: {output_path}")
 
 
-def print_summary_table(metrics: dict):
+def print_summary_table(metrics: dict, combo_metrics: dict):
     """Print summary statistics with best epoch information."""
     print("\n" + "=" * 70)
     print("SUMMARY TABLE: Mean Recall@1 by Configuration (Best Epoch Selection)")
@@ -483,16 +563,29 @@ def print_summary_table(metrics: dict):
               f"{data['std_recall_at_1']:.4f}{'':>6} {data['n_seeds']:<8}")
 
     # Find best configuration
-    best_key = max(metrics.keys(), key=lambda k: metrics[k]['mean_recall_at_1'])
-    best_data = metrics[best_key]
-    print("-" * 70)
-    print(f"Best: min_weight={best_key[0]}, samples={best_key[1]}, epoch={best_data.get('best_epoch', 50)} → "
-          f"R@1={best_data['mean_recall_at_1']:.4f}")
+    if metrics:
+        best_key = max(metrics.keys(), key=lambda k: metrics[k]['mean_recall_at_1'])
+        best_data = metrics[best_key]
+        print("-" * 70)
+        print(f"Best: min_weight={best_key[0]}, samples={best_key[1]}, epoch={best_data.get('best_epoch', 50)} → "
+              f"R@1={best_data['mean_recall_at_1']:.4f}")
 
-    # Show epoch distribution
-    epochs_used = [data.get('best_epoch', 50) for data in metrics.values()]
-    unique_epochs = sorted(set(epochs_used))
-    print(f"\nBest epochs distribution: {dict((e, epochs_used.count(e)) for e in unique_epochs)}")
+    # Show per-combo best epochs for a sample configuration
+    print("\n" + "=" * 70)
+    print("PER-COMBO BEST EPOCHS (showing samples=64)")
+    print("=" * 70)
+
+    combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
+    print(f"{'MinWt':<8} {'HQ_HG':<12} {'HQ_LG':<12} {'LQ_HG':<12} {'LQ_LG':<12}")
+    print("-" * 70)
+
+    for mw in sorted(set(k[0] for k in combo_metrics.keys()), reverse=True):
+        key = (mw, 64)
+        if key in combo_metrics:
+            per_combo = combo_metrics[key]['per_combo']
+            epochs = [str(per_combo[c]['best_epoch']) for c in combo_names]
+            recalls = [f"{per_combo[c]['mean']:.3f}" for c in combo_names]
+            print(f"{mw:<8} " + " ".join(f"ep{e}:{r:<5}" for e, r in zip(epochs, recalls)))
 
 
 def main():
@@ -521,15 +614,16 @@ def main():
         print("No results found. Exiting.")
         return
 
-    # Extract metrics
+    # Extract metrics from epoch history
     metrics = extract_metrics(results)
+    combo_metrics = extract_metrics_per_combo(results)
 
     if not metrics:
         print("No valid metrics extracted. Exiting.")
         return
 
     # Print summary
-    print_summary_table(metrics)
+    print_summary_table(metrics, combo_metrics)
 
     # Generate individual plots
     print("\nGenerating figures...")
@@ -545,16 +639,15 @@ def main():
     )
 
     plot_query_gallery_matrix(
-        metrics,
-        results,
+        combo_metrics,
         os.path.join(args.output_dir, 'panel_c_quality_bins.png'),
         samples_filter=args.samples
     )
 
     # Generate combined main figure
-    create_main_figure(metrics, results, args.output_dir, samples_filter=args.samples)
+    create_main_figure(metrics, combo_metrics, args.output_dir, samples_filter=args.samples)
 
-    # Learning curves (optional - requires specific configs to exist)
+    # Learning curves (optional)
     try:
         plot_learning_curves(
             results,

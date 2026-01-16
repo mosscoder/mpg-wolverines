@@ -39,9 +39,7 @@ from utils.triplet import (
     PKBatchSampler,
     mine_random_triplets,
     compute_recall_at_k,
-    compute_recall_at_k_by_quality_bin,
-    compute_recall_by_query_gallery_quality,
-    compute_mean_average_precision
+    compute_recall_by_query_gallery_quality
 )
 from utils.training import check_result_exists
 
@@ -250,12 +248,17 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
     return total_loss / max(num_batches, 1)
 
 
-def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, device, batch_size=32):
+def evaluate_with_quality_matrix(model, train_dataset, val_dataset, individual_to_class, transform, device, batch_size=32):
     """
-    Evaluate model using Recall@K.
+    Evaluate model computing Recall@1 and query×gallery quality matrix.
 
     Gallery: All training embeddings
     Queries: All validation embeddings
+
+    Returns dict with:
+        - recall_at_1: Overall recall
+        - query_gallery_matrix: Dict mapping combo names (HQ_HG, HQ_LG, LQ_HG, LQ_LG)
+          to {'recall_at_1': float, 'count': int, 'gallery_size': int}
     """
     model.eval()
 
@@ -266,7 +269,7 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
     val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Compute gallery embeddings
+    # Compute gallery embeddings and quality
     gallery_embeddings = []
     gallery_labels = []
     gallery_quality = []
@@ -283,7 +286,7 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     gallery_labels = torch.tensor(gallery_labels)
     gallery_quality = np.array(gallery_quality)
 
-    # Compute query embeddings
+    # Compute query embeddings and quality
     query_embeddings = []
     query_labels = []
     query_quality = []
@@ -300,20 +303,11 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     query_labels = torch.tensor(query_labels)
     query_quality = np.array(query_quality)
 
-    # Compute metrics
+    # Compute overall recall@1
     recall_at_1 = compute_recall_at_k(query_embeddings, gallery_embeddings,
                                       query_labels, gallery_labels, k=1)
-    mAP = compute_mean_average_precision(query_embeddings, gallery_embeddings,
-                                         query_labels, gallery_labels)
 
-    # Compute by quality bin
-    bin_metrics = compute_recall_at_k_by_quality_bin(
-        query_embeddings, gallery_embeddings,
-        query_labels, gallery_labels,
-        query_quality, k=1
-    )
-
-    # Compute query×gallery quality matrix (4 combinations at 0.5 threshold)
+    # Compute query×gallery quality matrix
     query_gallery_matrix = compute_recall_by_query_gallery_quality(
         query_embeddings, gallery_embeddings,
         query_labels, gallery_labels,
@@ -321,20 +315,9 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
         threshold=0.5, k=1
     )
 
-    # Compute distances for raw predictions (optional, for post-hoc analysis)
-    distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
-
     return {
         'recall_at_1': recall_at_1,
-        'mean_avg_precision': mAP,
-        'by_quality_bin': bin_metrics,
-        'query_gallery_matrix': query_gallery_matrix,
-        'raw_predictions': {
-            'distances': distances.numpy().tolist(),
-            'query_labels': query_labels.tolist(),
-            'gallery_labels': gallery_labels.tolist(),
-            'query_quality_scores': query_quality.tolist()
-        }
+        'query_gallery_matrix': query_gallery_matrix
     }
 
 
@@ -430,9 +413,9 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
     for epoch in range(EPOCHS):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
 
-        # Evaluate every epoch for best epoch selection
-        metrics = evaluate(model, train_dataset, val_dataset, individual_to_class,
-                           transform, device)
+        # Full evaluation with quality matrix
+        metrics = evaluate_with_quality_matrix(model, train_dataset, val_dataset,
+                                               individual_to_class, transform, device)
         recall_1 = metrics['recall_at_1']
 
         if recall_1 > best_recall:
@@ -445,17 +428,12 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
             'epoch': epoch + 1,
             'train_loss': train_loss,
             'val_recall_at_1': recall_1,
-            'learning_rate': LEARNING_RATE
+            'query_gallery_matrix': metrics['query_gallery_matrix']
         })
 
     training_time = time.time() - start_time
 
-    # Final evaluation
-    print("\nFinal evaluation...")
-    final_metrics = evaluate(model, train_dataset, val_dataset, individual_to_class,
-                             transform, device)
-
-    # Prepare result
+    # Prepare result (epoch_history includes query_gallery_matrix for each epoch)
     result = {
         'config': {
             'min_weight': min_weight,
@@ -474,14 +452,7 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
             'gallery_size': len(train_dataset),
             'query_size': len(val_dataset)
         },
-        'final_metrics': {
-            'recall_at_1': final_metrics['recall_at_1'],
-            'mean_avg_precision': final_metrics['mean_avg_precision'],
-            'by_quality_bin': final_metrics['by_quality_bin'],
-            'query_gallery_matrix': final_metrics['query_gallery_matrix']
-        },
         'epoch_history': epoch_history,
-        'raw_predictions': final_metrics['raw_predictions'],
         'metadata': {
             'created_at': datetime.now().isoformat(),
             'training_time_seconds': training_time,
@@ -498,11 +469,7 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Final R@1={final_metrics['recall_at_1']:.4f}, mAP={final_metrics['mean_avg_precision']:.4f}")
-    print(f"By quality bin:")
-    for bin_name, bin_data in final_metrics['by_quality_bin'].items():
-        if bin_data['count'] > 0:
-            print(f"  {bin_name}: R@1={bin_data['recall_at_1']:.4f} (n={bin_data['count']})")
+    print(f"Best epoch: {best_epoch}, R@1={best_recall:.4f}")
 
     return filename
 
