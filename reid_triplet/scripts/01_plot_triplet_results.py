@@ -400,7 +400,8 @@ def plot_query_gallery_matrix(combo_metrics: dict, output_path: str, samples_fil
     ax.set_ylabel('Recall@1')
     ax.set_xlabel('Query Quality → Gallery Quality')
     ax.set_title(f'Performance by Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch)')
-    ax.legend(loc='upper right')
+    ax.legend(loc='lower right')
+    ax.set_ylim(bottom=0.5)
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -542,6 +543,7 @@ def create_main_figure(metrics: dict, combo_metrics: dict, output_dir: str, samp
     title_suffix = '' if has_panel_c_data else '\n(no data)'
     ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter}, per-combo best epoch){title_suffix}')
     ax3.legend(fontsize=7, loc='lower right')
+    ax3.set_ylim(bottom=0.5)
     ax3.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -644,6 +646,18 @@ def main():
         os.path.join(args.output_dir, 'panel_c_quality_bins.png'),
         samples_filter=args.samples
     )
+
+    # Generate query×gallery plots for all sample sizes
+    qg_plot_dir = os.path.join(args.output_dir, 'query_gallery_plots')
+    os.makedirs(qg_plot_dir, exist_ok=True)
+    all_samples = sorted(set(k[1] for k in combo_metrics.keys()))
+    print(f"\nGenerating query×gallery plots for sample sizes: {all_samples}")
+    for sample_size in all_samples:
+        plot_query_gallery_matrix(
+            combo_metrics,
+            os.path.join(qg_plot_dir, f'query_gallery_samples={sample_size}.png'),
+            samples_filter=sample_size
+        )
 
     # Generate combined main figure
     create_main_figure(metrics, combo_metrics, args.output_dir, samples_filter=args.samples)
