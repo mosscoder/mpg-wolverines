@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Script 01: Plot Quality-Weighted Classification Results
+Script 01: Plot Confidence-Weighted Classification Results
 Generates publication-quality figures from classifier sweep experiment.
 
 Figures:
-A) Line plot: F1 vs samples_per_class, lines by alpha value
-B) Heatmap: alpha × samples → F1 parameter space
-C) Grouped bars: F1 by validation quality bin, α=0 vs best α>0
+A) Line plot: F1 vs samples_per_class, lines by min_weight value
+B) Heatmap: min_weight × samples → F1 parameter space
+C) Grouped bars: F1 by validation quality bin, baseline vs best min_weight
 """
 
 import os
@@ -27,7 +27,7 @@ from utils.results import ResultsCollection, load_json_results
 
 def load_classifier_results(results_dir: str) -> ResultsCollection:
     """Load classifier sweep results from JSON files."""
-    pattern = os.path.join(results_dir, "alpha=*_samples=*_seed=*.json")
+    pattern = os.path.join(results_dir, "min_weight=*_samples=*_seed=*.json")
     json_files = glob.glob(pattern)
 
     if not json_files:
@@ -44,7 +44,7 @@ def load_classifier_results(results_dir: str) -> ResultsCollection:
             with open(json_file, 'r') as f:
                 data = json.load(f)
                 # Extract key fields for easier access
-                data['alpha'] = data['config']['alpha']
+                data['min_weight'] = data['config']['min_weight']
                 data['samples_per_class'] = data['config']['samples_per_class']
                 data['seed'] = data['config']['seed']
                 results.append(data)
@@ -62,14 +62,14 @@ def extract_metrics(results: ResultsCollection) -> dict:
     """
     Extract aggregated metrics for plotting using best-epoch selection.
 
-    For each (alpha, samples) config, finds the epoch with best mean F1
+    For each (min_weight, samples) config, finds the epoch with best mean F1
     across all 8 seeds, then reports that epoch's metrics.
     """
-    # Group by (alpha, samples_per_class)
-    groups = results.group_by('alpha', 'samples_per_class')
+    # Group by (min_weight, samples_per_class)
+    groups = results.group_by('min_weight', 'samples_per_class')
 
     metrics = {}
-    for (alpha, samples), group in groups.items():
+    for (min_weight, samples), group in groups.items():
         # Get epoch history from all seeds
         all_histories = [r.get('epoch_history', []) for r in group]
 
@@ -111,7 +111,7 @@ def extract_metrics(results: ResultsCollection) -> dict:
                         break
 
         if f1_values:
-            metrics[(alpha, samples)] = {
+            metrics[(min_weight, samples)] = {
                 'f1_values': f1_values,
                 'mean_f1': np.mean(f1_values),
                 'std_f1': np.std(f1_values, ddof=1) if len(f1_values) > 1 else 0,
@@ -129,7 +129,7 @@ def extract_metrics(results: ResultsCollection) -> dict:
                     if bin_data.get('count', 0) > 0:
                         bin_metrics[bin_name].append(bin_data.get('f1_macro', 0))
 
-            metrics[(alpha, samples)]['bin_metrics'] = {
+            metrics[(min_weight, samples)]['bin_metrics'] = {
                 bin_name: {
                     'mean': np.mean(vals),
                     'std': np.std(vals, ddof=1) if len(vals) > 1 else 0,
@@ -144,33 +144,33 @@ def extract_metrics(results: ResultsCollection) -> dict:
 def plot_f1_vs_samples(metrics: dict, output_path: str):
     """
     Panel A: Line plot of F1 vs samples_per_class.
-    Lines colored by alpha value with 95% CI ribbons.
+    Lines colored by min_weight value with 95% CI ribbons.
     """
     fig, ax = plt.subplots(figsize=(10, 8))
 
     # Get unique values
-    alphas = sorted(set(k[0] for k in metrics.keys()))
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)  # 1.0 first (baseline)
     samples = sorted(set(k[1] for k in metrics.keys()))
 
-    # Color scheme: gray for alpha=0, blue gradient for others
-    colors = {0: '#888888'}
-    blue_alphas = [a for a in alphas if a > 0]
-    if blue_alphas:
-        blues = plt.cm.Blues(np.linspace(0.4, 0.9, len(blue_alphas)))
-        for i, alpha in enumerate(blue_alphas):
-            colors[alpha] = blues[i]
+    # Color scheme: gray for min_weight=1.0 (baseline), blue gradient for others
+    colors = {1.0: '#888888'}
+    other_weights = [mw for mw in min_weights if mw < 1.0]
+    if other_weights:
+        blues = plt.cm.Blues(np.linspace(0.4, 0.9, len(other_weights)))
+        for i, mw in enumerate(other_weights):
+            colors[mw] = blues[i]
 
     legend_handles = []
     legend_labels = []
 
-    for alpha in alphas:
+    for min_weight in min_weights:
         x_vals = []
         y_vals = []
         ci_lower = []
         ci_upper = []
 
         for sample_size in samples:
-            key = (alpha, sample_size)
+            key = (min_weight, sample_size)
             if key in metrics:
                 data = metrics[key]
                 mean = data['mean_f1']
@@ -189,25 +189,25 @@ def plot_f1_vs_samples(metrics: dict, output_path: str):
                 ci_upper.append(mean + ci)
 
         if x_vals:
-            line, = ax.plot(x_vals, y_vals, color=colors[alpha], linewidth=2.5,
+            line, = ax.plot(x_vals, y_vals, color=colors[min_weight], linewidth=2.5,
                            marker='o', markersize=8)
-            ax.fill_between(x_vals, ci_lower, ci_upper, color=colors[alpha], alpha=0.2)
+            ax.fill_between(x_vals, ci_lower, ci_upper, color=colors[min_weight], alpha=0.2)
 
             legend_handles.append(line)
-            if alpha == 0:
-                legend_labels.append(f'α = {alpha} (baseline)')
+            if min_weight == 1.0:
+                legend_labels.append(f'mw = {min_weight} (baseline)')
             else:
-                legend_labels.append(f'α = {alpha}')
+                legend_labels.append(f'mw = {min_weight}')
 
     ax.set_xlabel('Samples per Individual', fontsize=14)
     ax.set_ylabel('F1 Macro', fontsize=14)
-    ax.set_title('Quality-Weighted Classification: F1 vs Training Samples\n'
+    ax.set_title('Confidence-Weighted Classification: F1 vs Training Samples\n'
                  '(Best epoch by cross-seed validation, 95% CI from 8 seeds)', fontsize=16, pad=20)
     ax.set_xticks(samples)
     ax.grid(True, alpha=0.3, axis='y')
 
     legend = ax.legend(legend_handles, legend_labels, loc='lower right')
-    legend.set_title('Quality weight α', prop={'weight': 'bold'})
+    legend.set_title('Min Weight', prop={'weight': 'bold'})
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -216,29 +216,29 @@ def plot_f1_vs_samples(metrics: dict, output_path: str):
 
 def plot_parameter_heatmap(metrics: dict, output_path: str):
     """
-    Panel B: Heatmap of alpha × samples → F1.
+    Panel B: Heatmap of min_weight × samples → F1.
     Shows parameter space overview.
     """
-    alphas = sorted(set(k[0] for k in metrics.keys()))
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)
     samples = sorted(set(k[1] for k in metrics.keys()))
 
     # Create matrix
-    f1_matrix = np.zeros((len(alphas), len(samples)))
+    f1_matrix = np.zeros((len(min_weights), len(samples)))
 
-    for i, alpha in enumerate(alphas):
+    for i, min_weight in enumerate(min_weights):
         for j, sample in enumerate(samples):
-            key = (alpha, sample)
+            key = (min_weight, sample)
             if key in metrics:
                 f1_matrix[i, j] = metrics[key]['mean_f1']
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
     sns.heatmap(f1_matrix, annot=True, fmt='.3f', cmap='Blues',
-                xticklabels=samples, yticklabels=alphas,
+                xticklabels=samples, yticklabels=min_weights,
                 cbar_kws={'label': 'F1 Macro'}, ax=ax)
 
     ax.set_xlabel('Samples per Individual', fontsize=12)
-    ax.set_ylabel('Quality Weight α', fontsize=12)
+    ax.set_ylabel('Min Weight', fontsize=12)
     ax.set_title('Parameter Space: Mean F1 at Best Epoch', fontsize=14, pad=15)
 
     plt.tight_layout()
@@ -249,48 +249,51 @@ def plot_parameter_heatmap(metrics: dict, output_path: str):
 def plot_quality_bin_comparison(metrics: dict, output_path: str):
     """
     Panel C: Grouped bars showing F1 by validation quality bin.
-    Compares α=0 (baseline) vs best α>0.
+    Compares baseline (min_weight=1.0) vs best min_weight<1.0.
     """
-    alphas = sorted(set(k[0] for k in metrics.keys()))
+    # Find best non-baseline min_weight across all sample sizes
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)
     samples = sorted(set(k[1] for k in metrics.keys()))
-    non_zero_alphas = [a for a in alphas if a > 0]
+    non_baseline_weights = [mw for mw in min_weights if mw < 1.0]
 
-    if not non_zero_alphas:
-        print("No non-zero alpha values found, skipping bin comparison plot")
+    if not non_baseline_weights:
+        print("No non-baseline min_weight values found, skipping bin comparison plot")
         return
 
-    # Find best alpha by averaging across sample sizes
-    alpha_means = {}
-    for alpha in non_zero_alphas:
+    # Find best min_weight by averaging across sample sizes
+    weight_means = {}
+    for mw in non_baseline_weights:
         f1s = []
         for sample in samples:
-            key = (alpha, sample)
+            key = (mw, sample)
             if key in metrics:
                 f1s.append(metrics[key]['mean_f1'])
         if f1s:
-            alpha_means[alpha] = np.mean(f1s)
+            weight_means[mw] = np.mean(f1s)
 
-    best_alpha = max(alpha_means, key=alpha_means.get) if alpha_means else non_zero_alphas[0]
-    print(f"Best non-zero alpha: {best_alpha}")
+    best_weight = max(weight_means, key=weight_means.get) if weight_means else non_baseline_weights[0]
+    print(f"Best non-baseline min_weight: {best_weight}")
 
     # Quality bins
     bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
     bin_display = ['High\n(0.75-1.0)', 'Med-High\n(0.5-0.75)',
                    'Med-Low\n(0.25-0.5)', 'Low\n(0-0.25)']
 
-    # Aggregate across sample sizes
+    # Aggregate across sample sizes for cleaner comparison
     baseline_bins = defaultdict(list)
     best_bins = defaultdict(list)
 
     for sample in samples:
-        key_base = (0, sample)
+        # Baseline (min_weight=1.0)
+        key_base = (1.0, sample)
         if key_base in metrics:
             for bin_name in bin_names:
                 bin_data = metrics[key_base].get('bin_metrics', {}).get(bin_name, {})
                 if 'mean' in bin_data:
                     baseline_bins[bin_name].append(bin_data['mean'])
 
-        key_best = (best_alpha, sample)
+        # Best min_weight
+        key_best = (best_weight, sample)
         if key_best in metrics:
             for bin_name in bin_names:
                 bin_data = metrics[key_best].get('bin_metrics', {}).get(bin_name, {})
@@ -310,13 +313,13 @@ def plot_quality_bin_comparison(metrics: dict, output_path: str):
     width = 0.35
 
     bars1 = ax.bar(x - width/2, baseline_means, width, yerr=baseline_stds,
-                   label=f'α = 0 (baseline)', color='#888888', capsize=5)
+                   label=f'mw = 1.0 (baseline)', color='#888888', capsize=5)
     bars2 = ax.bar(x + width/2, best_means, width, yerr=best_stds,
-                   label=f'α = {best_alpha} (best)', color='#2980b9', capsize=5)
+                   label=f'mw = {best_weight} (best)', color='#2980b9', capsize=5)
 
     ax.set_ylabel('F1 Macro', fontsize=12)
     ax.set_xlabel('Validation Image Quality Bin', fontsize=12)
-    ax.set_title(f'Performance by Query Quality: Baseline vs Quality-Weighted (α={best_alpha})\n'
+    ax.set_title(f'Performance by Query Quality: Baseline vs Confidence-Weighted (mw={best_weight})\n'
                  f'(averaged across sample sizes)', fontsize=14, pad=15)
     ax.set_xticks(x)
     ax.set_xticklabels(bin_display)
@@ -332,23 +335,24 @@ def create_main_figure(metrics: dict, output_dir: str):
     """Create combined 3-panel figure."""
     fig = plt.figure(figsize=(18, 6))
 
-    alphas = sorted(set(k[0] for k in metrics.keys()))
+    # Get unique values
+    min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)
     samples = sorted(set(k[1] for k in metrics.keys()))
 
     # Panel A: Line plot
     ax1 = fig.add_subplot(131)
 
-    colors = {0: '#888888'}
-    blue_alphas = [a for a in alphas if a > 0]
-    if blue_alphas:
-        blues = plt.cm.Blues(np.linspace(0.4, 0.9, len(blue_alphas)))
-        for i, alpha in enumerate(blue_alphas):
-            colors[alpha] = blues[i]
+    colors = {1.0: '#888888'}
+    other_weights = [mw for mw in min_weights if mw < 1.0]
+    if other_weights:
+        blues = plt.cm.Blues(np.linspace(0.4, 0.9, len(other_weights)))
+        for i, mw in enumerate(other_weights):
+            colors[mw] = blues[i]
 
-    for alpha in alphas:
+    for min_weight in min_weights:
         x_vals, y_vals, ci_lower, ci_upper = [], [], [], []
         for sample in samples:
-            key = (alpha, sample)
+            key = (min_weight, sample)
             if key in metrics:
                 data = metrics[key]
                 mean = data['mean_f1']
@@ -360,9 +364,9 @@ def create_main_figure(metrics: dict, output_dir: str):
                 ci_upper.append(mean + ci)
 
         if x_vals:
-            label = f'α={alpha}' if alpha > 0 else f'α={alpha} (baseline)'
-            ax1.plot(x_vals, y_vals, color=colors[alpha], linewidth=2, marker='o', label=label)
-            ax1.fill_between(x_vals, ci_lower, ci_upper, color=colors[alpha], alpha=0.2)
+            label = f'mw={min_weight}' if min_weight < 1.0 else f'mw={min_weight} (baseline)'
+            ax1.plot(x_vals, y_vals, color=colors[min_weight], linewidth=2, marker='o', label=label)
+            ax1.fill_between(x_vals, ci_lower, ci_upper, color=colors[min_weight], alpha=0.2)
 
     ax1.set_xlabel('Samples per Individual')
     ax1.set_ylabel('F1 Macro')
@@ -373,46 +377,46 @@ def create_main_figure(metrics: dict, output_dir: str):
 
     # Panel B: Heatmap
     ax2 = fig.add_subplot(132)
-    f1_matrix = np.zeros((len(alphas), len(samples)))
-    for i, alpha in enumerate(alphas):
+    f1_matrix = np.zeros((len(min_weights), len(samples)))
+    for i, min_weight in enumerate(min_weights):
         for j, sample in enumerate(samples):
-            key = (alpha, sample)
+            key = (min_weight, sample)
             if key in metrics:
                 f1_matrix[i, j] = metrics[key]['mean_f1']
 
     sns.heatmap(f1_matrix, annot=True, fmt='.3f', cmap='Blues',
-                xticklabels=samples, yticklabels=alphas, ax=ax2)
+                xticklabels=samples, yticklabels=min_weights, ax=ax2)
     ax2.set_xlabel('Samples per Individual')
-    ax2.set_ylabel('Quality Weight α')
+    ax2.set_ylabel('Min Weight')
     ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch F1)')
 
     # Panel C: Quality bin comparison
     ax3 = fig.add_subplot(133)
 
-    non_zero_alphas = [a for a in alphas if a > 0]
-    if non_zero_alphas:
-        alpha_means = {}
-        for alpha in non_zero_alphas:
-            f1s = [metrics[(alpha, s)]['mean_f1'] for s in samples if (alpha, s) in metrics]
-            alpha_means[alpha] = np.mean(f1s) if f1s else 0
-        best_alpha = max(alpha_means, key=alpha_means.get)
+    non_baseline_weights = [mw for mw in min_weights if mw < 1.0]
+    if non_baseline_weights:
+        weight_means = {}
+        for mw in non_baseline_weights:
+            f1s = [metrics[(mw, s)]['mean_f1'] for s in samples if (mw, s) in metrics]
+            weight_means[mw] = np.mean(f1s) if f1s else 0
+        best_weight = max(weight_means, key=weight_means.get)
 
         bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
         bin_display = ['High', 'Med-High', 'Med-Low', 'Low']
 
         baseline_means, best_means = [], []
         for bin_name in bin_names:
-            base_vals = [metrics[(0, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
-                        for s in samples if (0, s) in metrics]
-            best_vals = [metrics[(best_alpha, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
-                        for s in samples if (best_alpha, s) in metrics]
+            base_vals = [metrics[(1.0, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
+                        for s in samples if (1.0, s) in metrics]
+            best_vals = [metrics[(best_weight, s)]['bin_metrics'].get(bin_name, {}).get('mean', 0)
+                        for s in samples if (best_weight, s) in metrics]
             baseline_means.append(np.mean(base_vals) if base_vals else 0)
             best_means.append(np.mean(best_vals) if best_vals else 0)
 
         x = np.arange(len(bin_names))
         width = 0.35
-        ax3.bar(x - width/2, baseline_means, width, label='α=0', color='#888888')
-        ax3.bar(x + width/2, best_means, width, label=f'α={best_alpha}', color='#2980b9')
+        ax3.bar(x - width/2, baseline_means, width, label='mw=1.0', color='#888888')
+        ax3.bar(x + width/2, best_means, width, label=f'mw={best_weight}', color='#2980b9')
         ax3.set_xticks(x)
         ax3.set_xticklabels(bin_display)
         ax3.set_ylabel('F1 Macro')
@@ -431,19 +435,19 @@ def print_summary_table(metrics: dict):
     print("\n" + "=" * 70)
     print("SUMMARY TABLE: Mean F1 by Configuration (Best Epoch Selection)")
     print("=" * 70)
-    print(f"{'Alpha':<8} {'Samples':<10} {'Best Ep':<10} {'F1 Mean':<12} {'F1 Std':<12} {'N Seeds':<8}")
+    print(f"{'MinWt':<8} {'Samples':<10} {'Best Ep':<10} {'F1 Mean':<12} {'F1 Std':<12} {'N Seeds':<8}")
     print("-" * 70)
 
-    for (alpha, samples), data in sorted(metrics.items()):
+    for (min_weight, samples), data in sorted(metrics.items(), reverse=True):
         best_ep = data.get('best_epoch', 50)
-        print(f"{alpha:<8} {samples:<10} {best_ep:<10} {data['mean_f1']:.4f}{'':>6} "
+        print(f"{min_weight:<8} {samples:<10} {best_ep:<10} {data['mean_f1']:.4f}{'':>6} "
               f"{data['std_f1']:.4f}{'':>6} {data['n_seeds']:<8}")
 
     # Find best configuration
     best_key = max(metrics.keys(), key=lambda k: metrics[k]['mean_f1'])
     best_data = metrics[best_key]
     print("-" * 70)
-    print(f"Best: alpha={best_key[0]}, samples={best_key[1]}, epoch={best_data.get('best_epoch', 50)} -> "
+    print(f"Best: min_weight={best_key[0]}, samples={best_key[1]}, epoch={best_data.get('best_epoch', 50)} -> "
           f"F1={best_data['mean_f1']:.4f}")
 
     # Show epoch distribution
@@ -466,7 +470,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 60)
-    print("Quality-Weighted Classification Results Analysis")
+    print("Confidence-Weighted Classification Results Analysis")
     print("=" * 60)
 
     # Load results
