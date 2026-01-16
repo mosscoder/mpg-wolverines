@@ -40,6 +40,7 @@ from utils.triplet import (
     mine_random_triplets,
     compute_recall_at_k,
     compute_recall_at_k_by_quality_bin,
+    compute_recall_by_query_gallery_quality,
     compute_mean_average_precision
 )
 from utils.training import check_result_exists
@@ -268,16 +269,19 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     # Compute gallery embeddings
     gallery_embeddings = []
     gallery_labels = []
+    gallery_quality = []
 
     with torch.no_grad():
-        for images, labels, _ in train_loader:
+        for images, labels, quality in train_loader:
             images = images.to(device)
             emb = model(images)
             gallery_embeddings.append(emb.cpu())
             gallery_labels.extend(labels.tolist())
+            gallery_quality.extend(quality.tolist())
 
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
     gallery_labels = torch.tensor(gallery_labels)
+    gallery_quality = np.array(gallery_quality)
 
     # Compute query embeddings
     query_embeddings = []
@@ -309,6 +313,14 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
         query_quality, k=1
     )
 
+    # Compute query×gallery quality matrix (4 combinations at 0.5 threshold)
+    query_gallery_matrix = compute_recall_by_query_gallery_quality(
+        query_embeddings, gallery_embeddings,
+        query_labels, gallery_labels,
+        query_quality, gallery_quality,
+        threshold=0.5, k=1
+    )
+
     # Compute distances for raw predictions (optional, for post-hoc analysis)
     distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
 
@@ -316,6 +328,7 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
         'recall_at_1': recall_at_1,
         'mean_avg_precision': mAP,
         'by_quality_bin': bin_metrics,
+        'query_gallery_matrix': query_gallery_matrix,
         'raw_predictions': {
             'distances': distances.numpy().tolist(),
             'query_labels': query_labels.tolist(),
@@ -464,7 +477,8 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
         'final_metrics': {
             'recall_at_1': final_metrics['recall_at_1'],
             'mean_avg_precision': final_metrics['mean_avg_precision'],
-            'by_quality_bin': final_metrics['by_quality_bin']
+            'by_quality_bin': final_metrics['by_quality_bin'],
+            'query_gallery_matrix': final_metrics['query_gallery_matrix']
         },
         'epoch_history': epoch_history,
         'raw_predictions': final_metrics['raw_predictions'],

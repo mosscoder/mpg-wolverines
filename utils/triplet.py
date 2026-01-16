@@ -462,6 +462,96 @@ def compute_recall_at_k_by_quality_bin(query_embeddings: torch.Tensor,
     return bin_metrics
 
 
+def compute_recall_by_query_gallery_quality(
+    query_embeddings: torch.Tensor,
+    gallery_embeddings: torch.Tensor,
+    query_labels: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    query_quality: np.ndarray,
+    gallery_quality: np.ndarray,
+    threshold: float = 0.5,
+    k: int = 1
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compute Recall@K for 4 query×gallery quality combinations.
+
+    Filters both queries and gallery by quality, then runs 4 separate retrievals:
+    - HQ_HG: high-quality queries vs high-quality gallery
+    - HQ_LG: high-quality queries vs low-quality gallery
+    - LQ_HG: low-quality queries vs high-quality gallery
+    - LQ_LG: low-quality queries vs low-quality gallery
+
+    Args:
+        query_embeddings: Query embeddings (n_query, embedding_dim)
+        gallery_embeddings: Gallery embeddings (n_gallery, embedding_dim)
+        query_labels: Query labels (n_query,)
+        gallery_labels: Gallery labels (n_gallery,)
+        query_quality: Quality scores for queries (n_query,)
+        gallery_quality: Quality scores for gallery (n_gallery,)
+        threshold: Quality threshold (>= is high, < is low)
+        k: Number of nearest neighbors
+
+    Returns:
+        Dict mapping combination name to {'recall_at_1': float, 'count': int, 'gallery_size': int}
+    """
+    query_quality = np.array(query_quality)
+    gallery_quality = np.array(gallery_quality)
+
+    # Split indices by quality
+    hq_query_mask = query_quality >= threshold
+    lq_query_mask = ~hq_query_mask
+    hg_gallery_mask = gallery_quality >= threshold
+    lg_gallery_mask = ~hg_gallery_mask
+
+    combinations = [
+        ('HQ_HG', hq_query_mask, hg_gallery_mask),
+        ('HQ_LG', hq_query_mask, lg_gallery_mask),
+        ('LQ_HG', lq_query_mask, hg_gallery_mask),
+        ('LQ_LG', lq_query_mask, lg_gallery_mask),
+    ]
+
+    results = {}
+    for name, q_mask, g_mask in combinations:
+        # Filter embeddings and labels
+        q_emb = query_embeddings[q_mask]
+        g_emb = gallery_embeddings[g_mask]
+
+        # Handle tensor vs ndarray for labels
+        if isinstance(query_labels, np.ndarray):
+            q_lab = query_labels[q_mask]
+        else:
+            q_lab = query_labels[torch.tensor(q_mask)]
+
+        if isinstance(gallery_labels, np.ndarray):
+            g_lab = gallery_labels[g_mask]
+        else:
+            g_lab = gallery_labels[torch.tensor(g_mask)]
+
+        if len(q_emb) == 0 or len(g_emb) == 0:
+            results[name] = {'recall_at_1': 0.0, 'count': int(q_mask.sum()), 'gallery_size': int(g_mask.sum())}
+            continue
+
+        # Compute distances and get top-k
+        distances = torch.cdist(q_emb, g_emb, p=2)
+        _, top_idx = distances.topk(min(k, len(g_emb)), dim=1, largest=False)
+
+        # Count correct matches
+        correct = 0
+        for i in range(len(q_lab)):
+            q_label = q_lab[i].item() if hasattr(q_lab[i], 'item') else q_lab[i]
+            matched_label = g_lab[top_idx[i, 0]].item() if hasattr(g_lab[top_idx[i, 0]], 'item') else g_lab[top_idx[i, 0]]
+            if matched_label == q_label:
+                correct += 1
+
+        results[name] = {
+            'recall_at_1': correct / len(q_lab),
+            'count': len(q_lab),
+            'gallery_size': len(g_lab)
+        }
+
+    return results
+
+
 def compute_mean_average_precision(query_embeddings: torch.Tensor,
                                    gallery_embeddings: torch.Tensor,
                                    query_labels: torch.Tensor,

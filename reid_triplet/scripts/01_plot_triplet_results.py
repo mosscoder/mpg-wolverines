@@ -249,24 +249,26 @@ def plot_parameter_heatmap(metrics: dict, output_path: str):
     print(f"Saved: {output_path}")
 
 
-def plot_quality_bin_comparison(metrics: dict, output_path: str):
+def plot_query_gallery_matrix(metrics: dict, results: 'ResultsCollection', output_path: str, samples_filter: int = 64):
     """
-    Panel C: Grouped bars showing Recall@1 by validation quality bin.
-    Shows all min_weight values as grouped bars per quality bin.
+    Panel C: Grouped bars showing Recall@1 by query×gallery quality combinations.
+    Shows all min_weight values as grouped bars within each quality combo.
+
+    Args:
+        metrics: Dict keyed by (min_weight, samples_per_class)
+        results: ResultsCollection with raw result data
+        output_path: Where to save the figure
+        samples_filter: Which samples_per_class to use (default 64)
     """
     min_weights = sorted(set(k[0] for k in metrics.keys()), reverse=True)  # 1.0 first
-    samples = sorted(set(k[1] for k in metrics.keys()))
+    combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
+    combo_display = ['HQ→HG', 'HQ→LG', 'LQ→HG', 'LQ→LG']
 
     if len(min_weights) == 0:
-        print("No min_weight values found, skipping bin comparison plot")
+        print("No min_weight values found, skipping query-gallery matrix plot")
         return
 
-    # Quality bins
-    bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
-    bin_display = ['High\n(0.75-1.0)', 'Med-High\n(0.5-0.75)',
-                   'Med-Low\n(0.25-0.5)', 'Low\n(0-0.25)']
-
-    # Color scheme: gray for baseline, blue gradient for others (matching Panel A)
+    # Color scheme: gray for baseline, blues for others
     colors = {1.0: '#888888'}
     other_weights = [mw for mw in min_weights if mw < 1.0]
     if other_weights:
@@ -274,40 +276,42 @@ def plot_quality_bin_comparison(metrics: dict, output_path: str):
         for i, mw in enumerate(other_weights):
             colors[mw] = blues[i]
 
-    # Collect bin metrics for all min_weights
-    all_weight_bins = {mw: defaultdict(list) for mw in min_weights}
+    # Collect metrics for each mw at the specified samples_filter
+    # Aggregate across seeds by going back to raw results
+    mw_combo_recalls = {mw: {c: [] for c in combo_names} for mw in min_weights}
 
-    for sample in samples:
-        for mw in min_weights:
-            key = (mw, sample)
-            if key in metrics:
-                for bin_name in bin_names:
-                    bin_data = metrics[key].get('bin_metrics', {}).get(bin_name, {})
-                    if 'mean' in bin_data:
-                        all_weight_bins[mw][bin_name].append(bin_data['mean'])
+    for result in results:
+        mw = result.get('min_weight')
+        samples = result.get('samples_per_class')
+        if samples != samples_filter or mw not in min_weights:
+            continue
 
-    # Plot
+        matrix = result.get('final_metrics', {}).get('query_gallery_matrix', {})
+        for combo in combo_names:
+            if combo in matrix:
+                mw_combo_recalls[mw][combo].append(matrix[combo]['recall_at_1'])
+
+    # Plot grouped bars
     fig, ax = plt.subplots(figsize=(12, 6))
-
-    x = np.arange(len(bin_names))
+    x = np.arange(len(combo_names))
     width = 0.8 / len(min_weights)
 
     for i, mw in enumerate(min_weights):
         offset = (i - len(min_weights) / 2 + 0.5) * width
-        means = [np.mean(all_weight_bins[mw].get(b, [0])) for b in bin_names]
-        stds = [np.std(all_weight_bins[mw].get(b, [0]), ddof=1)
-                if len(all_weight_bins[mw].get(b, [])) > 1 else 0 for b in bin_names]
+        means = [np.mean(mw_combo_recalls[mw][c]) if mw_combo_recalls[mw][c] else 0
+                 for c in combo_names]
+        stds = [np.std(mw_combo_recalls[mw][c], ddof=1) if len(mw_combo_recalls[mw][c]) > 1 else 0
+                for c in combo_names]
 
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax.bar(x + offset, means, width, yerr=stds, label=label,
                color=colors[mw], capsize=3)
 
-    ax.set_ylabel('Recall@1', fontsize=12)
-    ax.set_xlabel('Validation Image Quality Bin', fontsize=12)
-    ax.set_title('Performance by Query Quality Across Min Weight Values\n'
-                 '(averaged across sample sizes)', fontsize=14, pad=15)
     ax.set_xticks(x)
-    ax.set_xticklabels(bin_display)
+    ax.set_xticklabels(combo_display)
+    ax.set_ylabel('Recall@1')
+    ax.set_xlabel('Query Quality → Gallery Quality')
+    ax.set_title(f'Performance by Query×Gallery Quality (samples={samples_filter}, threshold=0.5)')
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
 
@@ -362,7 +366,7 @@ def plot_learning_curves(results: ResultsCollection, output_path: str, configs=N
     print(f"Saved: {output_path}")
 
 
-def create_main_figure(metrics: dict, output_dir: str):
+def create_main_figure(metrics: dict, results: 'ResultsCollection', output_dir: str, samples_filter: int = 64):
     """Create combined 3-panel figure."""
     fig = plt.figure(figsize=(18, 6))
 
@@ -421,38 +425,41 @@ def create_main_figure(metrics: dict, output_dir: str):
     ax2.set_ylabel('Min Weight')
     ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch R@1)')
 
-    # Panel C: Quality bin comparison (all min_weights)
+    # Panel C: Query×Gallery Quality Matrix
     ax3 = fig.add_subplot(133)
 
-    bin_names = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0,0.25)']
-    bin_display = ['High', 'Med-High', 'Med-Low', 'Low']
+    combo_names = ['HQ_HG', 'HQ_LG', 'LQ_HG', 'LQ_LG']
+    combo_display = ['HQ→HG', 'HQ→LG', 'LQ→HG', 'LQ→LG']
 
-    # Collect bin metrics for all min_weights
-    all_weight_bins = {mw: defaultdict(list) for mw in min_weights}
+    # Collect metrics for each mw at the specified samples_filter
+    mw_combo_recalls = {mw: {c: [] for c in combo_names} for mw in min_weights}
 
-    for sample in samples:
-        for mw in min_weights:
-            key = (mw, sample)
-            if key in metrics:
-                for bin_name in bin_names:
-                    bin_data = metrics[key].get('bin_metrics', {}).get(bin_name, {})
-                    if 'mean' in bin_data:
-                        all_weight_bins[mw][bin_name].append(bin_data['mean'])
+    for result in results:
+        mw = result.get('min_weight')
+        result_samples = result.get('samples_per_class')
+        if result_samples != samples_filter or mw not in min_weights:
+            continue
 
-    x = np.arange(len(bin_names))
+        matrix = result.get('final_metrics', {}).get('query_gallery_matrix', {})
+        for combo in combo_names:
+            if combo in matrix:
+                mw_combo_recalls[mw][combo].append(matrix[combo]['recall_at_1'])
+
+    x = np.arange(len(combo_names))
     width = 0.8 / len(min_weights)
 
     for i, mw in enumerate(min_weights):
         offset = (i - len(min_weights) / 2 + 0.5) * width
-        means = [np.mean(all_weight_bins[mw].get(b, [0])) for b in bin_names]
+        means = [np.mean(mw_combo_recalls[mw][c]) if mw_combo_recalls[mw][c] else 0
+                 for c in combo_names]
 
         label = f'mw={mw} (baseline)' if mw == 1.0 else f'mw={mw}'
         ax3.bar(x + offset, means, width, label=label, color=colors[mw])
 
     ax3.set_xticks(x)
-    ax3.set_xticklabels(bin_display)
+    ax3.set_xticklabels(combo_display)
     ax3.set_ylabel('Recall@1')
-    ax3.set_title('C) Performance by Query Quality')
+    ax3.set_title(f'C) Query×Gallery Quality\n(samples={samples_filter})')
     ax3.legend(fontsize=7, loc='upper right')
     ax3.grid(True, alpha=0.3, axis='y')
 
@@ -496,6 +503,8 @@ def main():
     parser.add_argument('--output_dir', type=str,
                         default='reid_triplet/figures',
                         help='Directory to save figures')
+    parser.add_argument('--samples', type=int, default=64,
+                        help='samples_per_class to use for quality matrix plot (default: 64)')
 
     args = parser.parse_args()
 
@@ -535,13 +544,15 @@ def main():
         os.path.join(args.output_dir, 'panel_b_heatmap.png')
     )
 
-    plot_quality_bin_comparison(
+    plot_query_gallery_matrix(
         metrics,
-        os.path.join(args.output_dir, 'panel_c_quality_bins.png')
+        results,
+        os.path.join(args.output_dir, 'panel_c_quality_bins.png'),
+        samples_filter=args.samples
     )
 
     # Generate combined main figure
-    create_main_figure(metrics, args.output_dir)
+    create_main_figure(metrics, results, args.output_dir, samples_filter=args.samples)
 
     # Learning curves (optional - requires specific configs to exist)
     try:
