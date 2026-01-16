@@ -49,7 +49,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-ALPHA_VALUES = [0, 1, 2, 4, 8, 16]
+ALPHA_VALUES = [0, 0.5, 1, 2]
 SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 MARGIN = 0.3
@@ -107,7 +107,20 @@ def load_reidentification_dataset():
     return dataset
 
 
-def create_temporal_dataset(dataset, individuals, sample_size, seed, config):
+def build_id_to_indices(dataset):
+    """Build individual ID to dataset indices mapping ONCE."""
+    print("Building ID to indices mapping...")
+    id_to_indices = {}
+    for idx, sample in enumerate(dataset):
+        ind_id = sample['id']
+        if ind_id not in id_to_indices:
+            id_to_indices[ind_id] = []
+        id_to_indices[ind_id].append(idx)
+    print(f"  Mapped {len(id_to_indices)} individuals")
+    return id_to_indices
+
+
+def create_temporal_dataset(dataset, individuals, sample_size, seed, config, id_to_indices):
     """
     Create temporal train/val split for triplet learning.
 
@@ -125,14 +138,6 @@ def create_temporal_dataset(dataset, individuals, sample_size, seed, config):
     all_train_indices = []
     all_val_indices = []
     individual_to_class = {ind: i for i, ind in enumerate(sorted(individuals))}
-
-    # Create index lookup for the dataset
-    id_to_indices = {}
-    for idx, sample in enumerate(dataset):
-        ind_id = sample['id']
-        if ind_id not in id_to_indices:
-            id_to_indices[ind_id] = []
-        id_to_indices[ind_id].append(idx)
 
     dataset_info = {}
 
@@ -294,8 +299,6 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     # Compute metrics
     recall_at_1 = compute_recall_at_k(query_embeddings, gallery_embeddings,
                                       query_labels, gallery_labels, k=1)
-    recall_at_5 = compute_recall_at_k(query_embeddings, gallery_embeddings,
-                                      query_labels, gallery_labels, k=5)
     mAP = compute_mean_average_precision(query_embeddings, gallery_embeddings,
                                          query_labels, gallery_labels)
 
@@ -311,7 +314,6 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
 
     return {
         'recall_at_1': recall_at_1,
-        'recall_at_5': recall_at_5,
         'mean_avg_precision': mAP,
         'by_quality_bin': bin_metrics,
         'raw_predictions': {
@@ -323,7 +325,7 @@ def evaluate(model, train_dataset, val_dataset, individual_to_class, transform, 
     }
 
 
-def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset, config) -> dict:
+def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
     """Train one configuration and return results."""
     set_all_seeds(seed)
 
@@ -359,7 +361,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
 
     # Create temporal dataset
     train_dataset, val_dataset, individual_to_class, dataset_info = create_temporal_dataset(
-        dataset, feasible_individuals, sample_size, seed, config
+        dataset, feasible_individuals, sample_size, seed, config, id_to_indices
     )
 
     if len(train_dataset) < MIN_P * BATCH_K:
@@ -418,20 +420,17 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
             metrics = evaluate(model, train_dataset, val_dataset, individual_to_class,
                                transform, device)
             recall_1 = metrics['recall_at_1']
-            recall_5 = metrics['recall_at_5']
 
             if recall_1 > best_recall:
                 best_recall = recall_1
                 best_epoch = epoch + 1
 
-            print(f"Epoch {epoch+1:2d}/{EPOCHS}: Loss={train_loss:.4f}, "
-                  f"R@1={recall_1:.4f}, R@5={recall_5:.4f}")
+            print(f"Epoch {epoch+1:2d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}")
 
             epoch_history.append({
                 'epoch': epoch + 1,
                 'train_loss': train_loss,
                 'val_recall_at_1': recall_1,
-                'val_recall_at_5': recall_5,
                 'learning_rate': LEARNING_RATE
             })
         else:
@@ -470,7 +469,6 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         },
         'final_metrics': {
             'recall_at_1': final_metrics['recall_at_1'],
-            'recall_at_5': final_metrics['recall_at_5'],
             'mean_avg_precision': final_metrics['mean_avg_precision'],
             'by_quality_bin': final_metrics['by_quality_bin']
         },
@@ -492,7 +490,7 @@ def train_single_config(alpha: float, sample_size: int, seed: int, args, dataset
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Final R@1={final_metrics['recall_at_1']:.4f}, R@5={final_metrics['recall_at_5']:.4f}")
+    print(f"Final R@1={final_metrics['recall_at_1']:.4f}, mAP={final_metrics['mean_avg_precision']:.4f}")
     print(f"By quality bin:")
     for bin_name, bin_data in final_metrics['by_quality_bin'].items():
         if bin_data['count'] > 0:
@@ -520,6 +518,7 @@ def main():
     # Load dataset and config
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
+    id_to_indices = build_id_to_indices(dataset)  # Build index lookup ONCE
     config = load_feasibility_config()
 
     if not config:
@@ -553,7 +552,7 @@ def main():
     for i, (alpha, sample_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(alpha, sample_size, seed, args, dataset, config)
+            result = train_single_config(alpha, sample_size, seed, args, dataset, config, id_to_indices)
             if result:
                 results_summary.append(result)
         except Exception as e:

@@ -47,9 +47,8 @@ def load_triplet_results(results_dir: str) -> ResultsCollection:
                 data['alpha'] = data['config']['alpha']
                 data['samples_per_class'] = data['config']['samples_per_class']
                 data['seed'] = data['config']['seed']
-                data['recall_at_1'] = data['final_metrics']['recall_at_1']
-                data['recall_at_5'] = data['final_metrics']['recall_at_5']
-                data['mAP'] = data['final_metrics']['mean_avg_precision']
+                # Note: recall_at_1 will be computed from best epoch
+                # in extract_metrics(), not from final_metrics
                 results.append(data)
         except Exception as e:
             failed.append((json_file, str(e)))
@@ -62,28 +61,70 @@ def load_triplet_results(results_dir: str) -> ResultsCollection:
 
 
 def extract_metrics(results: ResultsCollection) -> dict:
-    """Extract aggregated metrics for plotting."""
+    """
+    Extract aggregated metrics for plotting using best-epoch selection.
+
+    For each (alpha, samples) config, finds the epoch with best mean Recall@1
+    across all 8 seeds, then reports that epoch's metrics instead of epoch 50.
+    """
     # Group by (alpha, samples_per_class)
     groups = results.group_by('alpha', 'samples_per_class')
 
     metrics = {}
     for (alpha, samples), group in groups.items():
-        recall_values = group.get_metrics('recall_at_1')
-        recall5_values = group.get_metrics('recall_at_5')
-        mAP_values = group.get_metrics('mAP')
+        # Get epoch history from all seeds
+        all_histories = [r.get('epoch_history', []) for r in group]
+
+        if not all_histories or not all_histories[0]:
+            # Fallback to final_metrics if no epoch history
+            recall_values = [r.get('final_metrics', {}).get('recall_at_1', 0) for r in group]
+            mAP_values = [r.get('final_metrics', {}).get('mean_avg_precision', 0) for r in group]
+            best_epoch = 50
+        else:
+            # Find epochs where we have val_recall_at_1 (every 5th epoch)
+            eval_epochs = [h['epoch'] for h in all_histories[0] if 'val_recall_at_1' in h]
+
+            # For each eval epoch, compute mean recall across seeds
+            best_epoch = None
+            best_mean_recall = -1
+
+            for epoch in eval_epochs:
+                epoch_recalls = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == epoch and 'val_recall_at_1' in h:
+                            epoch_recalls.append(h['val_recall_at_1'])
+                            break
+
+                if epoch_recalls:
+                    mean_recall = np.mean(epoch_recalls)
+                    if mean_recall > best_mean_recall:
+                        best_mean_recall = mean_recall
+                        best_epoch = epoch
+
+            # Extract metrics at best epoch for each seed
+            recall_values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'val_recall_at_1' in h:
+                        recall_values.append(h['val_recall_at_1'])
+                        break
+
+            # mAP not tracked per epoch, use final
+            mAP_values = [r.get('final_metrics', {}).get('mean_avg_precision', 0) for r in group]
 
         if recall_values:
             metrics[(alpha, samples)] = {
                 'recall_at_1_values': recall_values,
                 'mean_recall_at_1': np.mean(recall_values),
                 'std_recall_at_1': np.std(recall_values, ddof=1) if len(recall_values) > 1 else 0,
-                'recall_at_5_values': recall5_values,
-                'mean_recall_at_5': np.mean(recall5_values),
                 'mean_mAP': np.mean(mAP_values) if mAP_values else 0,
-                'n_seeds': len(recall_values)
+                'n_seeds': len(recall_values),
+                'best_epoch': best_epoch
             }
 
-            # Extract bin-specific metrics
+            # Extract bin-specific metrics from final_metrics
+            # (bin metrics not tracked per-epoch, so use final)
             bin_metrics = defaultdict(list)
             for r in group:
                 by_bin = r.get('final_metrics', {}).get('by_quality_bin', {})
@@ -164,7 +205,7 @@ def plot_recall_vs_samples(metrics: dict, output_path: str):
     ax.set_xlabel('Samples per Individual', fontsize=14)
     ax.set_ylabel('Recall@1', fontsize=14)
     ax.set_title('Quality-Weighted Triplet Loss: Recall@1 vs Training Samples\n'
-                 '(95% CI from 8 seeds)', fontsize=16, pad=20)
+                 '(Best epoch by cross-seed validation, 95% CI from 8 seeds)', fontsize=16, pad=20)
     ax.set_xticks(samples)
     ax.grid(True, alpha=0.3, axis='y')
 
@@ -201,7 +242,7 @@ def plot_parameter_heatmap(metrics: dict, output_path: str):
 
     ax.set_xlabel('Samples per Individual', fontsize=12)
     ax.set_ylabel('Quality Weight α', fontsize=12)
-    ax.set_title('Parameter Space: Mean Recall@1 across Seeds', fontsize=14, pad=15)
+    ax.set_title('Parameter Space: Mean Recall@1 at Best Epoch', fontsize=14, pad=15)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -378,7 +419,7 @@ def create_main_figure(metrics: dict, output_dir: str):
 
     ax1.set_xlabel('Samples per Individual')
     ax1.set_ylabel('Recall@1')
-    ax1.set_title('A) Recall@1 vs Training Samples')
+    ax1.set_title('A) Recall@1 vs Training Samples\n(Best Epoch)')
     ax1.set_xticks(samples)
     ax1.legend(fontsize=8, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
@@ -396,7 +437,7 @@ def create_main_figure(metrics: dict, output_dir: str):
                 xticklabels=samples, yticklabels=alphas, ax=ax2)
     ax2.set_xlabel('Samples per Individual')
     ax2.set_ylabel('Quality Weight α')
-    ax2.set_title('B) Parameter Space Heatmap')
+    ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch R@1)')
 
     # Panel C: Quality bin comparison
     ax3 = fig.add_subplot(133)
@@ -439,23 +480,29 @@ def create_main_figure(metrics: dict, output_dir: str):
 
 
 def print_summary_table(metrics: dict):
-    """Print summary statistics."""
-    print("\n" + "=" * 80)
-    print("SUMMARY TABLE: Mean Recall@1 by Configuration")
-    print("=" * 80)
-    print(f"{'Alpha':<8} {'Samples':<10} {'R@1 Mean':<12} {'R@1 Std':<12} {'R@5 Mean':<12} {'N Seeds':<8}")
-    print("-" * 80)
+    """Print summary statistics with best epoch information."""
+    print("\n" + "=" * 70)
+    print("SUMMARY TABLE: Mean Recall@1 by Configuration (Best Epoch Selection)")
+    print("=" * 70)
+    print(f"{'Alpha':<8} {'Samples':<10} {'Best Ep':<10} {'R@1 Mean':<12} {'R@1 Std':<12} {'N Seeds':<8}")
+    print("-" * 70)
 
     for (alpha, samples), data in sorted(metrics.items()):
-        print(f"{alpha:<8} {samples:<10} {data['mean_recall_at_1']:.4f}{'':>6} "
-              f"{data['std_recall_at_1']:.4f}{'':>6} {data['mean_recall_at_5']:.4f}{'':>6} {data['n_seeds']:<8}")
+        best_ep = data.get('best_epoch', 50)
+        print(f"{alpha:<8} {samples:<10} {best_ep:<10} {data['mean_recall_at_1']:.4f}{'':>6} "
+              f"{data['std_recall_at_1']:.4f}{'':>6} {data['n_seeds']:<8}")
 
     # Find best configuration
     best_key = max(metrics.keys(), key=lambda k: metrics[k]['mean_recall_at_1'])
     best_data = metrics[best_key]
-    print("-" * 80)
-    print(f"Best: alpha={best_key[0]}, samples={best_key[1]} → "
+    print("-" * 70)
+    print(f"Best: alpha={best_key[0]}, samples={best_key[1]}, epoch={best_data.get('best_epoch', 50)} → "
           f"R@1={best_data['mean_recall_at_1']:.4f}")
+
+    # Show epoch distribution
+    epochs_used = [data.get('best_epoch', 50) for data in metrics.values()]
+    unique_epochs = sorted(set(epochs_used))
+    print(f"\nBest epochs distribution: {dict((e, epochs_used.count(e)) for e in unique_epochs)}")
 
 
 def main():
