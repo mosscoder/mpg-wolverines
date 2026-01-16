@@ -39,12 +39,17 @@ class EmbeddingHead(nn.Module):
 
 class QualityWeightedTripletLoss(nn.Module):
     """
-    Triplet loss weighted by anchor image quality score.
+    Triplet loss weighted by anchor-positive quality product.
 
-    L = (1 + alpha * q_anchor) * max(0, d(a,p) - d(a,n) + margin)
+    L = (1 + alpha * q_anchor * q_positive) * max(0, d(a,p) - d(a,n) + margin)
 
-    Higher quality anchors (higher pelage visibility) contribute more to the loss,
-    providing stronger training signal from reliable examples.
+    Product weighting only significantly upweights triplets where BOTH the anchor
+    and positive are high quality, reducing noise from mixed-quality pairs.
+
+    Scaling note: Quality scores are pelage_score in [0, 1]. The product of two
+    [0,1] values is typically smaller (e.g., 0.5 * 0.5 = 0.25), so product weighting
+    is more conservative. May need higher alpha values to achieve similar effect
+    as anchor-only weighting.
     """
 
     def __init__(self, margin: float = 0.3, alpha: float = 0.0):
@@ -61,13 +66,15 @@ class QualityWeightedTripletLoss(nn.Module):
                 anchor: torch.Tensor,
                 positive: torch.Tensor,
                 negative: torch.Tensor,
-                q_anchor: torch.Tensor) -> torch.Tensor:
+                q_anchor: torch.Tensor,
+                q_positive: torch.Tensor) -> torch.Tensor:
         """
         Args:
             anchor: Anchor embeddings (batch_size, embedding_dim)
             positive: Positive embeddings (batch_size, embedding_dim)
             negative: Negative embeddings (batch_size, embedding_dim)
             q_anchor: Quality scores for anchors (batch_size,) in [0, 1]
+            q_positive: Quality scores for positives (batch_size,) in [0, 1]
 
         Returns:
             Scalar loss value
@@ -79,8 +86,9 @@ class QualityWeightedTripletLoss(nn.Module):
         # Standard triplet loss
         base_loss = torch.clamp(d_ap - d_an + self.margin, min=0)
 
-        # Quality weighting
-        weight = 1.0 + self.alpha * q_anchor
+        # Product weighting: only upweight when BOTH anchor and positive are high quality
+        # This reduces noise from mixed-quality pairs where one image is unreliable
+        weight = 1.0 + self.alpha * q_anchor * q_positive
 
         return (weight * base_loss).mean()
 
@@ -244,7 +252,7 @@ def create_embedding_model(model_name: str = "facebook/dinov3-vitb16-pretrain-lv
 
 def mine_random_triplets(embeddings: torch.Tensor,
                          labels: torch.Tensor,
-                         quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                         quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Mine random triplets from a batch.
 
@@ -258,7 +266,7 @@ def mine_random_triplets(embeddings: torch.Tensor,
         quality_scores: Batch quality scores (batch_size,)
 
     Returns:
-        Tuple of (anchor_emb, positive_emb, negative_emb, anchor_quality)
+        Tuple of (anchor_emb, positive_emb, negative_emb, anchor_quality, positive_quality)
     """
     batch_size = embeddings.size(0)
     device = embeddings.device
@@ -267,6 +275,7 @@ def mine_random_triplets(embeddings: torch.Tensor,
     positives = []
     negatives = []
     anchor_qualities = []
+    positive_qualities = []
 
     # Group indices by label
     label_to_indices = defaultdict(list)
@@ -292,20 +301,23 @@ def mine_random_triplets(embeddings: torch.Tensor,
         positives.append(pos_idx)
         negatives.append(neg_idx)
         anchor_qualities.append(quality_scores[anchor_idx])
+        positive_qualities.append(quality_scores[pos_idx])
 
     if not anchors:
         # Return empty tensors if no valid triplets
         return (torch.empty(0, embeddings.size(1), device=device),
                 torch.empty(0, embeddings.size(1), device=device),
                 torch.empty(0, embeddings.size(1), device=device),
+                torch.empty(0, device=device),
                 torch.empty(0, device=device))
 
     anchor_emb = embeddings[anchors]
     positive_emb = embeddings[positives]
     negative_emb = embeddings[negatives]
     anchor_quality = torch.stack(anchor_qualities)
+    positive_quality = torch.stack(positive_qualities)
 
-    return anchor_emb, positive_emb, negative_emb, anchor_quality
+    return anchor_emb, positive_emb, negative_emb, anchor_quality, positive_quality
 
 
 def compute_recall_at_k(query_embeddings: torch.Tensor,

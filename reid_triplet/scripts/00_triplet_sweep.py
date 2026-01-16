@@ -49,7 +49,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-ALPHA_VALUES = [0, 0.5, 1, 2]
+ALPHA_VALUES = [0, 1, 10, 100]
 SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 MARGIN = 0.3
@@ -230,16 +230,16 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
         embeddings = model(images)
 
         # Mine triplets
-        anchor_emb, pos_emb, neg_emb, anchor_quality = mine_random_triplets(
+        anchor_emb, pos_emb, neg_emb, anchor_quality, pos_quality = mine_random_triplets(
             embeddings, labels, quality_scores
         )
 
         if anchor_emb.size(0) == 0:
             continue
 
-        # Compute loss
+        # Compute loss (product weighting: uses both anchor and positive quality)
         optimizer.zero_grad()
-        loss = criterion(anchor_emb, pos_emb, neg_emb, anchor_quality)
+        loss = criterion(anchor_emb, pos_emb, neg_emb, anchor_quality, pos_quality)
         loss.backward()
         optimizer.step()
 
