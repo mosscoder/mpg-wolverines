@@ -24,9 +24,10 @@ from datasets import load_dataset, concatenate_datasets
 import torchvision.transforms as T
 from PIL import Image
 
-# Control parallelism
+# Control parallelism and set HuggingFace cache location
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["HF_HOME"] = "/data/hf_cache"
 
 # Add project root to path
 sys.path.append('.')

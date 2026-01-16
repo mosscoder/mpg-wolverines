@@ -23,6 +23,10 @@ cd /home/kdoherty/wolverines
 source ~/.bashrc
 mamba activate wolverines
 
+# Set HuggingFace cache to cluster's shared cache (private dataset)
+export HF_HOME=/data/hf_cache
+export HF_DATASETS_OFFLINE=1
+
 # Print job info
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
