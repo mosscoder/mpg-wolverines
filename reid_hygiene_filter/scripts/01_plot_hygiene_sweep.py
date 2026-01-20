@@ -351,7 +351,7 @@ def plot_optimal_thresholds(results: ResultsCollection, output_path: str):
     ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
     ax.set_ylabel('Image quality threshold (probability visible pelage)', fontsize=12)
-    ax.legend(title='Threshold Application', fontsize=11, title_fontsize=11)
+    ax.legend(title='Threshold Application', fontsize=11, title_fontsize=11, loc='lower right')
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -681,7 +681,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
     ax2.set_ylabel('Image quality threshold\n(probability visible pelage)')
-    ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9)
+    ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9, loc='lower right')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
