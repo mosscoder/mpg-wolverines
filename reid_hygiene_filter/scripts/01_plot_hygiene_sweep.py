@@ -8,10 +8,10 @@ All metrics are computed and stored during training (in epoch_history),
 so no GPU inference is needed for plotting.
 
 Figures:
-A) Line plot: Recall@1 vs gallery_size, lines by threshold value (viridis)
-B) Heatmap: threshold × gallery_size → Recall@1 parameter space
-C) Bar chart: % improvement over baseline (threshold=0.0)
-D) Gallery × Query quality bar chart: Shows how gallery filtering affects
+A) Line plot: Filtration strategies - baseline (no filter), minimal (G≥0.1, Q≥0.1),
+   and optimal (best G×Q combo) vs examples per individual
+B) Bar chart: Best gallery × query filter combination per examples per individual
+C) Gallery × Query quality bar chart: Shows how gallery filtering affects
    retrieval performance across different query quality levels
 """
 
@@ -160,156 +160,217 @@ def extract_metrics(results: ResultsCollection) -> dict:
     return metrics
 
 
-def plot_recall_vs_gallery_size(metrics: dict, output_path: str):
+def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     """
-    Panel A: Line plot of Recall@1 vs gallery_size.
-    Lines colored by threshold value using viridis palette (0.0=dark, 0.5=bright).
+    Panel A: Line plot comparing filtration strategies.
+
+    Three lines:
+    - Baseline (no filtration): gallery_threshold=0.0, query q>=0.0
+    - Minimal filtration: gallery_threshold=0.1, query q>=0.1
+    - Optimal filtration: best combo of gallery and query filter per gallery_size
     """
     fig, ax = plt.subplots(figsize=(10, 8))
 
-    # Get unique values
-    thresholds = sorted(set(k[0] for k in metrics.keys()))
-    gallery_sizes = sorted(set(k[1] for k in metrics.keys()))
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    # Viridis palette: darker for lower thresholds, brighter for higher
-    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(thresholds)))
-    color_map = {t: colors[i] for i, t in enumerate(thresholds)}
+    # Colors for the 3 strategies
+    colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
-    legend_handles = []
-    legend_labels = []
+    strategies = {
+        'baseline': {'label': 'No Filtration (G=0, Q=0)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal (G≥0.1, Q≥0.1)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal (best G×Q combo)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []}
+    }
 
-    for threshold in thresholds:
-        x_vals = []
-        y_vals = []
-        ci_lower = []
-        ci_upper = []
+    for gsize in gallery_sizes:
+        # --- Baseline: gallery_threshold=0.0, query q>=0.0 ---
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        if len(baseline_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['baseline']['x'].append(gsize)
+                    strategies['baseline']['y'].append(mean)
+                    strategies['baseline']['ci_lower'].append(mean - ci)
+                    strategies['baseline']['ci_upper'].append(mean + ci)
 
-        for gsize in gallery_sizes:
-            key = (threshold, gsize)
-            if key in metrics:
-                data = metrics[key]
-                mean = data['mean_recall_at_1']
-                values = data['recall_at_1_values']
+        # --- Minimal: gallery_threshold=0.1, query q>=0.1 ---
+        minimal_filtered = results.filter(threshold=0.1, gallery_size=gsize)
+        if len(minimal_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if 'q>=0.1' in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics']['q>=0.1']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['minimal']['x'].append(gsize)
+                    strategies['minimal']['y'].append(mean)
+                    strategies['minimal']['ci_lower'].append(mean - ci)
+                    strategies['minimal']['ci_upper'].append(mean + ci)
 
-                # 95% CI
-                if len(values) > 1:
-                    sem = stats.sem(values)
-                    ci = stats.t.ppf(0.975, len(values) - 1) * sem
-                else:
-                    ci = 0
+        # --- Optimal: find best gallery × query combo for this gallery_size ---
+        best_mean = -1
+        best_values = None
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
 
-                x_vals.append(gsize)
-                y_vals.append(mean)
-                ci_lower.append(mean - ci)
-                ci_upper.append(mean + ci)
+            best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
 
-        if x_vals:
-            line, = ax.plot(x_vals, y_vals, color=color_map[threshold], linewidth=2.5,
-                           marker='o', markersize=8)
-            ax.fill_between(x_vals, ci_lower, ci_upper, color=color_map[threshold], alpha=0.2)
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_values = values
 
-            legend_handles.append(line)
-            if threshold == 0.0:
-                legend_labels.append(f't = {threshold} (baseline)')
-            else:
-                legend_labels.append(f't = {threshold}')
+        if best_values:
+            mean = np.mean(best_values)
+            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
+            strategies['optimal']['x'].append(gsize)
+            strategies['optimal']['y'].append(mean)
+            strategies['optimal']['ci_lower'].append(mean - ci)
+            strategies['optimal']['ci_upper'].append(mean + ci)
 
-    ax.set_xlabel('Gallery Size (samples per individual)', fontsize=14)
+    # Plot each strategy
+    for key in ['baseline', 'minimal', 'optimal']:
+        s = strategies[key]
+        if s['x']:
+            line, = ax.plot(s['x'], s['y'], color=colors[key], linewidth=2.5,
+                           marker='o', markersize=8, label=s['label'])
+            ax.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
+
+    ax.set_xlabel('Examples per Individual', fontsize=14)
     ax.set_ylabel('Recall@1', fontsize=14)
-    ax.set_title('Gallery Hygiene: Recall@1 vs Gallery Size by Quality Threshold\n'
-                 '(Best epoch by cross-seed validation, 95% CI from 8 seeds)', fontsize=16, pad=20)
+    ax.set_title('Filtration Strategies: Recall@1 vs Examples per Individual\n'
+                 '(Best epoch, 95% CI from 8 seeds)', fontsize=16, pad=20)
     ax.set_xticks(gallery_sizes)
     ax.grid(True, alpha=0.3, axis='y')
-
-    legend = ax.legend(legend_handles, legend_labels, loc='lower right')
-    legend.set_title('Threshold', prop={'weight': 'bold'})
+    ax.legend(loc='lower right', fontsize=11)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved: {output_path}")
 
 
-def plot_parameter_heatmap(metrics: dict, output_path: str):
+def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: str):
     """
-    Panel B: Heatmap of threshold × gallery_size → Recall@1.
-    Shows parameter space overview.
+    Panel B: Bar chart showing best gallery × query filter combo for each gallery_size.
+
+    For each examples-per-individual value, finds the optimal combination of
+    gallery filter threshold and query filter threshold, and displays both
+    the best combo settings and the resulting Recall@1.
     """
-    thresholds = sorted(set(k[0] for k in metrics.keys()))
-    gallery_sizes = sorted(set(k[1] for k in metrics.keys()))
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    # Create matrix
-    recall_matrix = np.zeros((len(thresholds), len(gallery_sizes)))
+    fig, ax = plt.subplots(figsize=(12, 7))
 
-    for i, threshold in enumerate(thresholds):
-        for j, gsize in enumerate(gallery_sizes):
-            key = (threshold, gsize)
-            if key in metrics:
-                recall_matrix[i, j] = metrics[key]['mean_recall_at_1']
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    sns.heatmap(recall_matrix, annot=True, fmt='.3f', cmap='viridis',
-                xticklabels=gallery_sizes, yticklabels=[f'{t:.1f}' for t in thresholds],
-                cbar_kws={'label': 'Recall@1'}, ax=ax)
-
-    ax.set_xlabel('Gallery Size (samples per individual)', fontsize=12)
-    ax.set_ylabel('Quality Threshold', fontsize=12)
-    ax.set_title('Parameter Space: Mean Recall@1 at Best Epoch', fontsize=14, pad=15)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Saved: {output_path}")
-
-
-def plot_improvement_over_baseline(metrics: dict, output_path: str):
-    """
-    Panel C: Bar chart showing % improvement over baseline (threshold=0.0).
-    For each gallery_size, shows improvement from filtering.
-    """
-    thresholds = sorted(set(k[0] for k in metrics.keys()))
-    gallery_sizes = sorted(set(k[1] for k in metrics.keys()))
-
-    # Compute improvement for each (threshold, gallery_size) relative to baseline
-    improvements = {}
-    for threshold in thresholds:
-        if threshold == 0.0:
-            continue
-        for gsize in gallery_sizes:
-            baseline_key = (0.0, gsize)
-            current_key = (threshold, gsize)
-            if baseline_key in metrics and current_key in metrics:
-                baseline = metrics[baseline_key]['mean_recall_at_1']
-                current = metrics[current_key]['mean_recall_at_1']
-                if baseline > 0:
-                    pct_improvement = ((current - baseline) / baseline) * 100
-                    improvements[(threshold, gsize)] = pct_improvement
-
-    if not improvements:
-        print("No improvement data available")
-        return
-
-    # Create grouped bar chart
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    non_baseline_thresholds = [t for t in thresholds if t > 0]
     x = np.arange(len(gallery_sizes))
-    width = 0.8 / len(non_baseline_thresholds)
+    width = 0.6
 
-    # Viridis colors for non-baseline thresholds
-    colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(non_baseline_thresholds)))
+    best_recalls = []
+    best_combos = []
+    ci_errors = []
 
-    for i, threshold in enumerate(non_baseline_thresholds):
-        offset = (i - len(non_baseline_thresholds) / 2 + 0.5) * width
-        values = [improvements.get((threshold, gs), 0) for gs in gallery_sizes]
-        ax.bar(x + offset, values, width, label=f't = {threshold}', color=colors[i])
+    for gsize in gallery_sizes:
+        best_mean = -1
+        best_values = None
+        best_gal = None
+        best_q = None
 
-    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+
+            best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_values = values
+                        best_gal = gal_thresh
+                        best_q = q_thresh
+
+        if best_values:
+            mean = np.mean(best_values)
+            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
+            best_recalls.append(mean)
+            ci_errors.append(ci)
+            # Format query threshold for display (e.g., "q>=0.1" -> "0.1")
+            q_val = best_q.replace('q>=', '')
+            best_combos.append(f'G≥{best_gal}, Q≥{q_val}')
+        else:
+            best_recalls.append(0)
+            ci_errors.append(0)
+            best_combos.append('N/A')
+
+    # Create bar chart
+    bars = ax.bar(x, best_recalls, width, yerr=ci_errors, capsize=5,
+                  color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
+
+    # Add combo labels on bars
+    for i, (bar, combo) in enumerate(zip(bars, best_combos)):
+        height = bar.get_height()
+        ax.annotate(combo,
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 5),
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
     ax.set_xticks(x)
     ax.set_xticklabels(gallery_sizes)
-    ax.set_xlabel('Gallery Size (samples per individual)', fontsize=12)
-    ax.set_ylabel('% Improvement over Baseline (t=0.0)', fontsize=12)
-    ax.set_title('Improvement from Gallery Hygiene Filtering', fontsize=14, pad=15)
-    ax.legend(title='Threshold', loc='best')
+    ax.set_xlabel('Examples per Individual', fontsize=12)
+    ax.set_ylabel('Recall@1 (Best Epoch)', fontsize=12)
+    ax.set_title('Best Gallery × Query Filter Combination per Gallery Size\n'
+                 '(95% CI from 8 seeds)', fontsize=14, pad=15)
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -470,94 +531,182 @@ def plot_gallery_vs_query_quality(results: ResultsCollection, output_path: str, 
     print(f"Saved: {output_path}")
 
 
-def create_main_figure(metrics: dict, output_dir: str):
-    """Create combined 3-panel figure."""
-    fig = plt.figure(figsize=(18, 6))
+def create_main_figure(results: ResultsCollection, output_dir: str):
+    """Create combined 2-panel figure."""
+    fig = plt.figure(figsize=(14, 6))
 
-    # Get unique values
-    thresholds = sorted(set(k[0] for k in metrics.keys()))
-    gallery_sizes = sorted(set(k[1] for k in metrics.keys()))
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    # Viridis color map
-    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(thresholds)))
-    color_map = {t: colors[i] for i, t in enumerate(thresholds)}
+    # Colors for the 3 strategies
+    colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
-    # Panel A: Line plot
-    ax1 = fig.add_subplot(131)
+    # Panel A: Filtration strategies line plot
+    ax1 = fig.add_subplot(121)
 
-    for threshold in thresholds:
-        x_vals, y_vals, ci_lower, ci_upper = [], [], [], []
-        for gsize in gallery_sizes:
-            key = (threshold, gsize)
-            if key in metrics:
-                data = metrics[key]
-                mean = data['mean_recall_at_1']
-                values = data['recall_at_1_values']
-                ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
-                x_vals.append(gsize)
-                y_vals.append(mean)
-                ci_lower.append(mean - ci)
-                ci_upper.append(mean + ci)
+    strategies = {
+        'baseline': {'label': 'No Filtration (G=0, Q=0)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal (G≥0.1, Q≥0.1)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal (best G×Q)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []}
+    }
 
-        if x_vals:
-            label = f't={threshold}' if threshold > 0 else f't={threshold} (baseline)'
-            ax1.plot(x_vals, y_vals, color=color_map[threshold], linewidth=2, marker='o', label=label)
-            ax1.fill_between(x_vals, ci_lower, ci_upper, color=color_map[threshold], alpha=0.2)
+    for gsize in gallery_sizes:
+        # Baseline
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        if len(baseline_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['baseline']['x'].append(gsize)
+                    strategies['baseline']['y'].append(mean)
+                    strategies['baseline']['ci_lower'].append(mean - ci)
+                    strategies['baseline']['ci_upper'].append(mean + ci)
 
-    ax1.set_xlabel('Gallery Size')
+        # Minimal
+        minimal_filtered = results.filter(threshold=0.1, gallery_size=gsize)
+        if len(minimal_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if 'q>=0.1' in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics']['q>=0.1']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['minimal']['x'].append(gsize)
+                    strategies['minimal']['y'].append(mean)
+                    strategies['minimal']['ci_lower'].append(mean - ci)
+                    strategies['minimal']['ci_upper'].append(mean + ci)
+
+        # Optimal
+        best_mean = -1
+        best_values = None
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+            best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_values = values
+        if best_values:
+            mean = np.mean(best_values)
+            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
+            strategies['optimal']['x'].append(gsize)
+            strategies['optimal']['y'].append(mean)
+            strategies['optimal']['ci_lower'].append(mean - ci)
+            strategies['optimal']['ci_upper'].append(mean + ci)
+
+    for key in ['baseline', 'minimal', 'optimal']:
+        s = strategies[key]
+        if s['x']:
+            ax1.plot(s['x'], s['y'], color=colors[key], linewidth=2, marker='o', label=s['label'])
+            ax1.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
+
+    ax1.set_xlabel('Examples per Individual')
     ax1.set_ylabel('Recall@1')
-    ax1.set_title('A) Recall@1 vs Gallery Size\n(Best Epoch)')
+    ax1.set_title('A) Filtration Strategies')
     ax1.set_xticks(gallery_sizes)
-    ax1.legend(fontsize=8, loc='lower right')
+    ax1.legend(fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
 
-    # Panel B: Heatmap
-    ax2 = fig.add_subplot(132)
-    recall_matrix = np.zeros((len(thresholds), len(gallery_sizes)))
-    for i, threshold in enumerate(thresholds):
-        for j, gsize in enumerate(gallery_sizes):
-            key = (threshold, gsize)
-            if key in metrics:
-                recall_matrix[i, j] = metrics[key]['mean_recall_at_1']
+    # Panel B: Best combo per gallery size
+    ax2 = fig.add_subplot(122)
 
-    sns.heatmap(recall_matrix, annot=True, fmt='.3f', cmap='viridis',
-                xticklabels=gallery_sizes, yticklabels=[f'{t:.1f}' for t in thresholds], ax=ax2)
-    ax2.set_xlabel('Gallery Size')
-    ax2.set_ylabel('Threshold')
-    ax2.set_title('B) Parameter Space Heatmap\n(Best Epoch R@1)')
-
-    # Panel C: Improvement bars
-    ax3 = fig.add_subplot(133)
-
-    non_baseline_thresholds = [t for t in thresholds if t > 0]
     x = np.arange(len(gallery_sizes))
-    width = 0.8 / max(len(non_baseline_thresholds), 1)
+    width = 0.6
+    best_recalls = []
+    best_combos = []
+    ci_errors = []
 
-    improvement_colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(non_baseline_thresholds)))
+    for gsize in gallery_sizes:
+        best_mean = -1
+        best_values = None
+        best_gal = None
+        best_q = None
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+            best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_values = values
+                        best_gal = gal_thresh
+                        best_q = q_thresh
 
-    for i, threshold in enumerate(non_baseline_thresholds):
-        offset = (i - len(non_baseline_thresholds) / 2 + 0.5) * width
-        values = []
-        for gsize in gallery_sizes:
-            baseline_key = (0.0, gsize)
-            current_key = (threshold, gsize)
-            if baseline_key in metrics and current_key in metrics:
-                baseline = metrics[baseline_key]['mean_recall_at_1']
-                current = metrics[current_key]['mean_recall_at_1']
-                pct = ((current - baseline) / baseline) * 100 if baseline > 0 else 0
-            else:
-                pct = 0
-            values.append(pct)
-        ax3.bar(x + offset, values, width, label=f't={threshold}', color=improvement_colors[i])
+        if best_values:
+            mean = np.mean(best_values)
+            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
+            best_recalls.append(mean)
+            ci_errors.append(ci)
+            q_val = best_q.replace('q>=', '')
+            best_combos.append(f'G≥{best_gal}\nQ≥{q_val}')
+        else:
+            best_recalls.append(0)
+            ci_errors.append(0)
+            best_combos.append('N/A')
 
-    ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(gallery_sizes)
-    ax3.set_xlabel('Gallery Size')
-    ax3.set_ylabel('% Improvement')
-    ax3.set_title('C) Improvement over Baseline\n(t=0.0)')
-    ax3.legend(fontsize=7, loc='best')
-    ax3.grid(True, alpha=0.3, axis='y')
+    bars = ax2.bar(x, best_recalls, width, yerr=ci_errors, capsize=4,
+                   color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
+
+    for bar, combo in zip(bars, best_combos):
+        height = bar.get_height()
+        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 4), textcoords="offset points",
+                     ha='center', va='bottom', fontsize=8, fontweight='bold')
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(gallery_sizes)
+    ax2.set_xlabel('Examples per Individual')
+    ax2.set_ylabel('Recall@1')
+    ax2.set_title('B) Best G×Q Combo')
+    ax2.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'hygiene_sweep_combined.png')
@@ -650,23 +799,18 @@ def main():
     # Generate individual plots
     print("\nGenerating figures...")
 
-    plot_recall_vs_gallery_size(
-        metrics,
-        os.path.join(args.output_dir, 'panel_a_recall_vs_gallery_size.png')
+    plot_filtration_strategies(
+        results,
+        os.path.join(args.output_dir, 'panel_a_filtration_strategies.png')
     )
 
-    plot_parameter_heatmap(
-        metrics,
-        os.path.join(args.output_dir, 'panel_b_heatmap.png')
-    )
-
-    plot_improvement_over_baseline(
-        metrics,
-        os.path.join(args.output_dir, 'panel_c_improvement.png')
+    plot_best_combo_per_gallery_size(
+        results,
+        os.path.join(args.output_dir, 'panel_b_best_combo.png')
     )
 
     # Generate combined main figure
-    create_main_figure(metrics, args.output_dir)
+    create_main_figure(results, args.output_dir)
 
     # Gallery × Query quality bar charts for each gallery size
     for gsize in sorted(results.get_unique('gallery_size')):
