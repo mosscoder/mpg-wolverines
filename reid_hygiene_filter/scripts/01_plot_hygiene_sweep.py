@@ -179,9 +179,9 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
     strategies = {
-        'baseline': {'label': 'No Filtration (G=0, Q=0)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal (G≥0.1, Q≥0.1)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': 'Optimal (best G×Q combo)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []}
+        'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal quality filters: training >= 0.1; queries >= 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': None, 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -229,6 +229,8 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
         # --- Optimal: find best gallery × query combo for this gallery_size ---
         best_mean = -1
         best_values = None
+        best_gal_thresh = None
+        best_q_thresh = None
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
@@ -254,6 +256,8 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
                     if mean > best_mean:
                         best_mean = mean
                         best_values = values
+                        best_gal_thresh = gal_thresh
+                        best_q_thresh = q_thresh
 
         if best_values:
             mean = np.mean(best_values)
@@ -262,6 +266,17 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
             strategies['optimal']['y'].append(mean)
             strategies['optimal']['ci_lower'].append(mean - ci)
             strategies['optimal']['ci_upper'].append(mean + ci)
+            strategies['optimal']['best_gal'].append(best_gal_thresh)
+            strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
+
+    # Generate optimal label from most common best G and Q values
+    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
+        from collections import Counter
+        most_common_gal = Counter(strategies['optimal']['best_gal']).most_common(1)[0][0]
+        most_common_q = Counter(strategies['optimal']['best_q']).most_common(1)[0][0]
+        strategies['optimal']['label'] = f'Optimal quality filters: training >= {most_common_gal}; queries >= {most_common_q}'
+    else:
+        strategies['optimal']['label'] = 'Optimal quality filters'
 
     # Plot each strategy
     for key in ['baseline', 'minimal', 'optimal']:
@@ -383,8 +398,8 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     ax.set_xticks(x)
     ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
-    ax.set_ylabel('% Improvement over Baseline', fontsize=12)
-    ax.set_title('Best G×Q Combo: % Improvement over No Filtration (G=0, Q=0)\n'
+    ax.set_ylabel('Improvement over baseline with optimal\nfiltering strategies (percent)', fontsize=12)
+    ax.set_title('Best G×Q Combo vs No Filtration\n'
                  '(95% CI from 8 per-seed improvements)', fontsize=14, pad=15)
     ax.grid(True, alpha=0.3, axis='y')
     ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
@@ -562,9 +577,9 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1 = fig.add_subplot(121)
 
     strategies = {
-        'baseline': {'label': 'No Filtration (G=0, Q=0)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal (G≥0.1, Q≥0.1)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': 'Optimal (best G×Q)', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []}
+        'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal quality filters: training >= 0.1; queries >= 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': None, 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -612,6 +627,8 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
         # Optimal
         best_mean = -1
         best_values = None
+        best_gal_thresh = None
+        best_q_thresh = None
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
@@ -635,6 +652,8 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
                     if mean > best_mean:
                         best_mean = mean
                         best_values = values
+                        best_gal_thresh = gal_thresh
+                        best_q_thresh = q_thresh
         if best_values:
             mean = np.mean(best_values)
             ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
@@ -642,6 +661,17 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
             strategies['optimal']['y'].append(mean)
             strategies['optimal']['ci_lower'].append(mean - ci)
             strategies['optimal']['ci_upper'].append(mean + ci)
+            strategies['optimal']['best_gal'].append(best_gal_thresh)
+            strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
+
+    # Generate optimal label from most common best G and Q values
+    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
+        from collections import Counter
+        most_common_gal = Counter(strategies['optimal']['best_gal']).most_common(1)[0][0]
+        most_common_q = Counter(strategies['optimal']['best_q']).most_common(1)[0][0]
+        strategies['optimal']['label'] = f'Optimal quality filters: training >= {most_common_gal}; queries >= {most_common_q}'
+    else:
+        strategies['optimal']['label'] = 'Optimal quality filters'
 
     for key in ['baseline', 'minimal', 'optimal']:
         s = strategies[key]
@@ -737,7 +767,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax2.set_xticks(x)
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel('% Improvement')
+    ax2.set_ylabel('Improvement over baseline with optimal\nfiltering strategies (percent)')
     ax2.set_title('B) Best G×Q Combo vs Baseline')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
