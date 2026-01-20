@@ -180,8 +180,8 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
 
     strategies = {
         'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters: training >= 0.1; queries >= 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': None, 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+        'minimal': {'label': 'Minimal quality filters: training gallery ≥ 0.1; validation queries ≥ 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -268,15 +268,6 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
             strategies['optimal']['ci_upper'].append(mean + ci)
             strategies['optimal']['best_gal'].append(best_gal_thresh)
             strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
-
-    # Generate optimal label from most common best G and Q values
-    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
-        from collections import Counter
-        most_common_gal = Counter(strategies['optimal']['best_gal']).most_common(1)[0][0]
-        most_common_q = Counter(strategies['optimal']['best_q']).most_common(1)[0][0]
-        strategies['optimal']['label'] = f'Optimal quality filters: training >= {most_common_gal}; queries >= {most_common_q}'
-    else:
-        strategies['optimal']['label'] = 'Optimal quality filters'
 
     # Plot each strategy
     for key in ['baseline', 'minimal', 'optimal']:
@@ -386,19 +377,19 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     bars = ax.bar(x, mean_improvements, width, yerr=ci_errors, capsize=5,
                   color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
-    # Add combo labels on bars
-    for i, (bar, combo) in enumerate(zip(bars, best_combos)):
+    # Add combo labels on bars (positioned to right of error bars)
+    for i, (bar, combo, ci) in enumerate(zip(bars, best_combos, ci_errors)):
         height = bar.get_height()
         ax.annotate(combo,
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 5),
+                    xy=(bar.get_x() + bar.get_width(), height + ci),
+                    xytext=(3, 0),
                     textcoords="offset points",
-                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+                    ha='left', va='center', fontsize=9, fontweight='bold')
 
     ax.set_xticks(x)
     ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
-    ax.set_ylabel('Improvement over baseline with optimal\nfiltering strategies (percent)', fontsize=12)
+    ax.set_ylabel('% Improvement over Baseline', fontsize=12)
     ax.set_title('Best G×Q Combo vs No Filtration\n'
                  '(95% CI from 8 per-seed improvements)', fontsize=14, pad=15)
     ax.grid(True, alpha=0.3, axis='y')
@@ -578,8 +569,8 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
 
     strategies = {
         'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters: training >= 0.1; queries >= 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': None, 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+        'minimal': {'label': 'Minimal quality filters: training gallery ≥ 0.1; validation queries ≥ 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -663,15 +654,6 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
             strategies['optimal']['ci_upper'].append(mean + ci)
             strategies['optimal']['best_gal'].append(best_gal_thresh)
             strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
-
-    # Generate optimal label from most common best G and Q values
-    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
-        from collections import Counter
-        most_common_gal = Counter(strategies['optimal']['best_gal']).most_common(1)[0][0]
-        most_common_q = Counter(strategies['optimal']['best_q']).most_common(1)[0][0]
-        strategies['optimal']['label'] = f'Optimal quality filters: training >= {most_common_gal}; queries >= {most_common_q}'
-    else:
-        strategies['optimal']['label'] = 'Optimal quality filters'
 
     for key in ['baseline', 'minimal', 'optimal']:
         s = strategies[key]
@@ -758,16 +740,16 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     bars = ax2.bar(x, mean_improvements, width, yerr=ci_errors, capsize=4,
                    color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
-    for bar, combo in zip(bars, best_combos):
+    for bar, combo, ci in zip(bars, best_combos, ci_errors):
         height = bar.get_height()
-        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width() / 2, height),
-                     xytext=(0, 4), textcoords="offset points",
-                     ha='center', va='bottom', fontsize=8, fontweight='bold')
+        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width(), height + ci),
+                     xytext=(3, 0), textcoords="offset points",
+                     ha='left', va='center', fontsize=8, fontweight='bold')
 
     ax2.set_xticks(x)
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel('Improvement over baseline with optimal\nfiltering strategies (percent)')
+    ax2.set_ylabel('% Improvement over Baseline')
     ax2.set_title('B) Best G×Q Combo vs Baseline')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
