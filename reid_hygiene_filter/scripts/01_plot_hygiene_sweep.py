@@ -340,13 +340,15 @@ def plot_optimal_thresholds(results: ResultsCollection, output_path: str):
         best_gal_thresholds.append(best_gal if best_gal is not None else 0)
         best_query_thresholds.append(best_q if best_q is not None else 0)
 
-    # Plot lines
-    ax.plot(gallery_sizes, best_gal_thresholds, color='#1f77b4', linewidth=2.5,
-            marker='o', markersize=8, label='Training Gallery')
-    ax.plot(gallery_sizes, best_query_thresholds, color='#ff7f0e', linewidth=2.5,
-            marker='o', markersize=8, label='Validation Query')
+    # Plot grouped bars
+    x = np.arange(len(gallery_sizes))
+    width = 0.35
 
-    ax.set_xticks(gallery_sizes)
+    ax.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Training Gallery')
+    ax.bar(x + width/2, best_query_thresholds, width, color='#ff7f0e', label='Validation Query')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
     ax.set_ylabel('Image quality threshold (probability visible pelage)', fontsize=12)
     ax.legend(title='Threshold Application', fontsize=11, title_fontsize=11)
@@ -668,13 +670,15 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
         best_gal_thresholds.append(best_gal if best_gal is not None else 0)
         best_query_thresholds.append(best_q if best_q is not None else 0)
 
-    # Plot lines
-    ax2.plot(gallery_sizes, best_gal_thresholds, color='#1f77b4', linewidth=2,
-             marker='o', markersize=6, label='Training Gallery')
-    ax2.plot(gallery_sizes, best_query_thresholds, color='#ff7f0e', linewidth=2,
-             marker='o', markersize=6, label='Validation Query')
+    # Plot grouped bars
+    x = np.arange(len(gallery_sizes))
+    width = 0.35
 
-    ax2.set_xticks(gallery_sizes)
+    ax2.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Training Gallery')
+    ax2.bar(x + width/2, best_query_thresholds, width, color='#ff7f0e', label='Validation Query')
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
     ax2.set_ylabel('Image quality threshold\n(probability visible pelage)')
     ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9)
