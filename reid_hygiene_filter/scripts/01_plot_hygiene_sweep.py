@@ -11,6 +11,8 @@ Figures:
 A) Line plot: Recall@1 vs gallery_size, lines by threshold value (viridis)
 B) Heatmap: threshold × gallery_size → Recall@1 parameter space
 C) Bar chart: % improvement over baseline (threshold=0.0)
+D) Gallery × Query quality bar chart: Shows how gallery filtering affects
+   retrieval performance across different query quality levels
 """
 
 import os
@@ -388,6 +390,86 @@ def plot_learning_curves(results: ResultsCollection, output_path: str, gallery_s
     print(f"Saved: {output_path}")
 
 
+def plot_gallery_vs_query_quality(results: ResultsCollection, output_path: str, gallery_size: int = 64):
+    """
+    Bar chart: Gallery threshold (hue) × Query quality threshold (x-axis) → Recall@1.
+
+    For each gallery threshold, finds the best epoch based on overall recall (q>=0.0),
+    then extracts query_quality_metrics at that epoch for all query thresholds.
+
+    Args:
+        results: ResultsCollection with experiment results
+        output_path: Path to save the figure
+        gallery_size: Gallery size to filter for
+    """
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+    x = np.arange(len(query_thresholds))
+    width = 0.8 / len(gallery_thresholds)
+    colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(gallery_thresholds)))
+
+    for i, gal_thresh in enumerate(gallery_thresholds):
+        # Get results for this gallery_size and gallery_threshold
+        filtered = results.filter(threshold=gal_thresh, gallery_size=gallery_size)
+        if len(filtered) == 0:
+            continue
+
+        all_histories = [r.get('epoch_history', []) for r in filtered]
+
+        if not all_histories or not all_histories[0]:
+            continue
+
+        # Check if new format with query_quality_metrics exists
+        sample_entry = all_histories[0][0]
+        if 'query_quality_metrics' not in sample_entry:
+            print(f"  Skipping gal_thresh={gal_thresh}: no query_quality_metrics in data")
+            continue
+
+        # Find best epoch (based on q>=0.0 overall recall)
+        best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+
+        # Extract query_quality_metrics at best epoch for each seed
+        means, errors = [], []
+        for q_thresh in query_thresholds:
+            values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                        if q_thresh in h['query_quality_metrics']:
+                            values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                        break
+
+            if values:
+                mean = np.mean(values)
+                if len(values) > 1:
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values)
+                else:
+                    ci = 0
+            else:
+                mean = 0
+                ci = 0
+            means.append(mean)
+            errors.append(ci)
+
+        offset = (i - len(gallery_thresholds) / 2 + 0.5) * width
+        label = f'G≥{gal_thresh}' + (' (baseline)' if gal_thresh == 0.0 else '')
+        ax.bar(x + offset, means, width, yerr=errors, label=label, color=colors[i], capsize=3)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(['≥0.0\n(all)', '≥0.1', '≥0.2', '≥0.3', '≥0.4', '≥0.5'])
+    ax.set_xlabel('Query Quality Threshold', fontsize=12)
+    ax.set_ylabel('Recall@1 (Best Epoch)', fontsize=12)
+    ax.set_title(f'Gallery × Query Quality Interaction (gallery_size={gallery_size})', fontsize=14)
+    ax.legend(title='Gallery Filter', loc='lower right')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_path}")
+
+
 def create_main_figure(metrics: dict, output_dir: str):
     """Create combined 3-panel figure."""
     fig = plt.figure(figsize=(18, 6))
@@ -586,16 +668,16 @@ def main():
     # Generate combined main figure
     create_main_figure(metrics, args.output_dir)
 
-    # Learning curves for each gallery size
+    # Gallery × Query quality bar charts for each gallery size
     for gsize in sorted(results.get_unique('gallery_size')):
         try:
-            plot_learning_curves(
+            plot_gallery_vs_query_quality(
                 results,
-                os.path.join(args.output_dir, f'learning_curves_gallery={gsize}.png'),
+                os.path.join(args.output_dir, f'gallery_query_quality_N={gsize}.png'),
                 gallery_size=gsize
             )
         except Exception as e:
-            print(f"Could not generate learning curves for gallery_size={gsize}: {e}")
+            print(f"Could not generate gallery vs query plot for gallery_size={gsize}: {e}")
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
 
