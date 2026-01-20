@@ -180,7 +180,7 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
 
     strategies = {
         'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters: training gallery ≥ 0.1; validation queries ≥ 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
@@ -377,12 +377,12 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     bars = ax.bar(x, mean_improvements, width, yerr=ci_errors, capsize=5,
                   color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
-    # Add combo labels on bars (positioned to right of error bars)
-    for i, (bar, combo, ci) in enumerate(zip(bars, best_combos, ci_errors)):
+    # Add combo labels on bars (positioned to right of bars)
+    for i, (bar, combo) in enumerate(zip(bars, best_combos)):
         height = bar.get_height()
         ax.annotate(combo,
-                    xy=(bar.get_x() + bar.get_width(), height + ci),
-                    xytext=(3, 0),
+                    xy=(bar.get_x() + bar.get_width(), height),
+                    xytext=(1.5, 0),
                     textcoords="offset points",
                     ha='left', va='center', fontsize=9, fontweight='bold')
 
@@ -392,6 +392,7 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     ax.set_ylabel('% Improvement over Baseline', fontsize=12)
     ax.set_title('Best G×Q Combo vs No Filtration\n'
                  '(95% CI from 8 per-seed improvements)', fontsize=14, pad=15)
+    ax.yaxis.set_major_locator(plt.MultipleLocator(25))
     ax.grid(True, alpha=0.3, axis='y')
     ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
@@ -569,7 +570,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
 
     strategies = {
         'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters: training gallery ≥ 0.1; validation queries ≥ 0.1', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
@@ -740,10 +741,10 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     bars = ax2.bar(x, mean_improvements, width, yerr=ci_errors, capsize=4,
                    color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
-    for bar, combo, ci in zip(bars, best_combos, ci_errors):
+    for bar, combo in zip(bars, best_combos):
         height = bar.get_height()
-        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width(), height + ci),
-                     xytext=(3, 0), textcoords="offset points",
+        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width(), height),
+                     xytext=(1.5, 0), textcoords="offset points",
                      ha='left', va='center', fontsize=8, fontweight='bold')
 
     ax2.set_xticks(x)
@@ -751,6 +752,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax2.set_xlabel('Examples per Individual')
     ax2.set_ylabel('% Improvement over Baseline')
     ax2.set_title('B) Best G×Q Combo vs Baseline')
+    ax2.yaxis.set_major_locator(plt.MultipleLocator(25))
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
