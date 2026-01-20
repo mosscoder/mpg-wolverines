@@ -179,7 +179,7 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
     strategies = {
-        'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'baseline': {'label': 'No filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
@@ -281,7 +281,7 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     ax.set_ylabel('Recall@1', fontsize=14)
     ax.set_xticks(gallery_sizes)
     ax.grid(True, alpha=0.3, axis='y')
-    ax.legend(loc='lower right', fontsize=11)
+    ax.legend(title='Re-identification filter strategy', loc='lower right', fontsize=11, title_fontsize=11)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -527,7 +527,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1 = fig.add_subplot(121)
 
     strategies = {
-        'baseline': {'label': 'Random strategy', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'baseline': {'label': 'No filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
@@ -623,7 +623,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1.set_xlabel('Examples per Individual')
     ax1.set_ylabel('Recall@1')
     ax1.set_xticks(gallery_sizes)
-    ax1.legend(fontsize=9, loc='lower right')
+    ax1.legend(title='Re-identification filter strategy', fontsize=9, title_fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
