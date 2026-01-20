@@ -179,9 +179,9 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
     strategies = {
-        'baseline': {'label': 'No filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+        'baseline': {'label': 'None', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -278,10 +278,10 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
             ax.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
 
     ax.set_xlabel('Examples per Individual', fontsize=14)
-    ax.set_ylabel('Recall@1', fontsize=14)
+    ax.set_ylabel('Wolverine re-identification performance (Recall@1)', fontsize=14)
     ax.set_xticks(gallery_sizes)
     ax.grid(True, alpha=0.3, axis='y')
-    ax.legend(title='Re-identification filter strategy', loc='lower right', fontsize=11, title_fontsize=11)
+    ax.legend(title='Image quality filter', loc='lower right', fontsize=11, title_fontsize=11)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -527,9 +527,9 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1 = fig.add_subplot(121)
 
     strategies = {
-        'baseline': {'label': 'No filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'minimal': {'label': 'Minimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': 'Optimal quality filters', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+        'baseline': {'label': 'None', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
     }
 
     for gsize in gallery_sizes:
@@ -621,9 +621,9 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
             ax1.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
 
     ax1.set_xlabel('Examples per Individual')
-    ax1.set_ylabel('Recall@1')
+    ax1.set_ylabel('Wolverine re-identification performance (Recall@1)')
     ax1.set_xticks(gallery_sizes)
-    ax1.legend(title='Re-identification filter strategy', fontsize=9, title_fontsize=9, loc='lower right')
+    ax1.legend(title='Image quality filter', fontsize=9, title_fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
