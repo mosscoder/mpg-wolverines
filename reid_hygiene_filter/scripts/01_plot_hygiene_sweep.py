@@ -680,7 +680,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax2.set_xticks(x)
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel(r'Optimal image quality threshold' + '\n' + r'($p$ visible pelage)')
+    ax2.set_ylabel(r'Optimal image quality threshold ($p$ visible pelage)')
     ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9, loc='lower right')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
