@@ -286,11 +286,10 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
 
 def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: str):
     """
-    Panel B: Bar chart showing best gallery × query filter combo for each gallery_size.
+    Panel B: Bar chart showing % improvement over baseline for best G×Q combo.
 
-    For each examples-per-individual value, finds the optimal combination of
-    gallery filter threshold and query filter threshold, and displays both
-    the best combo settings and the resulting Recall@1.
+    For each examples-per-individual value, computes the per-seed % improvement
+    of the optimal G×Q combo over the baseline (G=0, Q=0).
     """
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
@@ -301,13 +300,27 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     x = np.arange(len(gallery_sizes))
     width = 0.6
 
-    best_recalls = []
+    mean_improvements = []
     best_combos = []
     ci_errors = []
 
     for gsize in gallery_sizes:
+        # First, get baseline (G=0, Q=0) values for this gallery_size
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        baseline_values = []
+        if len(baseline_filtered) > 0:
+            baseline_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if baseline_histories and baseline_histories[0] and 'query_quality_metrics' in baseline_histories[0][0]:
+                baseline_epoch, _ = find_best_epoch_for_overall_recall(baseline_histories)
+                for history in baseline_histories:
+                    for h in history:
+                        if h['epoch'] == baseline_epoch and 'query_quality_metrics' in h:
+                            baseline_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+
+        # Find optimal combo and get per-seed values
         best_mean = -1
-        best_values = None
+        optimal_values = None
         best_gal = None
         best_q = None
 
@@ -335,25 +348,27 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
                     mean = np.mean(values)
                     if mean > best_mean:
                         best_mean = mean
-                        best_values = values
+                        optimal_values = values
                         best_gal = gal_thresh
                         best_q = q_thresh
 
-        if best_values:
-            mean = np.mean(best_values)
-            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
-            best_recalls.append(mean)
+        # Compute per-seed % improvement
+        if optimal_values and baseline_values and len(optimal_values) == len(baseline_values):
+            improvements = [(opt - base) / base * 100
+                           for opt, base in zip(optimal_values, baseline_values)]
+            mean_imp = np.mean(improvements)
+            ci = stats.t.ppf(0.975, len(improvements) - 1) * stats.sem(improvements) if len(improvements) > 1 else 0
+            mean_improvements.append(mean_imp)
             ci_errors.append(ci)
-            # Format query threshold for display (e.g., "q>=0.1" -> "0.1")
             q_val = best_q.replace('q>=', '')
             best_combos.append(f'G≥{best_gal}, Q≥{q_val}')
         else:
-            best_recalls.append(0)
+            mean_improvements.append(0)
             ci_errors.append(0)
             best_combos.append('N/A')
 
     # Create bar chart
-    bars = ax.bar(x, best_recalls, width, yerr=ci_errors, capsize=5,
+    bars = ax.bar(x, mean_improvements, width, yerr=ci_errors, capsize=5,
                   color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
     # Add combo labels on bars
@@ -368,10 +383,11 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
     ax.set_xticks(x)
     ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
-    ax.set_ylabel('Recall@1 (Best Epoch)', fontsize=12)
-    ax.set_title('Best Gallery × Query Filter Combination per Gallery Size\n'
-                 '(95% CI from 8 seeds)', fontsize=14, pad=15)
+    ax.set_ylabel('% Improvement over Baseline', fontsize=12)
+    ax.set_title('Best G×Q Combo: % Improvement over No Filtration (G=0, Q=0)\n'
+                 '(95% CI from 8 per-seed improvements)', fontsize=14, pad=15)
     ax.grid(True, alpha=0.3, axis='y')
+    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -640,18 +656,32 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1.legend(fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
 
-    # Panel B: Best combo per gallery size
+    # Panel B: Best combo per gallery size (% improvement over baseline)
     ax2 = fig.add_subplot(122)
 
     x = np.arange(len(gallery_sizes))
     width = 0.6
-    best_recalls = []
+    mean_improvements = []
     best_combos = []
     ci_errors = []
 
     for gsize in gallery_sizes:
+        # First, get baseline (G=0, Q=0) values for this gallery_size
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        baseline_values = []
+        if len(baseline_filtered) > 0:
+            baseline_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if baseline_histories and baseline_histories[0] and 'query_quality_metrics' in baseline_histories[0][0]:
+                baseline_epoch, _ = find_best_epoch_for_overall_recall(baseline_histories)
+                for history in baseline_histories:
+                    for h in history:
+                        if h['epoch'] == baseline_epoch and 'query_quality_metrics' in h:
+                            baseline_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+
+        # Find optimal combo and get per-seed values
         best_mean = -1
-        best_values = None
+        optimal_values = None
         best_gal = None
         best_q = None
         for gal_thresh in gallery_thresholds:
@@ -676,23 +706,26 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
                     mean = np.mean(values)
                     if mean > best_mean:
                         best_mean = mean
-                        best_values = values
+                        optimal_values = values
                         best_gal = gal_thresh
                         best_q = q_thresh
 
-        if best_values:
-            mean = np.mean(best_values)
-            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
-            best_recalls.append(mean)
+        # Compute per-seed % improvement
+        if optimal_values and baseline_values and len(optimal_values) == len(baseline_values):
+            improvements = [(opt - base) / base * 100
+                           for opt, base in zip(optimal_values, baseline_values)]
+            mean_imp = np.mean(improvements)
+            ci = stats.t.ppf(0.975, len(improvements) - 1) * stats.sem(improvements) if len(improvements) > 1 else 0
+            mean_improvements.append(mean_imp)
             ci_errors.append(ci)
             q_val = best_q.replace('q>=', '')
             best_combos.append(f'G≥{best_gal}\nQ≥{q_val}')
         else:
-            best_recalls.append(0)
+            mean_improvements.append(0)
             ci_errors.append(0)
             best_combos.append('N/A')
 
-    bars = ax2.bar(x, best_recalls, width, yerr=ci_errors, capsize=4,
+    bars = ax2.bar(x, mean_improvements, width, yerr=ci_errors, capsize=4,
                    color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
 
     for bar, combo in zip(bars, best_combos):
@@ -704,9 +737,10 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax2.set_xticks(x)
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel('Recall@1')
-    ax2.set_title('B) Best G×Q Combo')
+    ax2.set_ylabel('% Improvement')
+    ax2.set_title('B) Best G×Q Combo vs Baseline')
     ax2.grid(True, alpha=0.3, axis='y')
+    ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'hygiene_sweep_combined.png')
