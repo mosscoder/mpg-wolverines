@@ -279,8 +279,6 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
 
     ax.set_xlabel('Examples per Individual', fontsize=14)
     ax.set_ylabel('Recall@1', fontsize=14)
-    ax.set_title('Filtration Strategies: Recall@1 vs Examples per Individual\n'
-                 '(Best epoch, 95% CI from 8 seeds)', fontsize=16, pad=20)
     ax.set_xticks(gallery_sizes)
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='lower right', fontsize=11)
@@ -290,43 +288,25 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     print(f"Saved: {output_path}")
 
 
-def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: str):
+def plot_optimal_thresholds(results: ResultsCollection, output_path: str):
     """
-    Panel B: Bar chart showing % improvement over baseline for best G×Q combo.
+    Panel B: Line plot showing optimal thresholds for training gallery and validation queries.
 
-    For each examples-per-individual value, computes the per-seed % improvement
-    of the optimal G×Q combo over the baseline (G=0, Q=0).
+    For each examples-per-individual value, finds the optimal G×Q combo and plots
+    the threshold values as two lines.
     """
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
     query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
-    x = np.arange(len(gallery_sizes))
-    width = 0.6
-
-    mean_improvements = []
-    best_combos = []
-    ci_errors = []
+    best_gal_thresholds = []
+    best_query_thresholds = []
 
     for gsize in gallery_sizes:
-        # First, get baseline (G=0, Q=0) values for this gallery_size
-        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
-        baseline_values = []
-        if len(baseline_filtered) > 0:
-            baseline_histories = [r.get('epoch_history', []) for r in baseline_filtered]
-            if baseline_histories and baseline_histories[0] and 'query_quality_metrics' in baseline_histories[0][0]:
-                baseline_epoch, _ = find_best_epoch_for_overall_recall(baseline_histories)
-                for history in baseline_histories:
-                    for h in history:
-                        if h['epoch'] == baseline_epoch and 'query_quality_metrics' in h:
-                            baseline_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                            break
-
-        # Find optimal combo and get per-seed values
+        # Find optimal combo for this gallery_size
         best_mean = -1
-        optimal_values = None
         best_gal = None
         best_q = None
 
@@ -354,47 +334,23 @@ def plot_best_combo_per_gallery_size(results: ResultsCollection, output_path: st
                     mean = np.mean(values)
                     if mean > best_mean:
                         best_mean = mean
-                        optimal_values = values
                         best_gal = gal_thresh
-                        best_q = q_thresh
+                        best_q = float(q_thresh.replace('q>=', ''))
 
-        # Compute per-seed % improvement
-        if optimal_values and baseline_values and len(optimal_values) == len(baseline_values):
-            improvements = [(opt - base) / base * 100
-                           for opt, base in zip(optimal_values, baseline_values)]
-            mean_imp = np.mean(improvements)
-            ci = stats.t.ppf(0.975, len(improvements) - 1) * stats.sem(improvements) if len(improvements) > 1 else 0
-            mean_improvements.append(mean_imp)
-            ci_errors.append(ci)
-            q_val = best_q.replace('q>=', '')
-            best_combos.append(f'G≥{best_gal}, Q≥{q_val}')
-        else:
-            mean_improvements.append(0)
-            ci_errors.append(0)
-            best_combos.append('N/A')
+        best_gal_thresholds.append(best_gal if best_gal is not None else 0)
+        best_query_thresholds.append(best_q if best_q is not None else 0)
 
-    # Create bar chart
-    bars = ax.bar(x, mean_improvements, width, yerr=ci_errors, capsize=5,
-                  color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
+    # Plot lines
+    ax.plot(gallery_sizes, best_gal_thresholds, color='#1f77b4', linewidth=2.5,
+            marker='o', markersize=8, label='Training Gallery')
+    ax.plot(gallery_sizes, best_query_thresholds, color='#ff7f0e', linewidth=2.5,
+            marker='o', markersize=8, label='Validation Query')
 
-    # Add combo labels on bars (positioned to right of bars)
-    for i, (bar, combo) in enumerate(zip(bars, best_combos)):
-        height = bar.get_height()
-        ax.annotate(combo,
-                    xy=(bar.get_x() + bar.get_width(), height),
-                    xytext=(1.5, 0),
-                    textcoords="offset points",
-                    ha='left', va='center', fontsize=9, fontweight='bold')
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(gallery_sizes)
+    ax.set_xticks(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
-    ax.set_ylabel('% Improvement over Baseline', fontsize=12)
-    ax.set_title('Best G×Q Combo vs No Filtration\n'
-                 '(95% CI from 8 per-seed improvements)', fontsize=14, pad=15)
-    ax.yaxis.set_major_locator(plt.MultipleLocator(25))
+    ax.set_ylabel('Image quality threshold (probability visible pelage)', fontsize=12)
+    ax.legend(title='Threshold Application', fontsize=11, title_fontsize=11)
     ax.grid(True, alpha=0.3, axis='y')
-    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -664,39 +620,24 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
 
     ax1.set_xlabel('Examples per Individual')
     ax1.set_ylabel('Recall@1')
-    ax1.set_title('A) Filtration Strategies')
     ax1.set_xticks(gallery_sizes)
     ax1.legend(fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
 
-    # Panel B: Best combo per gallery size (% improvement over baseline)
+    # Panel B: Optimal thresholds for training gallery and validation queries
     ax2 = fig.add_subplot(122)
 
-    x = np.arange(len(gallery_sizes))
-    width = 0.6
-    mean_improvements = []
-    best_combos = []
-    ci_errors = []
+    best_gal_thresholds = []
+    best_query_thresholds = []
 
     for gsize in gallery_sizes:
-        # First, get baseline (G=0, Q=0) values for this gallery_size
-        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
-        baseline_values = []
-        if len(baseline_filtered) > 0:
-            baseline_histories = [r.get('epoch_history', []) for r in baseline_filtered]
-            if baseline_histories and baseline_histories[0] and 'query_quality_metrics' in baseline_histories[0][0]:
-                baseline_epoch, _ = find_best_epoch_for_overall_recall(baseline_histories)
-                for history in baseline_histories:
-                    for h in history:
-                        if h['epoch'] == baseline_epoch and 'query_quality_metrics' in h:
-                            baseline_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                            break
-
-        # Find optimal combo and get per-seed values
+        # Find optimal combo for this gallery_size
         best_mean = -1
-        optimal_values = None
         best_gal = None
         best_q = None
+
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
@@ -706,7 +647,9 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
                 continue
             if 'query_quality_metrics' not in all_histories[0][0]:
                 continue
+
             best_epoch, _ = find_best_epoch_for_overall_recall(all_histories)
+
             for q_thresh in query_thresholds:
                 values = []
                 for history in all_histories:
@@ -719,42 +662,25 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
                     mean = np.mean(values)
                     if mean > best_mean:
                         best_mean = mean
-                        optimal_values = values
                         best_gal = gal_thresh
-                        best_q = q_thresh
+                        best_q = float(q_thresh.replace('q>=', ''))
 
-        # Compute per-seed % improvement
-        if optimal_values and baseline_values and len(optimal_values) == len(baseline_values):
-            improvements = [(opt - base) / base * 100
-                           for opt, base in zip(optimal_values, baseline_values)]
-            mean_imp = np.mean(improvements)
-            ci = stats.t.ppf(0.975, len(improvements) - 1) * stats.sem(improvements) if len(improvements) > 1 else 0
-            mean_improvements.append(mean_imp)
-            ci_errors.append(ci)
-            q_val = best_q.replace('q>=', '')
-            best_combos.append(f'G≥{best_gal}\nQ≥{q_val}')
-        else:
-            mean_improvements.append(0)
-            ci_errors.append(0)
-            best_combos.append('N/A')
+        best_gal_thresholds.append(best_gal if best_gal is not None else 0)
+        best_query_thresholds.append(best_q if best_q is not None else 0)
 
-    bars = ax2.bar(x, mean_improvements, width, yerr=ci_errors, capsize=4,
-                   color=plt.cm.viridis(0.6), edgecolor='black', linewidth=0.5)
+    # Plot lines
+    ax2.plot(gallery_sizes, best_gal_thresholds, color='#1f77b4', linewidth=2,
+             marker='o', markersize=6, label='Training Gallery')
+    ax2.plot(gallery_sizes, best_query_thresholds, color='#ff7f0e', linewidth=2,
+             marker='o', markersize=6, label='Validation Query')
 
-    for bar, combo in zip(bars, best_combos):
-        height = bar.get_height()
-        ax2.annotate(combo, xy=(bar.get_x() + bar.get_width(), height),
-                     xytext=(1.5, 0), textcoords="offset points",
-                     ha='left', va='center', fontsize=8, fontweight='bold')
-
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(gallery_sizes)
+    ax2.set_xticks(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel('% Improvement over Baseline')
-    ax2.set_title('B) Best G×Q Combo vs Baseline')
-    ax2.yaxis.set_major_locator(plt.MultipleLocator(25))
+    ax2.set_ylabel('Image quality threshold\n(probability visible pelage)')
+    ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9)
     ax2.grid(True, alpha=0.3, axis='y')
-    ax2.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
 
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'hygiene_sweep_combined.png')
@@ -852,9 +778,9 @@ def main():
         os.path.join(args.output_dir, 'panel_a_filtration_strategies.png')
     )
 
-    plot_best_combo_per_gallery_size(
+    plot_optimal_thresholds(
         results,
-        os.path.join(args.output_dir, 'panel_b_best_combo.png')
+        os.path.join(args.output_dir, 'panel_b_optimal_thresholds.png')
     )
 
     # Generate combined main figure
