@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Script 00: Quality-Weighted Triplet Loss Sweep
-Re-identification experiment with triplet loss using confidence weighting.
+Script 00: Gallery Hygiene Sweep with MegaDescriptor Backbone
 
-Strategy: Down-weight low-quality pairs (suppressing noisy gradients) rather than
-up-weighting high-quality pairs (which often have zero loss due to ReLU).
+Replicates reid_hygiene_filter experiment using MegaDescriptor-L-384 backbone
+instead of DINOv3.
 
-Grid: 4 min_weight values × 6 sample sizes × 8 seeds = 192 configurations
-Distributed across 24 SLURM jobs (8 configs/job).
+Key differences from DINOv3:
+- Input size: 384x384 (vs 224x224)
+- Normalization: [0.5,0.5,0.5] (vs ImageNet stats)
+- Feature extraction: Direct output (vs CLS token)
+- Feature dimension: ~2048 (vs 768)
+
+Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
+Distributed across 24 SLURM jobs (12 configs/job).
 """
 
 import sys
@@ -16,11 +21,12 @@ import argparse
 import time
 import json
 import torch
+import torch.nn as nn
 import numpy as np
 from pathlib import Path
 from datetime import datetime
 from torch.utils.data import DataLoader, Dataset as TorchDataset
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset
 import torchvision.transforms as T
 from PIL import Image
 
@@ -34,12 +40,10 @@ sys.path.append('.')
 
 from utils.dataset import set_all_seeds
 from utils.triplet import (
-    create_embedding_model,
-    QualityWeightedTripletLoss,
+    create_megadescriptor_embedding_model,
     PKBatchSampler,
     mine_random_triplets,
     compute_recall_at_k,
-    compute_recall_by_query_gallery_quality
 )
 from utils.training import check_result_exists
 
@@ -48,8 +52,8 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-MIN_WEIGHT_VALUES = [1.0, 0.5, 0.2, 0.1]  # 1.0 = no weighting (baseline)
-SAMPLE_SIZES = [2, 4, 8, 16, 32, 64]
+THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
+GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 MARGIN = 0.3
 EMBEDDING_DIM = 128
@@ -58,14 +62,18 @@ EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
 
+# Query quality thresholds for evaluation
+# q>=0.0 includes ALL queries (equivalent to overall recall)
+QUERY_QUALITY_THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
 
 def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
-    """Map job index to list of (min_weight, sample_size, seed) tuples."""
+    """Map job index to list of (threshold, gallery_size, seed) tuples."""
     all_combinations = []
-    for min_weight in MIN_WEIGHT_VALUES:
-        for sample_size in SAMPLE_SIZES:
+    for threshold in THRESHOLDS:
+        for gallery_size in GALLERY_SIZES:
             for seed in SEEDS:
-                all_combinations.append((min_weight, sample_size, seed))
+                all_combinations.append((threshold, gallery_size, seed))
 
     total = len(all_combinations)
     configs_per_job = total // max_jobs
@@ -119,30 +127,62 @@ def build_id_to_indices(dataset):
     return id_to_indices
 
 
-def create_temporal_dataset(dataset, individuals, sample_size, seed, config, id_to_indices):
+def filter_training_pool_by_quality(dataset, indices, threshold):
     """
-    Create temporal train/val split for triplet learning.
+    Return indices where pelage_score >= threshold.
 
-    Training: N samples per individual from all years except final
-    Validation: All samples from final year (used as queries)
+    Args:
+        dataset: HuggingFace dataset
+        indices: List of dataset indices to filter
+        threshold: Minimum pelage_score to include
+
+    Returns:
+        List of indices meeting the threshold
+    """
+    if threshold <= 0.0:
+        return indices  # No filtering needed for threshold 0.0
+
+    filtered = []
+    for idx in indices:
+        if dataset[idx]['pelage_score'] >= threshold:
+            filtered.append(idx)
+    return filtered
+
+
+def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, id_to_indices):
+    """
+    Create gallery/query split with filtered gallery.
+
+    Gallery: Training samples filtered by pelage_score >= threshold, then sampled
+    Query: ALL validation samples (unfiltered)
+
+    Returns:
+        train_dataset: Gallery dataset (filtered + sampled)
+        val_dataset: Query dataset (all validation samples)
+        individual_to_class: Label mapping
+        dataset_info: Statistics about the split
     """
     import random
 
     set_all_seeds(seed)
 
-    # Pool all data
-    print(f"Creating temporal dataset: {sample_size} samples/class, seed={seed}")
+    print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
 
-    # Build training and validation sets using pre-computed indices
     all_train_indices = []
     all_val_indices = []
     individual_to_class = {ind: i for i, ind in enumerate(sorted(individuals))}
 
-    dataset_info = {}
+    dataset_info = {
+        'gallery_samples_per_individual': {},
+        'eligible_pool_per_individual': {},
+        'query_samples_per_individual': {}
+    }
 
     for ind_id in individuals:
-        # Get validation indices from config
+        # Get validation indices (queries) - these are UNFILTERED
         val_indices = config['validation_indices'][ind_id]['indices']
+        all_val_indices.extend(val_indices)
+        dataset_info['query_samples_per_individual'][ind_id] = len(val_indices)
 
         # Get all indices for this individual
         all_ind_indices = set(id_to_indices.get(ind_id, []))
@@ -150,28 +190,31 @@ def create_temporal_dataset(dataset, individuals, sample_size, seed, config, id_
         # Training candidates: exclude validation indices
         train_candidates = list(all_ind_indices - set(val_indices))
 
-        if len(train_candidates) < sample_size:
-            print(f"Warning: {ind_id} has only {len(train_candidates)} training samples, need {sample_size}")
-            train_sampled = train_candidates
+        # FILTER by quality threshold
+        eligible_pool = filter_training_pool_by_quality(dataset, train_candidates, threshold)
+        dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
+
+        # Sample from filtered pool
+        if len(eligible_pool) == 0:
+            print(f"  WARNING: {ind_id} has NO samples above threshold {threshold}")
+            train_sampled = []
+        elif len(eligible_pool) < gallery_size:
+            print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible samples (need {gallery_size}), using all")
+            train_sampled = eligible_pool
         else:
-            random.shuffle(train_candidates)
-            train_sampled = train_candidates[:sample_size]
+            random.shuffle(eligible_pool)
+            train_sampled = eligible_pool[:gallery_size]
 
         all_train_indices.extend(train_sampled)
-        all_val_indices.extend(val_indices)
+        dataset_info['gallery_samples_per_individual'][ind_id] = len(train_sampled)
 
-        dataset_info[ind_id] = {
-            'train_samples': len(train_sampled),
-            'val_samples': len(val_indices)
-        }
-
-        print(f"  {ind_id}: {len(train_sampled)} train, {len(val_indices)} val")
+        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(val_indices)} query")
 
     # Create dataset subsets
-    train_dataset = dataset.select(all_train_indices)
+    train_dataset = dataset.select(all_train_indices) if all_train_indices else None
     val_dataset = dataset.select(all_val_indices)
 
-    print(f"Total: {len(train_dataset)} train, {len(val_dataset)} val")
+    print(f"Total: {len(all_train_indices)} gallery, {len(all_val_indices)} query")
 
     return train_dataset, val_dataset, individual_to_class, dataset_info
 
@@ -205,17 +248,17 @@ class TripletDataset(TorchDataset):
         return self.labels
 
 
-def create_dinov3_transform():
-    """Create DINOv3-specific transform pipeline."""
+def create_megadescriptor_transform():
+    """Create MegaDescriptor-specific transform pipeline."""
     return T.Compose([
-        T.Resize(size=(224, 224), interpolation=Image.LANCZOS),
+        T.Resize(size=(384, 384), interpolation=Image.LANCZOS),
         T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
-    """Train for one epoch with triplet loss."""
+    """Train for one epoch with standard triplet loss (no quality weighting)."""
     model.train()
     total_loss = 0
     num_batches = 0
@@ -228,17 +271,17 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
         # Get embeddings
         embeddings = model(images)
 
-        # Mine triplets
-        anchor_emb, pos_emb, neg_emb, anchor_quality, pos_quality = mine_random_triplets(
+        # Mine triplets (quality scores returned but not used for weighting)
+        anchor_emb, pos_emb, neg_emb, _, _ = mine_random_triplets(
             embeddings, labels, quality_scores
         )
 
         if anchor_emb.size(0) == 0:
             continue
 
-        # Compute loss (product weighting: uses both anchor and positive quality)
+        # Standard triplet loss - NO quality weighting
         optimizer.zero_grad()
-        loss = criterion(anchor_emb, pos_emb, neg_emb, anchor_quality, pos_quality)
+        loss = criterion(anchor_emb, pos_emb, neg_emb)
         loss.backward()
         optimizer.step()
 
@@ -248,17 +291,55 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
     return total_loss / max(num_batches, 1)
 
 
-def evaluate_with_quality_matrix(model, train_dataset, val_dataset, individual_to_class, transform, device, batch_size=32):
+def compute_recall_by_query_quality(query_emb, gallery_emb, query_labels, gallery_labels, query_quality):
     """
-    Evaluate model computing Recall@1 and query×gallery quality matrix.
+    Compute Recall@1 for queries at different quality thresholds.
 
-    Gallery: All training embeddings
-    Queries: All validation embeddings
+    q>=0.0 includes ALL queries (equivalent to overall recall).
 
-    Returns dict with:
-        - recall_at_1: Overall recall
-        - query_gallery_matrix: Dict mapping combo names (HQ_HG, HQ_LG, LQ_HG, LQ_LG)
-          to {'recall_at_1': float, 'count': int, 'gallery_size': int}
+    Args:
+        query_emb: Query embeddings tensor
+        gallery_emb: Gallery embeddings tensor
+        query_labels: Query labels tensor
+        gallery_labels: Gallery labels tensor
+        query_quality: Query quality scores (numpy array)
+
+    Returns:
+        dict: {"q>=0.0": {"recall_at_1": float, "count": int}, "q>=0.1": {...}, ...}
+    """
+    results = {}
+    query_quality = np.array(query_quality)
+
+    for thresh in QUERY_QUALITY_THRESHOLDS:
+        mask = query_quality >= thresh
+        count = int(mask.sum())
+
+        if count == 0:
+            results[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
+            continue
+
+        # Filter queries by quality threshold
+        filtered_query_emb = query_emb[mask]
+        filtered_query_labels = query_labels[torch.tensor(mask)] if isinstance(query_labels, torch.Tensor) else query_labels[mask]
+
+        # Compute recall against FULL gallery (already filtered by experiment threshold)
+        recall = compute_recall_at_k(filtered_query_emb, gallery_emb,
+                                     filtered_query_labels, gallery_labels, k=1)
+        results[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
+
+    return results
+
+
+def evaluate_recall(model, train_dataset, val_dataset, individual_to_class, transform, device, batch_size=32):
+    """
+    Evaluate model computing Recall@1 for different query quality thresholds.
+
+    Gallery: All training embeddings (filtered by threshold)
+    Queries: All validation embeddings (unfiltered - includes all quality levels)
+
+    Returns:
+        dict: query_quality_metrics with recall at each quality threshold
+              (q>=0.0 is the overall recall)
     """
     model.eval()
 
@@ -269,24 +350,21 @@ def evaluate_with_quality_matrix(model, train_dataset, val_dataset, individual_t
     train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
     val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Compute gallery embeddings and quality
+    # Compute gallery embeddings
     gallery_embeddings = []
     gallery_labels = []
-    gallery_quality = []
 
     with torch.no_grad():
-        for images, labels, quality in train_loader:
+        for images, labels, _ in train_loader:
             images = images.to(device)
             emb = model(images)
             gallery_embeddings.append(emb.cpu())
             gallery_labels.extend(labels.tolist())
-            gallery_quality.extend(quality.tolist())
 
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
     gallery_labels = torch.tensor(gallery_labels)
-    gallery_quality = np.array(gallery_quality)
 
-    # Compute query embeddings and quality
+    # Compute query embeddings and collect quality scores
     query_embeddings = []
     query_labels = []
     query_quality = []
@@ -303,30 +381,22 @@ def evaluate_with_quality_matrix(model, train_dataset, val_dataset, individual_t
     query_labels = torch.tensor(query_labels)
     query_quality = np.array(query_quality)
 
-    # Compute overall recall@1
-    recall_at_1 = compute_recall_at_k(query_embeddings, gallery_embeddings,
-                                      query_labels, gallery_labels, k=1)
-
-    # Compute query×gallery quality matrix
-    query_gallery_matrix = compute_recall_by_query_gallery_quality(
+    # Compute recall by query quality thresholds
+    query_quality_metrics = compute_recall_by_query_quality(
         query_embeddings, gallery_embeddings,
         query_labels, gallery_labels,
-        query_quality, gallery_quality,
-        threshold=0.5, k=1
+        query_quality
     )
 
-    return {
-        'recall_at_1': recall_at_1,
-        'query_gallery_matrix': query_gallery_matrix
-    }
+    return query_quality_metrics
 
 
-def train_single_config(min_weight: float, sample_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
+def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
     """Train one configuration and return results."""
     set_all_seeds(seed)
 
     # Output path
-    filename = f"min_weight={min_weight:.2f}_samples={sample_size}_seed={seed}.json"
+    filename = f"threshold={threshold:.2f}_gallery={gallery_size}_seed={seed}.json"
     output_path = os.path.join(args.output_dir, filename)
 
     if check_result_exists(output_path) and not args.overwrite:
@@ -334,19 +404,27 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
         return None
 
     print(f"\n{'='*60}")
-    print(f"Training: min_weight={min_weight}, samples={sample_size}, seed={seed}")
+    print(f"Training: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
     print(f"{'='*60}")
 
     # Get valid individuals from config
     valid_individuals = config.get('valid_individuals', [])
 
-    # Check feasibility for this sample size
+    # Check feasibility for this threshold and gallery_size
     feasible_individuals = []
     for ind_id in valid_individuals:
         training_compat = config['training_compatibility'].get(ind_id, {})
-        threshold_compat = training_compat.get('threshold_compatibility', {}).get('threshold_0.00', {})
+
+        # Find the appropriate threshold key (config uses 0.00, 0.25, 0.50, 0.75)
+        # Our thresholds are finer-grained, so use the floor
+        threshold_key = f"threshold_{int(threshold * 4) * 0.25:.2f}"
+        if threshold_key not in training_compat.get('threshold_compatibility', {}):
+            threshold_key = "threshold_0.00"  # Fallback to no filtering
+
+        threshold_compat = training_compat.get('threshold_compatibility', {}).get(threshold_key, {})
         compatible_sizes = threshold_compat.get('compatible_training_sizes', [])
-        if sample_size in compatible_sizes:
+
+        if gallery_size in compatible_sizes:
             feasible_individuals.append(ind_id)
 
     if len(feasible_individuals) < MIN_P:
@@ -355,24 +433,28 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
-    # Create temporal dataset
-    train_dataset, val_dataset, individual_to_class, dataset_info = create_temporal_dataset(
-        dataset, feasible_individuals, sample_size, seed, config, id_to_indices
+    # Create filtered gallery dataset
+    train_dataset, val_dataset, individual_to_class, dataset_info = create_filtered_gallery_dataset(
+        dataset, feasible_individuals, gallery_size, threshold, seed, config, id_to_indices
     )
 
-    # Use effective_k based on sample_size for small datasets
-    effective_k = min(BATCH_K, sample_size)
+    if train_dataset is None or len(train_dataset) == 0:
+        print(f"No training data available after filtering")
+        return None
+
+    # Use effective_k based on actual samples available
+    effective_k = min(BATCH_K, gallery_size)
     if len(train_dataset) < MIN_P * effective_k:
         print(f"Not enough training samples ({len(train_dataset)}) for PK batching")
         return None
 
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model = create_embedding_model(embedding_dim=EMBEDDING_DIM, device=device)
+    model = create_megadescriptor_embedding_model(embedding_dim=EMBEDDING_DIM, device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset
-    transform = create_dinov3_transform()
+    transform = create_megadescriptor_transform()
     train_torch_dataset = TripletDataset(train_dataset, transform, individual_to_class)
 
     # Create PK batch sampler
@@ -400,8 +482,8 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
         collate_fn=collate_fn
     )
 
-    # Create loss and optimizer
-    criterion = QualityWeightedTripletLoss(margin=MARGIN, min_weight=min_weight)
+    # Create STANDARD triplet loss (no quality weighting)
+    criterion = nn.TripletMarginLoss(margin=MARGIN, p=2)
     optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=LEARNING_RATE)
 
     # Training loop
@@ -413,10 +495,12 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
     for epoch in range(EPOCHS):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
 
-        # Full evaluation with quality matrix
-        metrics = evaluate_with_quality_matrix(model, train_dataset, val_dataset,
-                                               individual_to_class, transform, device)
-        recall_1 = metrics['recall_at_1']
+        # Evaluation - returns metrics for each query quality threshold
+        metrics = evaluate_recall(model, train_dataset, val_dataset,
+                                  individual_to_class, transform, device)
+
+        # Overall recall is at q>=0.0 (includes all queries)
+        recall_1 = metrics["q>=0.0"]["recall_at_1"]
 
         if recall_1 > best_recall:
             best_recall = recall_1
@@ -427,37 +511,38 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
-            'val_recall_at_1': recall_1,
-            'query_gallery_matrix': metrics['query_gallery_matrix']
+            'query_quality_metrics': metrics  # q>=0.0 is the overall recall
         })
 
     training_time = time.time() - start_time
 
-    # Prepare result (epoch_history includes query_gallery_matrix for each epoch)
+    # Prepare result
     result = {
         'config': {
-            'min_weight': min_weight,
-            'samples_per_class': sample_size,
+            'threshold': threshold,
+            'gallery_size': gallery_size,
             'seed': seed,
             'margin': MARGIN,
             'embedding_dim': EMBEDDING_DIM,
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
-            'batch_size_k': BATCH_K
+            'batch_size_k': BATCH_K,
+            'backbone': 'MegaDescriptor-L-384'
         },
         'dataset': {
             'individuals': feasible_individuals,
-            'train_samples_per_individual': {k: v['train_samples'] for k, v in dataset_info.items()},
-            'val_samples_per_individual': {k: v['val_samples'] for k, v in dataset_info.items()},
-            'gallery_size': len(train_dataset),
-            'query_size': len(val_dataset)
+            'gallery_samples_per_individual': dataset_info['gallery_samples_per_individual'],
+            'eligible_pool_per_individual': dataset_info['eligible_pool_per_individual'],
+            'query_samples_per_individual': dataset_info['query_samples_per_individual'],
+            'total_gallery_size': len(train_dataset),
+            'total_query_size': len(val_dataset)
         },
         'epoch_history': epoch_history,
         'metadata': {
             'created_at': datetime.now().isoformat(),
             'training_time_seconds': training_time,
             'job_idx': args.idx,
-            'transform': 'resize_224_imagenet_norm',
+            'transform': 'resize_384_megadescriptor_norm',
             'best_epoch': best_epoch,
             'best_recall_at_1': best_recall
         }
@@ -475,11 +560,11 @@ def train_single_config(min_weight: float, sample_size: int, seed: int, args, da
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Quality-weighted triplet loss sweep')
+    parser = argparse.ArgumentParser(description='Gallery hygiene sweep with MegaDescriptor backbone')
     parser.add_argument('--idx', type=int, required=True, help='Job index (0-23)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                        default='reid_triplet/results/triplet_sweep',
+                        default='reid_megadescriptor/results',
                         help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                         default='gpu', help='Device to use')
@@ -487,13 +572,13 @@ def main():
     args = parser.parse_args()
 
     print("=" * 80)
-    print(f"Quality-Weighted Triplet Loss Experiment - Job {args.idx}")
+    print(f"MegaDescriptor Gallery Hygiene Sweep Experiment - Job {args.idx}")
     print("=" * 80)
 
     # Load dataset and config
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
-    id_to_indices = build_id_to_indices(dataset)  # Build index lookup ONCE
+    id_to_indices = build_id_to_indices(dataset)
     config = load_feasibility_config()
 
     if not config:
@@ -501,10 +586,12 @@ def main():
         return
 
     # Show experiment info
-    total_combinations = len(MIN_WEIGHT_VALUES) * len(SAMPLE_SIZES) * len(SEEDS)
+    total_combinations = len(THRESHOLDS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
-    print(f"  Min weight values: {MIN_WEIGHT_VALUES}")
-    print(f"  Sample sizes: {SAMPLE_SIZES}")
+    print(f"  Backbone: MegaDescriptor-L-384")
+    print(f"  Input size: 384x384")
+    print(f"  Thresholds: {THRESHOLDS}")
+    print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")
     print(f"  Total combinations: {total_combinations}")
     print(f"  Configs per job: ~{total_combinations // 24}")
@@ -517,17 +604,17 @@ def main():
         return
 
     print(f"\nJob {args.idx} processing {len(combinations)} configurations:")
-    for min_weight, sample_size, seed in combinations[:5]:
-        print(f"  min_weight={min_weight}, samples={sample_size}, seed={seed}")
+    for threshold, gallery_size, seed in combinations[:5]:
+        print(f"  threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
     if len(combinations) > 5:
         print(f"  ... and {len(combinations) - 5} more")
 
     # Train each configuration
     results_summary = []
-    for i, (min_weight, sample_size, seed) in enumerate(combinations):
+    for i, (threshold, gallery_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(min_weight, sample_size, seed, args, dataset, config, id_to_indices)
+            result = train_single_config(threshold, gallery_size, seed, args, dataset, config, id_to_indices)
             if result:
                 results_summary.append(result)
         except Exception as e:

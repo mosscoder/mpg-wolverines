@@ -253,6 +253,75 @@ def create_embedding_model(model_name: str = "facebook/dinov3-vitb16-pretrain-lv
     return model.to(device)
 
 
+def create_megadescriptor_embedding_model(
+    model_name: str = "hf-hub:BVRA/MegaDescriptor-L-384",
+    embedding_dim: int = 128,
+    device: str = "cuda"
+) -> nn.Module:
+    """
+    Create MegaDescriptor backbone with embedding head for re-identification.
+
+    Args:
+        model_name: timm model name for MegaDescriptor
+        embedding_dim: Output embedding dimension
+        device: Device to place model on
+
+    Returns:
+        Model with frozen backbone and trainable embedding head
+    """
+    import timm
+
+    # Load backbone
+    backbone = timm.create_model(model_name, pretrained=True)
+
+    # Freeze backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval()
+
+    # Get hidden size via dummy forward pass
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, 384, 384)
+        hidden_size = backbone(dummy).shape[1]
+
+    # Create embedding head
+    embedding_head = EmbeddingHead(input_dim=hidden_size, embedding_dim=embedding_dim)
+
+    class MegaDescriptorEmbeddingModel(nn.Module):
+        def __init__(self, backbone, head):
+            super().__init__()
+            self.backbone = backbone
+            self.head = head
+
+        def forward(self, x):
+            with torch.no_grad():
+                features = self.backbone(x)  # Direct output, no CLS token extraction
+            return self.head(features)
+
+        def get_trainable_parameters(self):
+            return self.head.parameters()
+
+    model = MegaDescriptorEmbeddingModel(backbone, embedding_head)
+
+    # Move to device
+    if isinstance(device, str):
+        if device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "gpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device("cpu")
+
+    return model.to(device)
+
+
 def mine_random_triplets(embeddings: torch.Tensor,
                          labels: torch.Tensor,
                          quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
