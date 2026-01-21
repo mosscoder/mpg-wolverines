@@ -103,7 +103,7 @@ def assess_training_feasibility(train_df, validation_indices, individuals, train
 
         threshold_compatibility = {}
 
-        for threshold in [0, 0.25, 0.5, 0.75]:
+        for threshold in [0, 0.1, 0.2, 0.3, 0.4, 0.5]:
             threshold_key = f'threshold_{threshold:.2f}'
             eligible_samples = training_data[training_data['pelage_score'] >= threshold]
             compatible_sizes = [size for size in training_sizes if len(eligible_samples) >= size]
@@ -179,7 +179,7 @@ def save_config(individuals, individual_stats, validation_indices, training_comp
         all_thresholds_compatible = True
         failing_thresholds = []
 
-        for threshold in [0.00, 0.25, 0.50, 0.75]:
+        for threshold in [0.00, 0.10, 0.20, 0.30, 0.40, 0.50]:
             threshold_key = f'threshold_{threshold:.2f}'
             if threshold_key in threshold_compatibility:
                 compat_data = threshold_compatibility[threshold_key]
@@ -210,7 +210,7 @@ def save_config(individuals, individual_stats, validation_indices, training_comp
         'valid_individuals': valid_individuals,
         'max_examples_per_class': max_size,
         'training_sizes': training_sizes,
-        'thresholds': [0, 0.25, 0.5, 0.75],
+        'thresholds': [0, 0.1, 0.2, 0.3, 0.4, 0.5],
         'individual_pelage_scores': {
             ind_id: individual_stats[ind_id]['pelage_score_mean']
             for ind_id in valid_individuals

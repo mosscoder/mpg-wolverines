@@ -412,9 +412,8 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
     for ind_id in valid_individuals:
         training_compat = config['training_compatibility'].get(ind_id, {})
 
-        # Find the appropriate threshold key (config uses 0.00, 0.25, 0.50, 0.75)
-        # Our thresholds are finer-grained, so use the floor
-        threshold_key = f"threshold_{int(threshold * 4) * 0.25:.2f}"
+        # Threshold key matches the config thresholds directly
+        threshold_key = f"threshold_{threshold:.2f}"
         if threshold_key not in training_compat.get('threshold_compatibility', {}):
             threshold_key = "threshold_0.00"  # Fallback to no filtering
 
