@@ -96,13 +96,13 @@ def get_job_combinations(job_idx: int, max_jobs: int = 24) -> list:
 
 
 def load_feasibility_config():
-    """Load the feasibility configuration from individual_id experiment."""
-    config_path = 'individual_id/results/feasible_individuals.json'
+    """Load the feasibility configuration from preprocessing."""
+    config_path = 'preprocessing/results/feasible_individuals.json'
     try:
         with open(config_path, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        print(f"Error: {config_path} not found. Please run individual_id/00_count_individuals.py first.")
+        print(f"Error: {config_path} not found. Run: python preprocessing/create_validation_splits.py")
         return None
 
 
