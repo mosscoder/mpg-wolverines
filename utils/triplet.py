@@ -423,8 +423,7 @@ def create_megadescriptor_arcface_model(
             self.backbone = backbone
 
         def forward(self, x):
-            with torch.no_grad():
-                return self.backbone(x)
+            return self.backbone(x)
 
     model = MegaDescriptorBackbone(backbone)
 
