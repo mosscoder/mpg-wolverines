@@ -9,7 +9,7 @@ Key differences from DINOv3:
 - Input size: 384x384 (vs 224x224)
 - Normalization: [0.5,0.5,0.5] (vs ImageNet stats)
 - Feature extraction: Direct output (vs CLS token)
-- Feature dimension: ~2048 (vs 768)
+- Feature dimension: 128 (trainable projection from ~1536)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
 Distributed across 24 SLURM jobs (12 configs/job).
@@ -58,9 +58,10 @@ SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 ARCFACE_MARGIN = 0.5
 ARCFACE_SCALE = 64
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
+EMBEDDING_DIM = 128  # Trainable projection dimension
 
 # Query quality thresholds for evaluation
 # q>=0.0 includes ALL queries (equivalent to overall recall)
@@ -259,6 +260,7 @@ def create_megadescriptor_transform():
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
     """Train for one epoch with ArcFace classification loss."""
+    model.train()  # Projection head is trainable
     criterion.train()  # ArcFace has learnable weights
     total_loss = 0
     num_batches = 0
@@ -267,7 +269,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
         images = images.to(device)
         labels = labels.to(device)
 
-        # Get embeddings from frozen backbone
+        # Get embeddings from frozen backbone + trainable head
         embeddings = model(images)
 
         # ArcFace classification loss
@@ -480,16 +482,11 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         scale=ARCFACE_SCALE
     ).to(device)
 
-    # SGD optimizer with momentum (official approach, train ArcFace weights only)
+    # SGD optimizer with momentum - train projection head + ArcFace weights
     optimizer = torch.optim.SGD(
-        criterion.parameters(),
+        list(model.get_trainable_parameters()) + list(criterion.parameters()),
         lr=LEARNING_RATE,
         momentum=0.9
-    )
-
-    # Cosine annealing LR scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-6
     )
 
     # Training loop
@@ -517,12 +514,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
-            'learning_rate': scheduler.get_last_lr()[0],
+            'learning_rate': LEARNING_RATE,  # Fixed LR (no scheduler)
             'query_quality_metrics': metrics  # q>=0.0 is the overall recall
         })
-
-        # Step the scheduler
-        scheduler.step()
 
     training_time = time.time() - start_time
 
@@ -535,10 +529,10 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'loss': 'ArcFace',
             'arcface_margin': ARCFACE_MARGIN,
             'arcface_scale': ARCFACE_SCALE,
-            'embedding_dim': embedding_dim,
+            'embedding_dim': EMBEDDING_DIM,
             'optimizer': 'SGD',
             'momentum': 0.9,
-            'scheduler': 'CosineAnnealingLR',
+            'scheduler': 'None (fixed LR)',
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,

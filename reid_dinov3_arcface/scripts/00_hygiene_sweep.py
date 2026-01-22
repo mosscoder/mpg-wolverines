@@ -11,7 +11,7 @@ Key differences from reid_hygiene_filter:
 - Optimizer: SGD (momentum=0.9) instead of AdamW
 - Scheduler: CosineAnnealingLR
 - Epochs: 100 instead of 50
-- Embedding: 768-d (raw DINOv3 CLS) instead of 128-d projection
+- Embedding: 128-d (trainable projection from 768-d DINOv3 CLS)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
 Distributed across 24 SLURM jobs (12 configs/job).
@@ -53,6 +53,16 @@ import datasets
 datasets.config.NUM_PROC = 1
 
 
+class EmbeddingHead(nn.Module):
+    """Trainable projection head for ArcFace."""
+    def __init__(self, input_dim: int = 768, embedding_dim: int = 128):
+        super().__init__()
+        self.fc = nn.Linear(input_dim, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc(x)
+
+
 # Experiment parameters
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
@@ -62,10 +72,10 @@ SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 ARCFACE_MARGIN = 0.5
 ARCFACE_SCALE = 64
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
-EMBEDDING_DIM = 768  # Raw DINOv3 CLS dimension
+EMBEDDING_DIM = 128  # Match reid_hygiene_filter for direct comparison
 
 # Query quality thresholds for evaluation
 QUERY_QUALITY_THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
@@ -261,10 +271,14 @@ def create_dinov3_transform():
     ])
 
 
-def create_dinov3_arcface_model(device="cuda"):
+def create_dinov3_arcface_model(embedding_dim: int = 128, device="cuda"):
     """
-    Create DINOv3 backbone returning raw 768-d CLS embeddings.
-    No projection head - ArcFace loss learns the class centers directly.
+    Create DINOv3 backbone with trainable projection head.
+
+    Architecture: Frozen DINOv3 -> 768-d CLS -> EmbeddingHead (768->128) -> ArcFace
+
+    The trainable projection head allows embeddings to improve during training,
+    fixing the issue where recall was static with only frozen backbone outputs.
 
     Returns:
         Tuple of (model, embedding_dim)
@@ -276,16 +290,25 @@ def create_dinov3_arcface_model(device="cuda"):
         param.requires_grad = False
     backbone.eval()
 
-    class DINOv3Backbone(nn.Module):
-        def __init__(self, backbone):
+    # Trainable projection head (768 -> 128 to match reid_hygiene_filter)
+    head = EmbeddingHead(input_dim=768, embedding_dim=embedding_dim)
+
+    class DINOv3WithHead(nn.Module):
+        def __init__(self, backbone, head):
             super().__init__()
             self.backbone = backbone
+            self.head = head
 
         def forward(self, x):
-            outputs = self.backbone(x)
-            return outputs.last_hidden_state[:, 0, :]  # CLS token, 768-d
+            with torch.no_grad():
+                outputs = self.backbone(x)
+                features = outputs.last_hidden_state[:, 0, :]
+            return self.head(features)  # Trainable transformation
 
-    model = DINOv3Backbone(backbone)
+        def get_trainable_parameters(self):
+            return self.head.parameters()
+
+    model = DINOv3WithHead(backbone, head)
 
     # Move to device
     if isinstance(device, str):
@@ -303,12 +326,12 @@ def create_dinov3_arcface_model(device="cuda"):
         else:
             device = torch.device("cpu")
 
-    return model.to(device), EMBEDDING_DIM
+    return model.to(device), embedding_dim
 
 
 def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
     """Train for one epoch with ArcFace loss."""
-    model.eval()  # Backbone is frozen, always in eval mode
+    model.train()  # Projection head is trainable
     criterion.train()  # ArcFace weights are trainable
     total_loss = 0
     num_batches = 0
@@ -317,7 +340,7 @@ def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
         images = images.to(device)
         labels = labels.to(device)
 
-        # Get embeddings from frozen backbone
+        # Get embeddings (frozen backbone + trainable head)
         embeddings = model(images)
 
         # Compute ArcFace loss
@@ -530,9 +553,12 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         scale=ARCFACE_SCALE
     ).to(device)
 
-    # SGD optimizer (trains ArcFace weights only)
-    optimizer = torch.optim.SGD(criterion.parameters(), lr=LEARNING_RATE, momentum=0.9)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+    # Train both projection head and ArcFace class centers
+    optimizer = torch.optim.SGD(
+        list(model.get_trainable_parameters()) + list(criterion.parameters()),
+        lr=LEARNING_RATE,
+        momentum=0.9
+    )
 
     # Training loop
     start_time = time.time()
@@ -542,7 +568,6 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
     for epoch in range(EPOCHS):
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
-        scheduler.step()
 
         # Evaluation - returns metrics for each query quality threshold
         metrics = evaluate_recall(model, train_dataset, val_dataset,
@@ -555,12 +580,12 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             best_recall = recall_1
             best_epoch = epoch + 1
 
-        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}, LR={scheduler.get_last_lr()[0]:.6f}")
+        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}")
 
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
-            'learning_rate': scheduler.get_last_lr()[0],
+            'learning_rate': LEARNING_RATE,  # Fixed LR (no scheduler)
             'query_quality_metrics': metrics  # q>=0.0 is the overall recall
         })
 
@@ -578,7 +603,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'embedding_dim': EMBEDDING_DIM,
             'optimizer': 'SGD',
             'momentum': 0.9,
-            'scheduler': 'CosineAnnealingLR',
+            'scheduler': 'None (fixed LR)',
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,
@@ -644,9 +669,8 @@ def main():
     total_combinations = len(THRESHOLDS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
     print(f"  Loss: ArcFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE})")
-    print(f"  Optimizer: SGD (momentum=0.9, lr={LEARNING_RATE})")
-    print(f"  Scheduler: CosineAnnealingLR (T_max={EPOCHS})")
-    print(f"  Embedding: {EMBEDDING_DIM}-d (raw DINOv3 CLS)")
+    print(f"  Optimizer: SGD (momentum=0.9, lr={LEARNING_RATE}, fixed)")
+    print(f"  Embedding: {EMBEDDING_DIM}-d (trainable projection from DINOv3 CLS)")
     print(f"  Thresholds: {THRESHOLDS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")

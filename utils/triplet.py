@@ -390,14 +390,17 @@ def create_megadescriptor_embedding_model(
 
 def create_megadescriptor_arcface_model(
     model_name: str = "hf-hub:BVRA/MegaDescriptor-L-384",
+    embedding_dim: int = 128,
     device: str = "cuda"
 ) -> Tuple[nn.Module, int]:
     """
-    Create MegaDescriptor backbone WITHOUT projection head for ArcFace training.
-    Returns raw backbone features (~1536-d for Swin-L-384).
+    Create MegaDescriptor backbone with trainable projection head for ArcFace training.
+
+    Architecture: Frozen MegaDescriptor -> ~1536-d -> Linear -> 128-d
 
     Args:
         model_name: timm model name for MegaDescriptor
+        embedding_dim: Output embedding dimension (default 128)
         device: Device to place model on
 
     Returns:
@@ -412,20 +415,29 @@ def create_megadescriptor_arcface_model(
         param.requires_grad = False
     backbone.eval()
 
-    # Get output dimension via dummy forward pass
+    # Get backbone output dimension via dummy forward pass
     with torch.no_grad():
         dummy = torch.zeros(1, 3, 384, 384)
-        embedding_dim = backbone(dummy).shape[1]  # ~1536
+        backbone_dim = backbone(dummy).shape[1]  # ~1536
 
-    class MegaDescriptorBackbone(nn.Module):
-        def __init__(self, backbone):
+    # Trainable projection head
+    head = nn.Linear(backbone_dim, embedding_dim)
+
+    class MegaDescriptorWithHead(nn.Module):
+        def __init__(self, backbone, head):
             super().__init__()
             self.backbone = backbone
+            self.head = head
 
         def forward(self, x):
-            return self.backbone(x)
+            with torch.no_grad():
+                features = self.backbone(x)
+            return self.head(features)
 
-    model = MegaDescriptorBackbone(backbone)
+        def get_trainable_parameters(self):
+            return self.head.parameters()
+
+    model = MegaDescriptorWithHead(backbone, head)
 
     # Move to device
     if isinstance(device, str):
