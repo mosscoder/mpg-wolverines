@@ -3,6 +3,7 @@ Triplet loss utilities for wolverine re-identification experiments.
 Includes quality-weighted triplet loss, PK batch sampling, and embedding model.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,6 +95,71 @@ class QualityWeightedTripletLoss(nn.Module):
         weight = self.min_weight + (1.0 - self.min_weight) * quality_product
 
         return (weight * base_loss).mean()
+
+
+class ArcFaceLoss(nn.Module):
+    """
+    ArcFace loss for classification-based metric learning.
+    Official MegaDescriptor training uses margin=0.5, scale=64.
+    """
+
+    def __init__(self, num_classes: int, embedding_size: int,
+                 margin: float = 0.5, scale: float = 64.0):
+        """
+        Args:
+            num_classes: Number of identity classes
+            embedding_size: Dimension of input embeddings
+            margin: Angular margin penalty (default 0.5 radians)
+            scale: Scaling factor for logits (default 64)
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.embedding_size = embedding_size
+        self.margin = margin
+        self.scale = scale
+
+        # Learnable class centers
+        self.weight = nn.Parameter(torch.FloatTensor(num_classes, embedding_size))
+        nn.init.xavier_uniform_(self.weight)
+
+        # Precompute margin values
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.th = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
+
+    def forward(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Compute ArcFace loss.
+
+        Args:
+            embeddings: L2-normalized embeddings (batch_size, embedding_size)
+            labels: Ground truth class labels (batch_size,)
+
+        Returns:
+            Scalar loss value
+        """
+        # L2 normalize embeddings and weights
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        weights = F.normalize(self.weight, p=2, dim=1)
+
+        # Cosine similarity
+        cosine = F.linear(embeddings, weights)
+        sine = torch.sqrt(1.0 - torch.pow(cosine, 2).clamp(0, 1))
+
+        # ArcFace formula: cos(theta + m)
+        phi = cosine * self.cos_m - sine * self.sin_m
+        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+
+        # One-hot encoding
+        one_hot = torch.zeros_like(cosine)
+        one_hot.scatter_(1, labels.view(-1, 1).long(), 1)
+
+        # Apply margin only to correct class
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output *= self.scale
+
+        return F.cross_entropy(output, labels)
 
 
 class PKBatchSampler(Sampler):
@@ -320,6 +386,65 @@ def create_megadescriptor_embedding_model(
             device = torch.device("cpu")
 
     return model.to(device)
+
+
+def create_megadescriptor_arcface_model(
+    model_name: str = "hf-hub:BVRA/MegaDescriptor-L-384",
+    device: str = "cuda"
+) -> Tuple[nn.Module, int]:
+    """
+    Create MegaDescriptor backbone WITHOUT projection head for ArcFace training.
+    Returns raw backbone features (~1536-d for Swin-L-384).
+
+    Args:
+        model_name: timm model name for MegaDescriptor
+        device: Device to place model on
+
+    Returns:
+        Tuple of (model, embedding_dim): Model and its output dimension
+    """
+    import timm
+
+    backbone = timm.create_model(model_name, pretrained=True)
+
+    # Freeze backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval()
+
+    # Get output dimension via dummy forward pass
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, 384, 384)
+        embedding_dim = backbone(dummy).shape[1]  # ~1536
+
+    class MegaDescriptorBackbone(nn.Module):
+        def __init__(self, backbone):
+            super().__init__()
+            self.backbone = backbone
+
+        def forward(self, x):
+            with torch.no_grad():
+                return self.backbone(x)
+
+    model = MegaDescriptorBackbone(backbone)
+
+    # Move to device
+    if isinstance(device, str):
+        if device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "gpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device("cpu")
+
+    return model.to(device), embedding_dim
 
 
 def mine_random_triplets(embeddings: torch.Tensor,

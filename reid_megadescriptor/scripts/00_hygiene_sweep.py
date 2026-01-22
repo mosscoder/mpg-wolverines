@@ -40,9 +40,9 @@ sys.path.append('.')
 
 from utils.dataset import set_all_seeds
 from utils.triplet import (
-    create_megadescriptor_embedding_model,
+    create_megadescriptor_arcface_model,
+    ArcFaceLoss,
     PKBatchSampler,
-    mine_random_triplets,
     compute_recall_at_k,
 )
 from utils.training import check_result_exists
@@ -55,10 +55,10 @@ datasets.config.NUM_PROC = 1
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
-MARGIN = 0.3
-EMBEDDING_DIM = 128
+ARCFACE_MARGIN = 0.5
+ARCFACE_SCALE = 64
 LEARNING_RATE = 0.001
-EPOCHS = 50
+EPOCHS = 100
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
 
@@ -258,30 +258,21 @@ def create_megadescriptor_transform():
 
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
-    """Train for one epoch with standard triplet loss (no quality weighting)."""
-    model.train()
+    """Train for one epoch with ArcFace classification loss."""
+    criterion.train()  # ArcFace has learnable weights
     total_loss = 0
     num_batches = 0
 
     for batch_idx, (images, labels, quality_scores) in enumerate(train_loader):
         images = images.to(device)
         labels = labels.to(device)
-        quality_scores = quality_scores.to(device).float()
 
-        # Get embeddings
+        # Get embeddings from frozen backbone
         embeddings = model(images)
 
-        # Mine triplets (quality scores returned but not used for weighting)
-        anchor_emb, pos_emb, neg_emb, _, _ = mine_random_triplets(
-            embeddings, labels, quality_scores
-        )
-
-        if anchor_emb.size(0) == 0:
-            continue
-
-        # Standard triplet loss - NO quality weighting
+        # ArcFace classification loss
         optimizer.zero_grad()
-        loss = criterion(anchor_emb, pos_emb, neg_emb)
+        loss = criterion(embeddings, labels)
         loss.backward()
         optimizer.step()
 
@@ -447,10 +438,10 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         print(f"Not enough training samples ({len(train_dataset)}) for PK batching")
         return None
 
-    # Create model
+    # Create model (frozen backbone, returns raw embeddings)
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model = create_megadescriptor_embedding_model(embedding_dim=EMBEDDING_DIM, device=device)
-    print(f"Using device: {device}")
+    model, embedding_dim = create_megadescriptor_arcface_model(device=device)
+    print(f"Using device: {device}, embedding_dim: {embedding_dim}")
 
     # Create transforms and dataset
     transform = create_megadescriptor_transform()
@@ -481,9 +472,25 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         collate_fn=collate_fn
     )
 
-    # Create STANDARD triplet loss (no quality weighting)
-    criterion = nn.TripletMarginLoss(margin=MARGIN, p=2)
-    optimizer = torch.optim.AdamW(model.get_trainable_parameters(), lr=LEARNING_RATE)
+    # Create ArcFace loss (official MegaDescriptor training approach)
+    criterion = ArcFaceLoss(
+        num_classes=len(feasible_individuals),
+        embedding_size=embedding_dim,
+        margin=ARCFACE_MARGIN,
+        scale=ARCFACE_SCALE
+    ).to(device)
+
+    # SGD optimizer with momentum (official approach, train ArcFace weights only)
+    optimizer = torch.optim.SGD(
+        criterion.parameters(),
+        lr=LEARNING_RATE,
+        momentum=0.9
+    )
+
+    # Cosine annealing LR scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=EPOCHS, eta_min=1e-6
+    )
 
     # Training loop
     start_time = time.time()
@@ -510,8 +517,12 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
+            'learning_rate': scheduler.get_last_lr()[0],
             'query_quality_metrics': metrics  # q>=0.0 is the overall recall
         })
+
+        # Step the scheduler
+        scheduler.step()
 
     training_time = time.time() - start_time
 
@@ -521,8 +532,13 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'threshold': threshold,
             'gallery_size': gallery_size,
             'seed': seed,
-            'margin': MARGIN,
-            'embedding_dim': EMBEDDING_DIM,
+            'loss': 'ArcFace',
+            'arcface_margin': ARCFACE_MARGIN,
+            'arcface_scale': ARCFACE_SCALE,
+            'embedding_dim': embedding_dim,
+            'optimizer': 'SGD',
+            'momentum': 0.9,
+            'scheduler': 'CosineAnnealingLR',
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,
