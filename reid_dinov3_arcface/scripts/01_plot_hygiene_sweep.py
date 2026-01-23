@@ -282,7 +282,16 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     ax.set_ylabel('Wolverine re-identification performance (Recall@1)', fontsize=14)
     ax.set_title('DINOv3 + ArcFace: Filtration Strategies', fontsize=16)
     ax.set_xticks(gallery_sizes)
-    ax.set_yticks(np.arange(0, 1.05, 0.05))
+
+    # Set y-axis range based on CI bands with 0.05 buffer
+    all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
+    all_ci_upper = [v for s in strategies.values() for v in s['ci_upper']]
+    if all_ci_lower and all_ci_upper:
+        y_min = np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05
+        y_max = np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(title='Image quality filter', loc='lower right', fontsize=11, title_fontsize=11)
 
@@ -627,7 +636,16 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1.set_xlabel('Examples per Individual')
     ax1.set_ylabel('Wolverine re-identification performance (Recall@1)')
     ax1.set_xticks(gallery_sizes)
-    ax1.set_yticks(np.arange(0, 1.05, 0.05))
+
+    # Set y-axis range based on CI bands with 0.05 buffer
+    all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
+    all_ci_upper = [v for s in strategies.values() for v in s['ci_upper']]
+    if all_ci_lower and all_ci_upper:
+        y_min = np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05
+        y_max = np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05
+        ax1.set_ylim(y_min, y_max)
+        ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+
     ax1.legend(title='Image quality filter', fontsize=9, title_fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
