@@ -812,3 +812,171 @@ def compute_mean_average_precision(query_embeddings: torch.Tensor,
     ]
 
     return np.mean(per_individual_map) if per_individual_map else 0.0
+
+
+def find_optimal_distance_threshold(
+    query_emb: torch.Tensor,
+    gallery_emb: torch.Tensor,
+    query_labels: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    thresholds: Optional[np.ndarray] = None
+) -> Tuple[float, Dict]:
+    """
+    Find distance threshold that best separates correct vs incorrect matches.
+
+    For each query, finds the nearest gallery sample. A match is "correct" if
+    the nearest gallery sample has the same ID as the query. The threshold
+    determines whether to accept (distance < threshold) or reject the match.
+
+    Args:
+        query_emb: Query embeddings (n_query, embedding_dim)
+        gallery_emb: Gallery embeddings (n_gallery, embedding_dim)
+        query_labels: Query labels (n_query,)
+        gallery_labels: Gallery labels (n_gallery,)
+        thresholds: Array of thresholds to sweep (default: 0.1 to 2.0 step 0.05)
+
+    Returns:
+        optimal_threshold: Distance threshold maximizing F1
+        metrics: Dict with f1, precision, recall at optimal threshold
+    """
+    if thresholds is None:
+        thresholds = np.arange(0.1, 2.0, 0.05)
+
+    if query_emb.size(0) == 0 or gallery_emb.size(0) == 0:
+        return thresholds[0], {'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
+
+    # Compute distances and find nearest gallery sample for each query
+    distances = torch.cdist(query_emb, gallery_emb, p=2)
+    min_distances, nearest_idx = distances.min(dim=1)
+
+    # Get predicted labels (label of nearest gallery sample)
+    predicted_labels = gallery_labels[nearest_idx]
+
+    # Determine which matches are correct (same ID)
+    is_correct = (predicted_labels == query_labels)
+
+    # Convert to numpy for threshold sweep
+    min_distances_np = min_distances.cpu().numpy()
+    is_correct_np = is_correct.cpu().numpy()
+
+    best_f1 = 0.0
+    best_threshold = thresholds[0]
+    best_metrics = {'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
+
+    for thresh in thresholds:
+        # Accept if distance < threshold
+        accepted = min_distances_np < thresh
+
+        # True positives: accepted AND correct
+        tp = np.sum(accepted & is_correct_np)
+        # False positives: accepted AND incorrect
+        fp = np.sum(accepted & ~is_correct_np)
+        # False negatives: rejected AND correct
+        fn = np.sum(~accepted & is_correct_np)
+
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = thresh
+            best_metrics = {
+                'f1': float(f1),
+                'precision': float(precision),
+                'recall': float(recall)
+            }
+
+    return float(best_threshold), best_metrics
+
+
+def compute_correct_flag_rate(
+    unknown_emb: torch.Tensor,
+    gallery_emb: torch.Tensor,
+    threshold: float
+) -> Dict:
+    """
+    Compute rate at which unknowns are correctly flagged as unknown.
+
+    An unknown is correctly flagged when its distance to the nearest
+    gallery sample is >= threshold (i.e., rejected as not matching any
+    known individual).
+
+    Args:
+        unknown_emb: Embeddings of unknown individuals (n_unknown, embedding_dim)
+        gallery_emb: Gallery embeddings (n_gallery, embedding_dim)
+        threshold: Distance threshold (reject if distance >= threshold)
+
+    Returns:
+        Dict with correct_flag_rate and count
+    """
+    if unknown_emb.size(0) == 0 or gallery_emb.size(0) == 0:
+        return {'correct_flag_rate': 0.0, 'count': 0}
+
+    # Compute distances to nearest gallery sample
+    distances = torch.cdist(unknown_emb, gallery_emb, p=2)
+    min_distances = distances.min(dim=1).values
+
+    # Correctly flagged if distance >= threshold (rejected as unknown)
+    correctly_flagged = (min_distances >= threshold).sum().item()
+    total = len(unknown_emb)
+
+    return {
+        'correct_flag_rate': correctly_flagged / total if total > 0 else 0.0,
+        'count': total
+    }
+
+
+def evaluate_open_set_by_quality(
+    unknown_emb: torch.Tensor,
+    unknown_quality: np.ndarray,
+    gallery_emb: torch.Tensor,
+    threshold: float,
+    quality_thresholds: Optional[List[float]] = None
+) -> Dict:
+    """
+    Compute correct flag rate for unknowns at each quality level.
+
+    For each quality threshold q, filters unknowns with quality >= q and
+    computes the correct flag rate (proportion correctly rejected).
+
+    Args:
+        unknown_emb: Embeddings of unknown individuals (n_unknown, embedding_dim)
+        unknown_quality: Quality scores for unknowns (n_unknown,)
+        gallery_emb: Gallery embeddings (n_gallery, embedding_dim)
+        threshold: Distance threshold (reject if distance >= threshold)
+        quality_thresholds: List of quality thresholds to evaluate
+
+    Returns:
+        Dict mapping "q>=X" to {correct_flag_rate, count}
+    """
+    if quality_thresholds is None:
+        quality_thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+    if unknown_emb.size(0) == 0 or gallery_emb.size(0) == 0:
+        return {f"q>={q}": {"correct_flag_rate": 0.0, "count": 0} for q in quality_thresholds}
+
+    # Compute distances to nearest gallery sample
+    distances = torch.cdist(unknown_emb, gallery_emb, p=2)
+    min_distances = distances.min(dim=1).values.cpu().numpy()
+
+    unknown_quality = np.array(unknown_quality)
+
+    results = {}
+    for q_thresh in quality_thresholds:
+        mask = unknown_quality >= q_thresh
+        count = int(mask.sum())
+
+        if count == 0:
+            results[f"q>={q_thresh}"] = {"correct_flag_rate": 0.0, "count": 0}
+            continue
+
+        filtered_distances = min_distances[mask]
+        correctly_flagged = int((filtered_distances >= threshold).sum())
+
+        results[f"q>={q_thresh}"] = {
+            "correct_flag_rate": correctly_flagged / count,
+            "count": count
+        }
+
+    return results
