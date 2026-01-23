@@ -281,6 +281,7 @@ def plot_filtration_strategies(results: ResultsCollection, output_path: str):
     ax.set_xlabel('Examples per Individual', fontsize=14)
     ax.set_ylabel('Wolverine re-identification performance (Recall@1)', fontsize=14)
     ax.set_xticks(gallery_sizes)
+    ax.set_yticks(np.arange(0, 1.05, 0.05))
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(title='Image quality filter', loc='lower right', fontsize=11, title_fontsize=11)
 
@@ -624,6 +625,7 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
     ax1.set_xlabel('Examples per Individual')
     ax1.set_ylabel('Wolverine re-identification performance (Recall@1)')
     ax1.set_xticks(gallery_sizes)
+    ax1.set_yticks(np.arange(0, 1.05, 0.05))
     ax1.legend(title='Image quality filter', fontsize=9, title_fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
