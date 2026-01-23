@@ -488,16 +488,19 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     """
     Evaluate model computing Recall@1 and open-set metrics.
 
-    Gallery: All training embeddings (filtered by threshold)
-    Queries: All validation embeddings (unfiltered - includes all quality levels)
-    Rare: All individuals not in valid_individuals (for open-set evaluation)
+    Gallery: All training embeddings (filtered by gallery_threshold at training time)
+    Queries: All validation embeddings (filtered at eval time by quality thresholds)
+    Rare: All individuals not in valid_individuals (filtered at eval time by quality thresholds)
+
+    Both closed-set and open-set metrics are computed across quality thresholds
+    (0.0, 0.1, 0.2, 0.3, 0.4, 0.5).
 
     Threshold calibration: LOO within training gallery (no data leakage)
     Open-set metric: Balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
 
     Returns:
         dict: query_quality_metrics with recall at each quality threshold
-              open_set metrics with balanced accuracy and component rates
+              open_set metrics with balanced accuracy at each quality threshold
     """
     model.eval()
 
@@ -539,7 +542,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     query_labels = torch.tensor(query_labels)
     query_quality = np.array(query_quality)
 
-    # Compute recall by query quality thresholds (closed-set - unchanged)
+    # Compute recall by query quality thresholds (closed-set)
     query_quality_metrics = compute_recall_by_query_quality(
         query_embeddings, gallery_embeddings,
         query_labels, gallery_labels,
@@ -553,28 +556,32 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         gallery_embeddings, gallery_labels
     )
 
-    # 2. Get rare/unknown individuals (filtered by same quality threshold as gallery)
+    # 2. Get ALL rare/unknown individuals (no quality filtering - filter at eval time)
     rare_indices, rare_quality = get_rare_individual_indices(
         dataset, valid_individuals, id_to_indices,
-        quality_threshold=gallery_threshold
+        quality_threshold=0.0  # Get all, filter at eval time
     )
 
     # 3. Compute embeddings for rare individuals
     if rare_indices:
-        rare_emb, _ = compute_rare_embeddings(
+        rare_emb, rare_quality_arr = compute_rare_embeddings(
             model, dataset, rare_indices, rare_quality, transform, device
         )
     else:
         rare_emb = torch.empty(0, EMBEDDING_DIM)
+        rare_quality_arr = np.array([])
 
-    # 4. Evaluate open-set with balanced accuracy
-    balanced_metrics = evaluate_open_set_balanced(
+    # 4. Evaluate open-set with balanced accuracy at each quality threshold
+    balanced_metrics_by_quality = evaluate_open_set_balanced(
         known_query_emb=query_embeddings,
         known_query_labels=query_labels,
+        known_query_quality=query_quality,
         unknown_query_emb=rare_emb,
+        unknown_query_quality=rare_quality_arr,
         gallery_emb=gallery_embeddings,
         gallery_labels=gallery_labels,
-        threshold=optimal_thresh
+        distance_threshold=optimal_thresh,
+        quality_thresholds=QUERY_QUALITY_THRESHOLDS
     )
 
     open_set_metrics = {
@@ -584,13 +591,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
             'threshold_std': thresh_std,
             'n_folds': loo_metrics.get('n_folds', 0)
         },
-        'balanced_accuracy': balanced_metrics['balanced_accuracy'],
-        'known_accept_rate': balanced_metrics['known_accept_rate'],
-        'unknown_reject_rate': balanced_metrics['unknown_reject_rate'],
-        'f1_score': balanced_metrics['f1_score'],
-        'confusion_matrix': balanced_metrics['confusion_matrix'],
-        'n_known': balanced_metrics['n_known'],
-        'n_unknown': balanced_metrics['n_unknown']
+        'by_quality': balanced_metrics_by_quality
     }
 
     return query_quality_metrics, open_set_metrics
@@ -725,18 +726,19 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             best_recall = recall_1
             best_epoch = epoch + 1
 
-        # Track best balanced accuracy for open-set
-        ba = open_set_metrics.get('balanced_accuracy', 0.0)
-        if ba > best_balanced_accuracy:
-            best_balanced_accuracy = ba
+        # Track best balanced accuracy for open-set (at q>=0.0 for overall metric)
+        by_quality = open_set_metrics.get('by_quality', {})
+        ba_q0 = by_quality.get('q>=0.0', {}).get('balanced_accuracy', 0.0)
+        if ba_q0 > best_balanced_accuracy:
+            best_balanced_accuracy = ba_q0
             best_ba_epoch = epoch + 1
 
         thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold_mean', 0.0)
-        known_rate = open_set_metrics.get('known_accept_rate', 0.0)
-        unknown_rate = open_set_metrics.get('unknown_reject_rate', 0.0)
+        known_rate = by_quality.get('q>=0.0', {}).get('known_accept_rate', 0.0)
+        unknown_rate = by_quality.get('q>=0.0', {}).get('unknown_reject_rate', 0.0)
 
         print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}, "
-              f"BA={ba:.4f} (K={known_rate:.2f}, U={unknown_rate:.2f}), thresh={thresh_mean:.3f}")
+              f"BA={ba_q0:.4f} (K={known_rate:.2f}, U={unknown_rate:.2f}), thresh={thresh_mean:.3f}")
 
         epoch_history.append({
             'epoch': epoch + 1,

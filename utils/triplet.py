@@ -1110,112 +1110,128 @@ def calibrate_threshold_loo(
 def evaluate_open_set_balanced(
     known_query_emb: torch.Tensor,
     known_query_labels: torch.Tensor,
+    known_query_quality: np.ndarray,
     unknown_query_emb: torch.Tensor,
+    unknown_query_quality: np.ndarray,
     gallery_emb: torch.Tensor,
     gallery_labels: torch.Tensor,
-    threshold: float
+    distance_threshold: float,
+    quality_thresholds: Optional[List[float]] = None
 ) -> Dict:
     """
-    Evaluate open-set performance with balanced accuracy.
+    Evaluate open-set performance with balanced accuracy at each quality threshold.
 
-    Pools known and unknown queries, applies threshold-based accept/reject,
-    computes balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
+    For each quality threshold q, filters both known and unknown queries by q,
+    then computes balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
 
     Args:
         known_query_emb: Embeddings of known validation individuals
         known_query_labels: IDs of known queries (for verifying correct match)
+        known_query_quality: Quality scores for known queries
         unknown_query_emb: Embeddings of unknown individuals
+        unknown_query_quality: Quality scores for unknown individuals
         gallery_emb: Training gallery embeddings
         gallery_labels: Training gallery IDs
-        threshold: Distance threshold (accept if < threshold)
+        distance_threshold: Distance threshold (accept if < threshold)
+        quality_thresholds: List of quality thresholds to evaluate (default 0.0-0.5)
 
     Returns:
-        Dict with:
+        Dict mapping "q>=X" to metrics dict with:
         - balanced_accuracy: (known_accept_rate + unknown_reject_rate) / 2
         - known_accept_rate: Fraction of known queries accepted AND correctly matched
-        - unknown_reject_rate: Fraction of unknown queries rejected (= CFR)
-        - confusion_matrix: {TP, FP, TN, FN}
+        - unknown_reject_rate: Fraction of unknown queries rejected
         - f1_score: F1 for known class
+        - n_known: Number of known queries at this threshold
+        - n_unknown: Number of unknown queries at this threshold
     """
-    result = {
-        'balanced_accuracy': 0.5,
-        'known_accept_rate': 0.0,
-        'unknown_reject_rate': 1.0,
-        'f1_score': 0.0,
-        'confusion_matrix': {'TP': 0, 'FP': 0, 'TN': 0, 'FN': 0},
-        'n_known': 0,
-        'n_unknown': 0
-    }
+    if quality_thresholds is None:
+        quality_thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 
-    # Normalize embeddings
+    known_query_quality = np.array(known_query_quality)
+    unknown_query_quality = np.array(unknown_query_quality)
+
+    # Normalize embeddings once
     if gallery_emb.size(0) > 0:
         gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
-
-    n_known = known_query_emb.size(0)
-    n_unknown = unknown_query_emb.size(0)
-
-    result['n_known'] = n_known
-    result['n_unknown'] = n_unknown
-
-    if gallery_emb.size(0) == 0:
-        return result
-
-    # Evaluate known queries
-    known_accepted_correct = 0
-    if n_known > 0:
+    if known_query_emb.size(0) > 0:
         known_query_emb = F.normalize(known_query_emb, p=2, dim=1)
-        distances = torch.cdist(known_query_emb, gallery_emb, p=2)
-        min_distances, nearest_idx = distances.min(dim=1)
-
-        # Get predicted labels
-        predicted_labels = gallery_labels[nearest_idx]
-
-        # For each known query: accept if distance < threshold
-        for i in range(n_known):
-            if min_distances[i].item() < threshold:
-                # Accepted - check if correct match
-                if predicted_labels[i].item() == known_query_labels[i].item():
-                    known_accepted_correct += 1
-
-        known_accept_rate = known_accepted_correct / n_known
-    else:
-        known_accept_rate = 0.0
-
-    # Evaluate unknown queries
-    unknown_rejected = 0
-    if n_unknown > 0:
+    if unknown_query_emb.size(0) > 0:
         unknown_query_emb = F.normalize(unknown_query_emb, p=2, dim=1)
+
+    # Precompute distances for all queries
+    known_min_distances = None
+    known_predicted_labels = None
+    if known_query_emb.size(0) > 0 and gallery_emb.size(0) > 0:
+        distances = torch.cdist(known_query_emb, gallery_emb, p=2)
+        known_min_distances, nearest_idx = distances.min(dim=1)
+        known_predicted_labels = gallery_labels[nearest_idx]
+
+    unknown_min_distances = None
+    if unknown_query_emb.size(0) > 0 and gallery_emb.size(0) > 0:
         distances = torch.cdist(unknown_query_emb, gallery_emb, p=2)
-        min_distances = distances.min(dim=1).values
+        unknown_min_distances = distances.min(dim=1).values
 
-        # For unknown: reject if distance >= threshold
-        unknown_rejected = (min_distances >= threshold).sum().item()
-        unknown_reject_rate = unknown_rejected / n_unknown
-    else:
-        unknown_reject_rate = 1.0
+    results = {}
+    for q_thresh in quality_thresholds:
+        # Filter by quality threshold
+        known_mask = known_query_quality >= q_thresh
+        unknown_mask = unknown_query_quality >= q_thresh
 
-    # Compute balanced accuracy
-    balanced_accuracy = (known_accept_rate + unknown_reject_rate) / 2
+        n_known = int(known_mask.sum())
+        n_unknown = int(unknown_mask.sum())
 
-    # Confusion matrix (treating known as positive, unknown as negative)
-    # TP: known queries correctly accepted
-    # FN: known queries rejected (missed)
-    # TN: unknown queries correctly rejected
-    # FP: unknown queries incorrectly accepted
-    tp = known_accepted_correct
-    fn = n_known - known_accepted_correct
-    tn = unknown_rejected
-    fp = n_unknown - unknown_rejected
+        result = {
+            'balanced_accuracy': 0.5,
+            'known_accept_rate': 0.0,
+            'unknown_reject_rate': 1.0,
+            'f1_score': 0.0,
+            'n_known': n_known,
+            'n_unknown': n_unknown
+        }
 
-    # F1 score for known class
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        if gallery_emb.size(0) == 0:
+            results[f"q>={q_thresh}"] = result
+            continue
 
-    result['balanced_accuracy'] = float(balanced_accuracy)
-    result['known_accept_rate'] = float(known_accept_rate)
-    result['unknown_reject_rate'] = float(unknown_reject_rate)
-    result['f1_score'] = float(f1)
-    result['confusion_matrix'] = {'TP': tp, 'FP': fp, 'TN': tn, 'FN': fn}
+        # Evaluate known queries at this quality threshold
+        known_accepted_correct = 0
+        if n_known > 0 and known_min_distances is not None:
+            for i in np.where(known_mask)[0]:
+                if known_min_distances[i].item() < distance_threshold:
+                    # Accepted - check if correct match
+                    if known_predicted_labels[i].item() == known_query_labels[i].item():
+                        known_accepted_correct += 1
+            known_accept_rate = known_accepted_correct / n_known
+        else:
+            known_accept_rate = 0.0
 
-    return result
+        # Evaluate unknown queries at this quality threshold
+        unknown_rejected = 0
+        if n_unknown > 0 and unknown_min_distances is not None:
+            filtered_distances = unknown_min_distances[torch.tensor(unknown_mask)]
+            unknown_rejected = int((filtered_distances >= distance_threshold).sum().item())
+            unknown_reject_rate = unknown_rejected / n_unknown
+        else:
+            unknown_reject_rate = 1.0
+
+        # Compute balanced accuracy
+        balanced_accuracy = (known_accept_rate + unknown_reject_rate) / 2
+
+        # Confusion matrix for F1
+        tp = known_accepted_correct
+        fn = n_known - known_accepted_correct
+        tn = unknown_rejected
+        fp = n_unknown - unknown_rejected
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        result['balanced_accuracy'] = float(balanced_accuracy)
+        result['known_accept_rate'] = float(known_accept_rate)
+        result['unknown_reject_rate'] = float(unknown_reject_rate)
+        result['f1_score'] = float(f1)
+
+        results[f"q>={q_thresh}"] = result
+
+    return results
