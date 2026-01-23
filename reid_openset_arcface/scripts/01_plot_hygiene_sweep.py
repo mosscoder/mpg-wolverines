@@ -474,8 +474,195 @@ def plot_recall_strategies(results: ResultsCollection, output_path: str):
     print(f"Saved: {output_path}")
 
 
-def create_main_figure(results: ResultsCollection, output_dir: str):
-    """Create combined 2-panel figure for open-set evaluation."""
+def create_closed_set_figure(results: ResultsCollection, output_dir: str):
+    """Create combined 2-panel figure for closed-set evaluation (Recall@1)."""
+    fig = plt.figure(figsize=(14, 6))
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
+
+    colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
+
+    # Panel A: Recall@1 filtration strategies
+    ax1 = fig.add_subplot(121)
+
+    strategies = {
+        'baseline': {'label': 'None', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'minimal': {'label': 'Minimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
+        'optimal': {'label': 'Optimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+    }
+
+    for gsize in gallery_sizes:
+        # Baseline
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        if len(baseline_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['baseline']['x'].append(gsize)
+                    strategies['baseline']['y'].append(mean)
+                    strategies['baseline']['ci_lower'].append(mean - ci)
+                    strategies['baseline']['ci_upper'].append(mean + ci)
+
+        # Minimal
+        minimal_filtered = results.filter(threshold=0.1, gallery_size=gsize)
+        if len(minimal_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if 'q>=0.1' in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics']['q>=0.1']['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values) if len(values) > 1 else 0
+                    strategies['minimal']['x'].append(gsize)
+                    strategies['minimal']['y'].append(mean)
+                    strategies['minimal']['ci_lower'].append(mean - ci)
+                    strategies['minimal']['ci_upper'].append(mean + ci)
+
+        # Optimal
+        best_mean = -1
+        best_values = None
+        best_gal_thresh = None
+        best_q_thresh = None
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+            best_epoch, _ = find_best_epoch_for_recall(all_histories)
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_values = values
+                        best_gal_thresh = gal_thresh
+                        best_q_thresh = q_thresh
+        if best_values:
+            mean = np.mean(best_values)
+            ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
+            strategies['optimal']['x'].append(gsize)
+            strategies['optimal']['y'].append(mean)
+            strategies['optimal']['ci_lower'].append(mean - ci)
+            strategies['optimal']['ci_upper'].append(mean + ci)
+            strategies['optimal']['best_gal'].append(best_gal_thresh)
+            strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
+
+    for key in ['baseline', 'minimal', 'optimal']:
+        s = strategies[key]
+        if s['x']:
+            ax1.plot(s['x'], s['y'], color=colors[key], linewidth=2, marker='o', label=s['label'])
+            ax1.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
+
+    ax1.set_xlabel('Examples per Individual')
+    ax1.set_ylabel('Recall@1 (Known Wolverines)')
+    ax1.set_xticks(gallery_sizes)
+
+    all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
+    all_ci_upper = [v for s in strategies.values() for v in s['ci_upper']]
+    if all_ci_lower and all_ci_upper:
+        y_min = np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05
+        y_max = np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05
+        ax1.set_ylim(y_min, y_max)
+        ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+
+    ax1.legend(title='Image quality filter', fontsize=9, title_fontsize=9, loc='lower right')
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # Panel B: Optimal thresholds for Recall@1
+    ax2 = fig.add_subplot(122)
+
+    best_gal_thresholds = []
+    best_query_thresholds = []
+
+    for gsize in gallery_sizes:
+        best_mean = -1
+        best_gal = None
+        best_q = None
+
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+
+            best_epoch, _ = find_best_epoch_for_recall(all_histories)
+
+            for q_thresh in query_thresholds:
+                values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch and 'query_quality_metrics' in h:
+                            if q_thresh in h['query_quality_metrics']:
+                                values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            break
+                if values:
+                    mean = np.mean(values)
+                    if mean > best_mean:
+                        best_mean = mean
+                        best_gal = gal_thresh
+                        best_q = float(q_thresh.replace('q>=', ''))
+
+        best_gal_thresholds.append(best_gal if best_gal is not None else 0)
+        best_query_thresholds.append(best_q if best_q is not None else 0)
+
+    x = np.arange(len(gallery_sizes))
+    width = 0.35
+
+    ax2.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Training Gallery')
+    ax2.bar(x + width/2, best_query_thresholds, width, color='#ff7f0e', label='Validation Query')
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(gallery_sizes)
+    ax2.set_xlabel('Examples per Individual')
+    ax2.set_ylabel(r'Optimal quality threshold ($p$ visible pelage)')
+    ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9, loc='lower right')
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    plt.suptitle('Closed-Set Evaluation: Gallery Hygiene Sweep Results', fontsize=16, y=1.02)
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, 'closed_set_combined.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved closed-set figure: {output_path}")
+
+
+def create_open_set_figure(results: ResultsCollection, output_dir: str):
+    """Create combined 2-panel figure for open-set evaluation (CFR)."""
     fig = plt.figure(figsize=(14, 6))
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -650,9 +837,9 @@ def create_main_figure(results: ResultsCollection, output_dir: str):
 
     plt.suptitle('Open-Set Evaluation: Gallery Hygiene Sweep Results', fontsize=16, y=1.02)
     plt.tight_layout()
-    output_path = os.path.join(output_dir, 'hygiene_sweep_combined.png')
+    output_path = os.path.join(output_dir, 'open_set_combined.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Saved main figure: {output_path}")
+    print(f"Saved open-set figure: {output_path}")
 
 
 def print_summary_table(results: ResultsCollection):
@@ -750,8 +937,9 @@ def main():
         os.path.join(args.output_dir, 'panel_c_recall_strategies.png')
     )
 
-    # Generate combined main figure
-    create_main_figure(results, args.output_dir)
+    # Generate combined figures
+    create_closed_set_figure(results, args.output_dir)
+    create_open_set_figure(results, args.output_dir)
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
 

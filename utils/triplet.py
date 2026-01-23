@@ -845,6 +845,10 @@ def find_optimal_distance_threshold(
     if query_emb.size(0) == 0 or gallery_emb.size(0) == 0:
         return thresholds[0], {'f1': 0.0, 'precision': 0.0, 'recall': 0.0}
 
+    # Normalize embeddings before computing distances
+    query_emb = F.normalize(query_emb, p=2, dim=1)
+    gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
+
     # Compute distances and find nearest gallery sample for each query
     distances = torch.cdist(query_emb, gallery_emb, p=2)
     min_distances, nearest_idx = distances.min(dim=1)
@@ -913,6 +917,10 @@ def compute_correct_flag_rate(
     if unknown_emb.size(0) == 0 or gallery_emb.size(0) == 0:
         return {'correct_flag_rate': 0.0, 'count': 0}
 
+    # Normalize embeddings before computing distances
+    unknown_emb = F.normalize(unknown_emb, p=2, dim=1)
+    gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
+
     # Compute distances to nearest gallery sample
     distances = torch.cdist(unknown_emb, gallery_emb, p=2)
     min_distances = distances.min(dim=1).values
@@ -955,6 +963,10 @@ def evaluate_open_set_by_quality(
 
     if unknown_emb.size(0) == 0 or gallery_emb.size(0) == 0:
         return {f"q>={q}": {"correct_flag_rate": 0.0, "count": 0} for q in quality_thresholds}
+
+    # Normalize embeddings before computing distances
+    unknown_emb = F.normalize(unknown_emb, p=2, dim=1)
+    gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
 
     # Compute distances to nearest gallery sample
     distances = torch.cdist(unknown_emb, gallery_emb, p=2)
