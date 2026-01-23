@@ -992,3 +992,230 @@ def evaluate_open_set_by_quality(
         }
 
     return results
+
+
+def calibrate_threshold_loo(
+    gallery_emb: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    thresholds: Optional[np.ndarray] = None
+) -> Tuple[float, float, Dict]:
+    """
+    Leave-one-individual-out threshold calibration within training gallery.
+
+    For each individual, holds them out and calibrates threshold on remaining
+    individuals. Returns mean threshold across all LOO folds.
+
+    Args:
+        gallery_emb: Normalized gallery embeddings (n_gallery, embed_dim)
+        gallery_labels: Individual IDs (n_gallery,)
+        thresholds: Threshold sweep range (default 0.1-2.0)
+
+    Returns:
+        threshold_mean: Mean threshold across LOO folds
+        threshold_std: Std of thresholds (stability indicator)
+        metrics: Dict with per-fold details
+    """
+    if thresholds is None:
+        thresholds = np.arange(0.1, 2.0, 0.05)
+
+    if gallery_emb.size(0) == 0:
+        return float(thresholds[len(thresholds) // 2]), 0.0, {'method': 'loo', 'n_folds': 0}
+
+    # Normalize embeddings
+    gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
+
+    # Get unique individuals
+    if isinstance(gallery_labels, torch.Tensor):
+        unique_labels = torch.unique(gallery_labels).tolist()
+    else:
+        unique_labels = list(set(gallery_labels))
+
+    if len(unique_labels) < 2:
+        # Not enough individuals for LOO
+        return float(thresholds[len(thresholds) // 2]), 0.0, {'method': 'loo', 'n_folds': 0}
+
+    fold_thresholds = []
+    fold_details = []
+
+    for held_out_label in unique_labels:
+        # Create mask for samples NOT from held-out individual
+        if isinstance(gallery_labels, torch.Tensor):
+            mask = gallery_labels != held_out_label
+        else:
+            mask = torch.tensor([l != held_out_label for l in gallery_labels])
+
+        remaining_emb = gallery_emb[mask]
+        remaining_labels = gallery_labels[mask] if isinstance(gallery_labels, torch.Tensor) else torch.tensor(gallery_labels)[mask]
+
+        if remaining_emb.size(0) < 2:
+            continue
+
+        # Compute pairwise distances within remaining gallery
+        distances = torch.cdist(remaining_emb, remaining_emb, p=2)
+
+        # Create same-ID and different-ID masks (exclude diagonal)
+        n = remaining_emb.size(0)
+        labels_expanded = remaining_labels.unsqueeze(0).expand(n, n)
+        same_id_mask = (labels_expanded == remaining_labels.unsqueeze(1)) & (~torch.eye(n, dtype=torch.bool, device=remaining_emb.device))
+        diff_id_mask = labels_expanded != remaining_labels.unsqueeze(1)
+
+        # Get same-ID and different-ID distances
+        same_id_distances = distances[same_id_mask].cpu().numpy()
+        diff_id_distances = distances[diff_id_mask].cpu().numpy()
+
+        if len(same_id_distances) == 0 or len(diff_id_distances) == 0:
+            continue
+
+        # Find threshold that maximizes accuracy
+        # TP: same_id distances < threshold
+        # TN: diff_id distances >= threshold
+        best_acc = 0.0
+        best_thresh = thresholds[0]
+
+        for thresh in thresholds:
+            tp = np.sum(same_id_distances < thresh)
+            tn = np.sum(diff_id_distances >= thresh)
+            acc = (tp + tn) / (len(same_id_distances) + len(diff_id_distances))
+
+            if acc > best_acc:
+                best_acc = acc
+                best_thresh = thresh
+
+        fold_thresholds.append(best_thresh)
+        fold_details.append({
+            'held_out': held_out_label,
+            'threshold': float(best_thresh),
+            'accuracy': float(best_acc),
+            'n_same_pairs': len(same_id_distances),
+            'n_diff_pairs': len(diff_id_distances)
+        })
+
+    if not fold_thresholds:
+        return float(thresholds[len(thresholds) // 2]), 0.0, {'method': 'loo', 'n_folds': 0}
+
+    threshold_mean = float(np.mean(fold_thresholds))
+    threshold_std = float(np.std(fold_thresholds, ddof=1)) if len(fold_thresholds) > 1 else 0.0
+
+    metrics = {
+        'method': 'loo',
+        'threshold_mean': threshold_mean,
+        'threshold_std': threshold_std,
+        'n_folds': len(fold_thresholds),
+        'fold_details': fold_details
+    }
+
+    return threshold_mean, threshold_std, metrics
+
+
+def evaluate_open_set_balanced(
+    known_query_emb: torch.Tensor,
+    known_query_labels: torch.Tensor,
+    unknown_query_emb: torch.Tensor,
+    gallery_emb: torch.Tensor,
+    gallery_labels: torch.Tensor,
+    threshold: float
+) -> Dict:
+    """
+    Evaluate open-set performance with balanced accuracy.
+
+    Pools known and unknown queries, applies threshold-based accept/reject,
+    computes balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
+
+    Args:
+        known_query_emb: Embeddings of known validation individuals
+        known_query_labels: IDs of known queries (for verifying correct match)
+        unknown_query_emb: Embeddings of unknown individuals
+        gallery_emb: Training gallery embeddings
+        gallery_labels: Training gallery IDs
+        threshold: Distance threshold (accept if < threshold)
+
+    Returns:
+        Dict with:
+        - balanced_accuracy: (known_accept_rate + unknown_reject_rate) / 2
+        - known_accept_rate: Fraction of known queries accepted AND correctly matched
+        - unknown_reject_rate: Fraction of unknown queries rejected (= CFR)
+        - confusion_matrix: {TP, FP, TN, FN}
+        - f1_score: F1 for known class
+    """
+    result = {
+        'balanced_accuracy': 0.5,
+        'known_accept_rate': 0.0,
+        'unknown_reject_rate': 1.0,
+        'f1_score': 0.0,
+        'confusion_matrix': {'TP': 0, 'FP': 0, 'TN': 0, 'FN': 0},
+        'n_known': 0,
+        'n_unknown': 0
+    }
+
+    # Normalize embeddings
+    if gallery_emb.size(0) > 0:
+        gallery_emb = F.normalize(gallery_emb, p=2, dim=1)
+
+    n_known = known_query_emb.size(0)
+    n_unknown = unknown_query_emb.size(0)
+
+    result['n_known'] = n_known
+    result['n_unknown'] = n_unknown
+
+    if gallery_emb.size(0) == 0:
+        return result
+
+    # Evaluate known queries
+    known_accepted_correct = 0
+    if n_known > 0:
+        known_query_emb = F.normalize(known_query_emb, p=2, dim=1)
+        distances = torch.cdist(known_query_emb, gallery_emb, p=2)
+        min_distances, nearest_idx = distances.min(dim=1)
+
+        # Get predicted labels
+        predicted_labels = gallery_labels[nearest_idx]
+
+        # For each known query: accept if distance < threshold
+        for i in range(n_known):
+            if min_distances[i].item() < threshold:
+                # Accepted - check if correct match
+                if predicted_labels[i].item() == known_query_labels[i].item():
+                    known_accepted_correct += 1
+
+        known_accept_rate = known_accepted_correct / n_known
+    else:
+        known_accept_rate = 0.0
+
+    # Evaluate unknown queries
+    unknown_rejected = 0
+    if n_unknown > 0:
+        unknown_query_emb = F.normalize(unknown_query_emb, p=2, dim=1)
+        distances = torch.cdist(unknown_query_emb, gallery_emb, p=2)
+        min_distances = distances.min(dim=1).values
+
+        # For unknown: reject if distance >= threshold
+        unknown_rejected = (min_distances >= threshold).sum().item()
+        unknown_reject_rate = unknown_rejected / n_unknown
+    else:
+        unknown_reject_rate = 1.0
+
+    # Compute balanced accuracy
+    balanced_accuracy = (known_accept_rate + unknown_reject_rate) / 2
+
+    # Confusion matrix (treating known as positive, unknown as negative)
+    # TP: known queries correctly accepted
+    # FN: known queries rejected (missed)
+    # TN: unknown queries correctly rejected
+    # FP: unknown queries incorrectly accepted
+    tp = known_accepted_correct
+    fn = n_known - known_accepted_correct
+    tn = unknown_rejected
+    fp = n_unknown - unknown_rejected
+
+    # F1 score for known class
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    result['balanced_accuracy'] = float(balanced_accuracy)
+    result['known_accept_rate'] = float(known_accept_rate)
+    result['unknown_reject_rate'] = float(unknown_reject_rate)
+    result['f1_score'] = float(f1)
+    result['confusion_matrix'] = {'TP': tp, 'FP': fp, 'TN': tn, 'FN': fn}
+
+    return result

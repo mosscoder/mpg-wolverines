@@ -66,61 +66,58 @@ def load_hygiene_results(results_dir: str) -> ResultsCollection:
     return ResultsCollection(results)
 
 
-def find_best_epoch_for_correct_flag_rate(all_histories: List[List[dict]],
-                                           query_thresh: str = "q>=0.0") -> Tuple[int, float]:
+def find_best_epoch_for_balanced_accuracy(all_histories: List[List[dict]]) -> Tuple[int, float]:
     """
-    Find epoch with best mean correct flag rate across seeds.
+    Find epoch with best mean balanced accuracy across seeds.
 
     Args:
         all_histories: List of epoch histories (one per seed)
-        query_thresh: Quality threshold key for open-set evaluation
 
     Returns:
-        Tuple of (best_epoch, best_mean_cfr)
+        Tuple of (best_epoch, best_mean_ba)
     """
     if not all_histories or not all_histories[0]:
-        return 100, 0.0
+        return 50, 0.0
 
-    # Get epochs that have open_set metrics
+    # Get epochs that have open_set metrics with balanced_accuracy
     eval_epochs = []
     for h in all_histories[0]:
-        if 'open_set' in h and 'by_quality' in h['open_set']:
+        if 'open_set' in h and 'balanced_accuracy' in h['open_set']:
             eval_epochs.append(h['epoch'])
 
     if not eval_epochs:
-        return 100, 0.0
+        return 50, 0.0
 
     best_epoch = None
     best_mean = -1
 
     for epoch in eval_epochs:
-        cfr_values = []
+        ba_values = []
         for history in all_histories:
             for h in history:
                 if h['epoch'] == epoch and 'open_set' in h:
-                    by_quality = h['open_set'].get('by_quality', {})
-                    if query_thresh in by_quality:
-                        cfr_values.append(by_quality[query_thresh]['correct_flag_rate'])
+                    ba = h['open_set'].get('balanced_accuracy', 0.0)
+                    ba_values.append(ba)
                     break
 
-        if cfr_values:
-            mean_cfr = np.mean(cfr_values)
-            if mean_cfr > best_mean:
-                best_mean = mean_cfr
+        if ba_values:
+            mean_ba = np.mean(ba_values)
+            if mean_ba > best_mean:
+                best_mean = mean_ba
                 best_epoch = epoch
 
-    return best_epoch or 100, best_mean
+    return best_epoch or 50, best_mean
 
 
 def find_best_epoch_for_recall(all_histories: List[List[dict]]) -> Tuple[int, float]:
     """Find epoch with best mean overall recall across seeds."""
     if not all_histories or not all_histories[0]:
-        return 100, 0.0
+        return 50, 0.0
 
     eval_epochs = [h['epoch'] for h in all_histories[0] if 'query_quality_metrics' in h]
 
     if not eval_epochs:
-        return 100, 0.0
+        return 50, 0.0
 
     best_epoch = None
     best_mean = -1
@@ -139,23 +136,22 @@ def find_best_epoch_for_recall(all_histories: List[List[dict]]) -> Tuple[int, fl
                 best_mean = mean_recall
                 best_epoch = epoch
 
-    return best_epoch or 100, best_mean
+    return best_epoch or 50, best_mean
 
 
-def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: str):
+def plot_balanced_accuracy_strategies(results: ResultsCollection, output_path: str):
     """
-    Panel A: Line plot comparing filtration strategies for correct flag rate.
+    Panel A: Line plot comparing filtration strategies for balanced accuracy.
 
     Three lines:
-    - Baseline (no filtration): gallery_threshold=0.0, query q>=0.0
-    - Minimal filtration: gallery_threshold=0.1, query q>=0.1
-    - Optimal filtration: best combo of gallery and query filter per gallery_size
+    - Baseline (no filtration): gallery_threshold=0.0
+    - Minimal filtration: gallery_threshold=0.1
+    - Optimal filtration: best gallery threshold per gallery_size
     """
     fig, ax = plt.subplots(figsize=(10, 8))
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
-    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
     # Colors for the 3 strategies
     colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
@@ -163,23 +159,22 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
     strategies = {
         'baseline': {'label': 'None', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
         'minimal': {'label': 'Minimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': []},
-        'optimal': {'label': 'Optimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': [], 'best_q': []}
+        'optimal': {'label': 'Optimal', 'x': [], 'y': [], 'ci_lower': [], 'ci_upper': [], 'best_gal': []}
     }
 
     for gsize in gallery_sizes:
-        # --- Baseline: gallery_threshold=0.0, query q>=0.0 ---
+        # --- Baseline: gallery_threshold=0.0 ---
         baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, 'q>=0.0')
+                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if 'q>=0.0' in by_quality:
-                                values.append(by_quality['q>=0.0']['correct_flag_rate'])
+                            ba = h['open_set'].get('balanced_accuracy', 0.0)
+                            values.append(ba)
                             break
                 if values:
                     mean = np.mean(values)
@@ -189,19 +184,18 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
                     strategies['baseline']['ci_lower'].append(mean - ci)
                     strategies['baseline']['ci_upper'].append(mean + ci)
 
-        # --- Minimal: gallery_threshold=0.1, query q>=0.1 ---
+        # --- Minimal: gallery_threshold=0.1 ---
         minimal_filtered = results.filter(threshold=0.1, gallery_size=gsize)
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, 'q>=0.1')
+                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if 'q>=0.1' in by_quality:
-                                values.append(by_quality['q>=0.1']['correct_flag_rate'])
+                            ba = h['open_set'].get('balanced_accuracy', 0.0)
+                            values.append(ba)
                             break
                 if values:
                     mean = np.mean(values)
@@ -211,11 +205,10 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
                     strategies['minimal']['ci_lower'].append(mean - ci)
                     strategies['minimal']['ci_upper'].append(mean + ci)
 
-        # --- Optimal: find best gallery x query combo for this gallery_size ---
+        # --- Optimal: find best gallery threshold for this gallery_size ---
         best_mean = -1
         best_values = None
         best_gal_thresh = None
-        best_q_thresh = None
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
@@ -224,23 +217,20 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
             if not all_histories or not all_histories[0]:
                 continue
 
-            for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, q_thresh)
-                values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if q_thresh in by_quality:
-                                values.append(by_quality[q_thresh]['correct_flag_rate'])
-                            break
-                if values:
-                    mean = np.mean(values)
-                    if mean > best_mean:
-                        best_mean = mean
-                        best_values = values
-                        best_gal_thresh = gal_thresh
-                        best_q_thresh = q_thresh
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
+            values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'open_set' in h:
+                        ba = h['open_set'].get('balanced_accuracy', 0.0)
+                        values.append(ba)
+                        break
+            if values:
+                mean = np.mean(values)
+                if mean > best_mean:
+                    best_mean = mean
+                    best_values = values
+                    best_gal_thresh = gal_thresh
 
         if best_values:
             mean = np.mean(best_values)
@@ -250,7 +240,6 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
             strategies['optimal']['ci_lower'].append(mean - ci)
             strategies['optimal']['ci_upper'].append(mean + ci)
             strategies['optimal']['best_gal'].append(best_gal_thresh)
-            strategies['optimal']['best_q'].append(best_q_thresh.replace('q>=', ''))
 
     # Plot each strategy
     for key in ['baseline', 'minimal', 'optimal']:
@@ -261,8 +250,8 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
             ax.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
 
     ax.set_xlabel('Examples per Individual', fontsize=14)
-    ax.set_ylabel('Correct Flag Rate (Novel Wolverines)', fontsize=14)
-    ax.set_title('Open-Set Evaluation: Unknown Rejection Rate', fontsize=16)
+    ax.set_ylabel('Balanced Accuracy (Known + Unknown)', fontsize=14)
+    ax.set_title('Open-Set Evaluation: Balanced Accuracy', fontsize=16)
     ax.set_xticks(gallery_sizes)
 
     # Set y-axis range based on CI bands with 0.05 buffer
@@ -275,34 +264,33 @@ def plot_correct_flag_rate_strategies(results: ResultsCollection, output_path: s
         ax.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
     ax.grid(True, alpha=0.3, axis='y')
-    ax.legend(title='Image quality filter', loc='lower right', fontsize=11, title_fontsize=11)
+    ax.legend(title='Gallery quality filter', loc='lower right', fontsize=11, title_fontsize=11)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved: {output_path}")
 
 
-def plot_optimal_thresholds_cfr(results: ResultsCollection, output_path: str):
+def plot_optimal_thresholds_balanced(results: ResultsCollection, output_path: str):
     """
-    Panel B: Bar plot showing optimal thresholds for maximizing correct flag rate.
+    Panel B: Bar plot showing optimal gallery thresholds for maximizing balanced accuracy.
 
-    For each examples-per-individual value, finds the optimal G*Q combo and plots
-    the threshold values as two bars.
+    For each examples-per-individual value, finds the optimal gallery threshold.
+    Also shows the LOO-calibrated distance threshold mean.
     """
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
-    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
     fig, ax = plt.subplots(figsize=(10, 7))
 
     best_gal_thresholds = []
-    best_query_thresholds = []
+    best_distance_thresholds = []
 
     for gsize in gallery_sizes:
-        # Find optimal combo for this gallery_size
+        # Find optimal gallery threshold for this gallery_size
         best_mean = -1
         best_gal = None
-        best_q = None
+        best_dist_thresh = 0.0
 
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
@@ -312,39 +300,41 @@ def plot_optimal_thresholds_cfr(results: ResultsCollection, output_path: str):
             if not all_histories or not all_histories[0]:
                 continue
 
-            for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, q_thresh)
-                values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if q_thresh in by_quality:
-                                values.append(by_quality[q_thresh]['correct_flag_rate'])
-                            break
-                if values:
-                    mean = np.mean(values)
-                    if mean > best_mean:
-                        best_mean = mean
-                        best_gal = gal_thresh
-                        best_q = float(q_thresh.replace('q>=', ''))
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
+            values = []
+            dist_thresholds = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'open_set' in h:
+                        ba = h['open_set'].get('balanced_accuracy', 0.0)
+                        values.append(ba)
+                        # Get distance threshold from LOO calibration
+                        thresh_cal = h['open_set'].get('threshold_calibration', {})
+                        dist_thresholds.append(thresh_cal.get('threshold_mean', 0.0))
+                        break
+            if values:
+                mean = np.mean(values)
+                if mean > best_mean:
+                    best_mean = mean
+                    best_gal = gal_thresh
+                    best_dist_thresh = np.mean(dist_thresholds) if dist_thresholds else 0.0
 
         best_gal_thresholds.append(best_gal if best_gal is not None else 0)
-        best_query_thresholds.append(best_q if best_q is not None else 0)
+        best_distance_thresholds.append(best_dist_thresh)
 
     # Plot grouped bars
     x = np.arange(len(gallery_sizes))
     width = 0.35
 
-    ax.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Training Gallery')
-    ax.bar(x + width/2, best_query_thresholds, width, color='#ff7f0e', label='Unknown Query')
+    ax.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Gallery Quality Threshold')
+    ax.bar(x + width/2, best_distance_thresholds, width, color='#ff7f0e', label='LOO Distance Threshold')
 
     ax.set_xticks(x)
     ax.set_xticklabels(gallery_sizes)
     ax.set_xlabel('Examples per Individual', fontsize=12)
-    ax.set_ylabel(r'Optimal quality threshold ($p$ visible pelage)', fontsize=12)
-    ax.set_title('Optimal Thresholds for Unknown Rejection', fontsize=14)
-    ax.legend(title='Threshold Application', fontsize=11, title_fontsize=11, loc='lower right')
+    ax.set_ylabel('Threshold Value', fontsize=12)
+    ax.set_title('Optimal Thresholds for Balanced Accuracy', fontsize=14)
+    ax.legend(fontsize=11, loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
@@ -662,16 +652,15 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
 
 
 def create_open_set_figure(results: ResultsCollection, output_dir: str):
-    """Create combined 2-panel figure for open-set evaluation (CFR)."""
+    """Create combined 2-panel figure for open-set evaluation (Balanced Accuracy)."""
     fig = plt.figure(figsize=(14, 6))
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
-    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
     colors = {'baseline': '#1f77b4', 'minimal': '#ff7f0e', 'optimal': '#2ca02c'}
 
-    # Panel A: Correct Flag Rate strategies
+    # Panel A: Balanced Accuracy strategies
     ax1 = fig.add_subplot(121)
 
     strategies = {
@@ -686,14 +675,13 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, 'q>=0.0')
+                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if 'q>=0.0' in by_quality:
-                                values.append(by_quality['q>=0.0']['correct_flag_rate'])
+                            ba = h['open_set'].get('balanced_accuracy', 0.0)
+                            values.append(ba)
                             break
                 if values:
                     mean = np.mean(values)
@@ -708,14 +696,13 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, 'q>=0.1')
+                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if 'q>=0.1' in by_quality:
-                                values.append(by_quality['q>=0.1']['correct_flag_rate'])
+                            ba = h['open_set'].get('balanced_accuracy', 0.0)
+                            values.append(ba)
                             break
                 if values:
                     mean = np.mean(values)
@@ -735,21 +722,20 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
             all_histories = [r.get('epoch_history', []) for r in filtered]
             if not all_histories or not all_histories[0]:
                 continue
-            for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, q_thresh)
-                values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if q_thresh in by_quality:
-                                values.append(by_quality[q_thresh]['correct_flag_rate'])
-                            break
-                if values:
-                    mean = np.mean(values)
-                    if mean > best_mean:
-                        best_mean = mean
-                        best_values = values
+
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
+            values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'open_set' in h:
+                        ba = h['open_set'].get('balanced_accuracy', 0.0)
+                        values.append(ba)
+                        break
+            if values:
+                mean = np.mean(values)
+                if mean > best_mean:
+                    best_mean = mean
+                    best_values = values
         if best_values:
             mean = np.mean(best_values)
             ci = stats.t.ppf(0.975, len(best_values) - 1) * stats.sem(best_values) if len(best_values) > 1 else 0
@@ -765,7 +751,7 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
             ax1.fill_between(s['x'], s['ci_lower'], s['ci_upper'], color=colors[key], alpha=0.2)
 
     ax1.set_xlabel('Examples per Individual')
-    ax1.set_ylabel('Correct Flag Rate (Novel Wolverines)')
+    ax1.set_ylabel('Balanced Accuracy (Known + Unknown)')
     ax1.set_xticks(gallery_sizes)
 
     all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
@@ -776,21 +762,21 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
         ax1.set_ylim(y_min, y_max)
         ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
-    ax1.legend(title='Image quality filter', fontsize=9, title_fontsize=9, loc='lower right')
+    ax1.legend(title='Gallery quality filter', fontsize=9, title_fontsize=9, loc='lower right')
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
-    # Panel B: Optimal thresholds for CFR
+    # Panel B: Optimal thresholds for balanced accuracy
     ax2 = fig.add_subplot(122)
 
     best_gal_thresholds = []
-    best_query_thresholds = []
+    best_distance_thresholds = []
 
     for gsize in gallery_sizes:
         best_mean = -1
         best_gal = None
-        best_q = None
+        best_dist_thresh = 0.0
 
         for gal_thresh in gallery_thresholds:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
@@ -800,37 +786,38 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
             if not all_histories or not all_histories[0]:
                 continue
 
-            for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, q_thresh)
-                values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == best_epoch and 'open_set' in h:
-                            by_quality = h['open_set'].get('by_quality', {})
-                            if q_thresh in by_quality:
-                                values.append(by_quality[q_thresh]['correct_flag_rate'])
-                            break
-                if values:
-                    mean = np.mean(values)
-                    if mean > best_mean:
-                        best_mean = mean
-                        best_gal = gal_thresh
-                        best_q = float(q_thresh.replace('q>=', ''))
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
+            values = []
+            dist_thresholds = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'open_set' in h:
+                        ba = h['open_set'].get('balanced_accuracy', 0.0)
+                        values.append(ba)
+                        thresh_cal = h['open_set'].get('threshold_calibration', {})
+                        dist_thresholds.append(thresh_cal.get('threshold_mean', 0.0))
+                        break
+            if values:
+                mean = np.mean(values)
+                if mean > best_mean:
+                    best_mean = mean
+                    best_gal = gal_thresh
+                    best_dist_thresh = np.mean(dist_thresholds) if dist_thresholds else 0.0
 
         best_gal_thresholds.append(best_gal if best_gal is not None else 0)
-        best_query_thresholds.append(best_q if best_q is not None else 0)
+        best_distance_thresholds.append(best_dist_thresh)
 
     x = np.arange(len(gallery_sizes))
     width = 0.35
 
-    ax2.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Training Gallery')
-    ax2.bar(x + width/2, best_query_thresholds, width, color='#ff7f0e', label='Unknown Query')
+    ax2.bar(x - width/2, best_gal_thresholds, width, color='#1f77b4', label='Gallery Quality Threshold')
+    ax2.bar(x + width/2, best_distance_thresholds, width, color='#ff7f0e', label='LOO Distance Threshold')
 
     ax2.set_xticks(x)
     ax2.set_xticklabels(gallery_sizes)
     ax2.set_xlabel('Examples per Individual')
-    ax2.set_ylabel(r'Optimal quality threshold ($p$ visible pelage)')
-    ax2.legend(title='Threshold Application', fontsize=9, title_fontsize=9, loc='lower right')
+    ax2.set_ylabel('Threshold Value')
+    ax2.legend(fontsize=9, loc='upper right')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
@@ -845,13 +832,13 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
 def print_summary_table(results: ResultsCollection):
     """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 80)
-    print("SUMMARY TABLE: Open-Set Correct Flag Rate by Configuration (Best Epoch Selection)")
+    print("SUMMARY TABLE: Open-Set Balanced Accuracy by Configuration (Best Epoch Selection)")
     print("=" * 80)
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
 
-    print(f"{'Thresh':<8} {'Gallery':<10} {'Best Ep':<10} {'CFR Mean':<12} {'CFR Std':<12} {'N Seeds':<8}")
+    print(f"{'Thresh':<8} {'Gallery':<10} {'Best Ep':<10} {'BA Mean':<12} {'BA Std':<12} {'N Seeds':<8}")
     print("-" * 80)
 
     metrics = {}
@@ -865,23 +852,22 @@ def print_summary_table(results: ResultsCollection):
             if not all_histories or not all_histories[0]:
                 continue
 
-            best_epoch, _ = find_best_epoch_for_correct_flag_rate(all_histories, 'q>=0.0')
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories)
 
             values = []
             for history in all_histories:
                 for h in history:
                     if h['epoch'] == best_epoch and 'open_set' in h:
-                        by_quality = h['open_set'].get('by_quality', {})
-                        if 'q>=0.0' in by_quality:
-                            values.append(by_quality['q>=0.0']['correct_flag_rate'])
+                        ba = h['open_set'].get('balanced_accuracy', 0.0)
+                        values.append(ba)
                         break
 
             if values:
-                mean_cfr = np.mean(values)
-                std_cfr = np.std(values, ddof=1) if len(values) > 1 else 0
-                print(f"{threshold:<8.2f} {gallery_size:<10} {best_epoch:<10} {mean_cfr:.4f}{'':>6} "
-                      f"{std_cfr:.4f}{'':>6} {len(values):<8}")
-                metrics[(threshold, gallery_size)] = {'mean': mean_cfr, 'std': std_cfr, 'epoch': best_epoch}
+                mean_ba = np.mean(values)
+                std_ba = np.std(values, ddof=1) if len(values) > 1 else 0
+                print(f"{threshold:<8.2f} {gallery_size:<10} {best_epoch:<10} {mean_ba:.4f}{'':>6} "
+                      f"{std_ba:.4f}{'':>6} {len(values):<8}")
+                metrics[(threshold, gallery_size)] = {'mean': mean_ba, 'std': std_ba, 'epoch': best_epoch}
 
     # Find best configuration
     if metrics:
@@ -889,7 +875,7 @@ def print_summary_table(results: ResultsCollection):
         best_data = metrics[best_key]
         print("-" * 80)
         print(f"Best: threshold={best_key[0]}, gallery_size={best_key[1]}, epoch={best_data['epoch']} -> "
-              f"CFR={best_data['mean']:.4f}")
+              f"BA={best_data['mean']:.4f}")
 
 
 def main():
@@ -922,12 +908,12 @@ def main():
     # Generate individual plots
     print("\nGenerating figures...")
 
-    plot_correct_flag_rate_strategies(
+    plot_balanced_accuracy_strategies(
         results,
-        os.path.join(args.output_dir, 'panel_a_correct_flag_rate.png')
+        os.path.join(args.output_dir, 'panel_a_balanced_accuracy.png')
     )
 
-    plot_optimal_thresholds_cfr(
+    plot_optimal_thresholds_balanced(
         results,
         os.path.join(args.output_dir, 'panel_b_optimal_thresholds.png')
     )
