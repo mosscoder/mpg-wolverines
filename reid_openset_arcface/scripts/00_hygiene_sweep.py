@@ -176,10 +176,11 @@ def get_rare_individual_indices(dataset, valid_individuals: list, id_to_indices:
         quality_threshold: Minimum pelage_score to include
 
     Returns:
-        Tuple of (rare_indices, rare_quality) lists
+        Tuple of (rare_indices, rare_quality, rare_labels) lists
     """
     rare_indices = []
     rare_quality = []
+    rare_labels = []
 
     for ind_id, indices in id_to_indices.items():
         if ind_id not in valid_individuals:
@@ -188,8 +189,9 @@ def get_rare_individual_indices(dataset, valid_individuals: list, id_to_indices:
                 if q >= quality_threshold:  # Match gallery threshold
                     rare_indices.append(idx)
                     rare_quality.append(q)
+                    rare_labels.append(ind_id)
 
-    return rare_indices, rare_quality
+    return rare_indices, rare_quality, rare_labels
 
 
 def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, id_to_indices):
@@ -443,7 +445,7 @@ def compute_recall_by_query_quality(query_emb, gallery_emb, query_labels, galler
     return results
 
 
-def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, transform, device, batch_size=32):
+def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, rare_labels, transform, device, batch_size=32):
     """
     Compute embeddings for rare/unknown individuals.
 
@@ -452,12 +454,13 @@ def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, transfor
         dataset: HuggingFace dataset
         rare_indices: List of dataset indices for rare individuals
         rare_quality: List of quality scores for rare individuals
+        rare_labels: List of individual IDs for rare individuals
         transform: Image transform
         device: Device to use
         batch_size: Batch size for inference
 
     Returns:
-        Tuple of (embeddings tensor, quality array)
+        Tuple of (embeddings tensor, quality array, labels array)
     """
     model.eval()
 
@@ -479,7 +482,7 @@ def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, transfor
     else:
         embeddings = torch.empty(0, EMBEDDING_DIM)
 
-    return embeddings, np.array(qualities)
+    return embeddings, np.array(qualities), np.array(rare_labels)
 
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
@@ -557,21 +560,23 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     )
 
     # 2. Get ALL rare/unknown individuals (no quality filtering - filter at eval time)
-    rare_indices, rare_quality = get_rare_individual_indices(
+    rare_indices, rare_quality, rare_labels = get_rare_individual_indices(
         dataset, valid_individuals, id_to_indices,
         quality_threshold=0.0  # Get all, filter at eval time
     )
 
     # 3. Compute embeddings for rare individuals
     if rare_indices:
-        rare_emb, rare_quality_arr = compute_rare_embeddings(
-            model, dataset, rare_indices, rare_quality, transform, device
+        rare_emb, rare_quality_arr, rare_labels_arr = compute_rare_embeddings(
+            model, dataset, rare_indices, rare_quality, rare_labels, transform, device
         )
     else:
         rare_emb = torch.empty(0, EMBEDDING_DIM)
         rare_quality_arr = np.array([])
+        rare_labels_arr = np.array([])
 
     # 4. Evaluate open-set with balanced accuracy at each quality threshold
+    # Uses macro-averaging: per-individual rates are computed, then averaged
     balanced_metrics_by_quality = evaluate_open_set_balanced(
         known_query_emb=query_embeddings,
         known_query_labels=query_labels,
@@ -581,7 +586,8 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         gallery_emb=gallery_embeddings,
         gallery_labels=gallery_labels,
         distance_threshold=optimal_thresh,
-        quality_thresholds=QUERY_QUALITY_THRESHOLDS
+        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
+        unknown_query_labels=rare_labels_arr
     )
 
     open_set_metrics = {

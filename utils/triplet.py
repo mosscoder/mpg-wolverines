@@ -1116,39 +1116,48 @@ def evaluate_open_set_balanced(
     gallery_emb: torch.Tensor,
     gallery_labels: torch.Tensor,
     distance_threshold: float,
-    quality_thresholds: Optional[List[float]] = None
+    quality_thresholds: Optional[List[float]] = None,
+    unknown_query_labels: Optional[np.ndarray] = None
 ) -> Dict:
     """
-    Evaluate open-set performance with balanced accuracy at each quality threshold.
+    Evaluate open-set performance with macro-averaged balanced accuracy at each quality threshold.
+
+    Uses macro-averaging: compute per-individual rates, then average across individuals.
+    This ensures each individual contributes equally regardless of sample count.
 
     For each quality threshold q, filters both known and unknown queries by q,
-    then computes balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
+    then computes balanced accuracy = (macro_known_accept_rate + macro_unknown_reject_rate) / 2
 
     Args:
         known_query_emb: Embeddings of known validation individuals
-        known_query_labels: IDs of known queries (for verifying correct match)
+        known_query_labels: Class labels of known queries (for verifying correct match)
         known_query_quality: Quality scores for known queries
         unknown_query_emb: Embeddings of unknown individuals
         unknown_query_quality: Quality scores for unknown individuals
         gallery_emb: Training gallery embeddings
-        gallery_labels: Training gallery IDs
+        gallery_labels: Training gallery class labels
         distance_threshold: Distance threshold (accept if < threshold)
         quality_thresholds: List of quality thresholds to evaluate (default 0.0-0.5)
+        unknown_query_labels: Individual IDs for unknown queries (for macro-averaging)
 
     Returns:
         Dict mapping "q>=X" to metrics dict with:
-        - balanced_accuracy: (known_accept_rate + unknown_reject_rate) / 2
-        - known_accept_rate: Fraction of known queries accepted AND correctly matched
-        - unknown_reject_rate: Fraction of unknown queries rejected
+        - balanced_accuracy: (known_accept_rate + unknown_reject_rate) / 2 (macro-averaged)
+        - known_accept_rate: Mean of per-individual acceptance rates
+        - unknown_reject_rate: Mean of per-individual rejection rates
         - f1_score: F1 for known class
-        - n_known: Number of known queries at this threshold
-        - n_unknown: Number of unknown queries at this threshold
+        - n_known_samples: Number of known query samples at this threshold
+        - n_unknown_samples: Number of unknown query samples at this threshold
+        - n_known_individuals: Number of known individuals at this threshold
+        - n_unknown_individuals: Number of unknown individuals at this threshold
     """
     if quality_thresholds is None:
         quality_thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 
     known_query_quality = np.array(known_query_quality)
     unknown_query_quality = np.array(unknown_query_quality)
+    if unknown_query_labels is not None:
+        unknown_query_labels = np.array(unknown_query_labels)
 
     # Normalize embeddings once
     if gallery_emb.size(0) > 0:
@@ -1171,65 +1180,120 @@ def evaluate_open_set_balanced(
         distances = torch.cdist(unknown_query_emb, gallery_emb, p=2)
         unknown_min_distances = distances.min(dim=1).values
 
+    # Convert known_query_labels to numpy for grouping
+    if isinstance(known_query_labels, torch.Tensor):
+        known_query_labels_np = known_query_labels.cpu().numpy()
+    else:
+        known_query_labels_np = np.array(known_query_labels)
+
     results = {}
     for q_thresh in quality_thresholds:
         # Filter by quality threshold
         known_mask = known_query_quality >= q_thresh
         unknown_mask = unknown_query_quality >= q_thresh
 
-        n_known = int(known_mask.sum())
-        n_unknown = int(unknown_mask.sum())
+        n_known_samples = int(known_mask.sum())
+        n_unknown_samples = int(unknown_mask.sum())
 
         result = {
             'balanced_accuracy': 0.5,
             'known_accept_rate': 0.0,
             'unknown_reject_rate': 1.0,
             'f1_score': 0.0,
-            'n_known': n_known,
-            'n_unknown': n_unknown
+            'n_known_samples': n_known_samples,
+            'n_unknown_samples': n_unknown_samples,
+            'n_known_individuals': 0,
+            'n_unknown_individuals': 0
         }
 
         if gallery_emb.size(0) == 0:
             results[f"q>={q_thresh}"] = result
             continue
 
-        # Evaluate known queries at this quality threshold
-        known_accepted_correct = 0
-        if n_known > 0 and known_min_distances is not None:
-            for i in np.where(known_mask)[0]:
-                if known_min_distances[i].item() < distance_threshold:
-                    # Accepted - check if correct match
-                    if known_predicted_labels[i].item() == known_query_labels[i].item():
-                        known_accepted_correct += 1
-            known_accept_rate = known_accepted_correct / n_known
-        else:
-            known_accept_rate = 0.0
+        # --- MACRO-AVERAGE for known individuals ---
+        # Group by individual, compute per-individual acceptance rate
+        per_individual_accept = []
+        known_accepted_correct_total = 0  # For F1 calculation
 
-        # Evaluate unknown queries at this quality threshold
-        unknown_rejected = 0
-        if n_unknown > 0 and unknown_min_distances is not None:
+        if n_known_samples > 0 and known_min_distances is not None:
+            known_indices = np.where(known_mask)[0]
+            unique_known_individuals = np.unique(known_query_labels_np[known_indices])
+
+            for ind_label in unique_known_individuals:
+                # Get indices for this individual within the quality-filtered set
+                ind_mask = (known_query_labels_np == ind_label) & known_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # Count accepted AND correctly matched for this individual
+                accepted_correct = 0
+                for i in ind_indices:
+                    if known_min_distances[i].item() < distance_threshold:
+                        if known_predicted_labels[i].item() == known_query_labels_np[i]:
+                            accepted_correct += 1
+
+                per_individual_accept.append(accepted_correct / len(ind_indices))
+                known_accepted_correct_total += accepted_correct
+
+            result['n_known_individuals'] = len(per_individual_accept)
+
+        macro_known_accept_rate = np.mean(per_individual_accept) if per_individual_accept else 0.0
+
+        # --- MACRO-AVERAGE for unknown individuals ---
+        # Group by individual, compute per-individual rejection rate
+        per_individual_reject = []
+        unknown_rejected_total = 0  # For F1 calculation
+
+        if n_unknown_samples > 0 and unknown_min_distances is not None and unknown_query_labels is not None:
+            unknown_indices = np.where(unknown_mask)[0]
+            unique_unknown_individuals = np.unique(unknown_query_labels[unknown_indices])
+
+            for ind_id in unique_unknown_individuals:
+                # Get indices for this individual within the quality-filtered set
+                ind_mask = (unknown_query_labels == ind_id) & unknown_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # Count rejected (distance >= threshold) for this individual
+                rejected = 0
+                for i in ind_indices:
+                    if unknown_min_distances[i].item() >= distance_threshold:
+                        rejected += 1
+
+                per_individual_reject.append(rejected / len(ind_indices))
+                unknown_rejected_total += rejected
+
+            result['n_unknown_individuals'] = len(per_individual_reject)
+
+        elif n_unknown_samples > 0 and unknown_min_distances is not None:
+            # Fallback to micro-averaging if unknown_query_labels not provided
             filtered_distances = unknown_min_distances[torch.tensor(unknown_mask)]
-            unknown_rejected = int((filtered_distances >= distance_threshold).sum().item())
-            unknown_reject_rate = unknown_rejected / n_unknown
-        else:
-            unknown_reject_rate = 1.0
+            unknown_rejected_total = int((filtered_distances >= distance_threshold).sum().item())
+            per_individual_reject = [unknown_rejected_total / n_unknown_samples] if n_unknown_samples > 0 else []
+            result['n_unknown_individuals'] = 1  # Treat as single group
 
-        # Compute balanced accuracy
-        balanced_accuracy = (known_accept_rate + unknown_reject_rate) / 2
+        macro_unknown_reject_rate = np.mean(per_individual_reject) if per_individual_reject else 1.0
 
-        # Confusion matrix for F1
-        tp = known_accepted_correct
-        fn = n_known - known_accepted_correct
-        tn = unknown_rejected
-        fp = n_unknown - unknown_rejected
+        # Compute balanced accuracy from macro-averaged rates
+        balanced_accuracy = (macro_known_accept_rate + macro_unknown_reject_rate) / 2
+
+        # Confusion matrix for F1 (using sample counts for F1 consistency)
+        tp = known_accepted_correct_total
+        fn = n_known_samples - known_accepted_correct_total
+        tn = unknown_rejected_total
+        fp = n_unknown_samples - unknown_rejected_total
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
         result['balanced_accuracy'] = float(balanced_accuracy)
-        result['known_accept_rate'] = float(known_accept_rate)
-        result['unknown_reject_rate'] = float(unknown_reject_rate)
+        result['known_accept_rate'] = float(macro_known_accept_rate)
+        result['unknown_reject_rate'] = float(macro_unknown_reject_rate)
         result['f1_score'] = float(f1)
 
         results[f"q>={q_thresh}"] = result
