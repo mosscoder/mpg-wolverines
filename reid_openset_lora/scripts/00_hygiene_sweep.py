@@ -3,15 +3,15 @@
 Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + ArcFace with LoRA
 
 Extends reid_openset_arcface with LoRA-adapted backbone:
-1. Adds LoRA adapters to query, key, and value projections in ViT attention layers
+1. Adds LoRA adapters to attention (q/k/v_proj) and MLP (up/down_proj) layers
 2. At each epoch, calibrate optimal distance threshold using validation set
 3. Apply threshold to rare/unknown individuals from the broader dataset
 4. Measure Correct Flag Rate - proportion of unknowns correctly rejected
 
 Key differences from reid_openset_arcface:
-- Backbone: LoRA adapters (~150K params) instead of frozen
-- Target modules: query, key, value in ViT attention
-- Trainable params: ~250K (LoRA + head) vs ~100K (head only)
+- Backbone: LoRA adapters (~2.4M params) instead of frozen
+- Target modules: q_proj, k_proj, v_proj (attention) + up_proj, down_proj (MLP)
+- Trainable params: ~2.5M (LoRA + head) vs ~100K (head only)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
 Distributed across 24 SLURM jobs (12 configs/job).
@@ -341,7 +341,7 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
 
     Architecture: DINOv3 with LoRA -> 768-d CLS -> EmbeddingHead (768->128) -> ArcFace
 
-    LoRA is applied to query, key, and value projections in the ViT attention layers,
+    LoRA is applied to attention (q/k/v_proj) and MLP (up/down_proj) layers,
     allowing efficient fine-tuning with minimal additional parameters.
 
     Returns:
@@ -349,12 +349,12 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
     """
     backbone = AutoModel.from_pretrained("facebook/dinov3-vitb16-pretrain-lvd1689m")
 
-    # Configure LoRA for ViT attention layers
-    # DINOv2/v3 uses "query", "key", "value" naming (not q_proj/k_proj/v_proj)
+    # Configure LoRA for ViT attention and MLP layers
+    # DINOv3 module names: attention (q/k/v_proj), MLP (up/down_proj)
     lora_config = LoraConfig(
         r=LORA_R,
         lora_alpha=LORA_ALPHA,
-        target_modules=["query", "key", "value"],  # DINOv2/v3 attention projections
+        target_modules=["q_proj", "k_proj", "v_proj", "up_proj", "down_proj"],
         lora_dropout=LORA_DROPOUT,
         bias="none",
         task_type=None  # Generic feature extraction
