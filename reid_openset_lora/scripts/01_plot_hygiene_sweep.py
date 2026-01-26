@@ -898,20 +898,19 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
     """Create faceted figure showing recall@1 curves over epochs.
 
     Grid: 6 rows (gallery_size) × 6 columns (hygiene threshold)
-    Each facet shows lines for 8 seeds × 6 query thresholds
-    Color by query threshold, seeds share color with varying shades.
+    Each facet shows 8 lines (one per seed) for query threshold >= 0.3.
     """
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     thresholds = sorted(results.get_unique('threshold'))
-    query_thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+    q_key = "q>=0.3"
 
     n_rows, n_cols = len(gallery_sizes), len(thresholds)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
 
-    # 6 distinct colors for query thresholds
-    base_colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(query_thresholds)))
+    # 8 distinct colors for seeds
+    seed_colors = plt.cm.tab10(np.linspace(0, 0.8, 8))
 
     for i, gallery_size in enumerate(gallery_sizes):
         for j, threshold in enumerate(thresholds):
@@ -923,16 +922,12 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
                 history = r.get('epoch_history', [])
                 epochs = [h['epoch'] for h in history]
 
-                for q_idx, q_thresh in enumerate(query_thresholds):
-                    q_key = f"q>={q_thresh}"
-                    recall_values = [
-                        h['query_quality_metrics'][q_key]['recall_at_1']
-                        for h in history
-                    ]
-                    # Vary alpha by seed (0.3 to 0.9)
-                    alpha = 0.3 + (seed / 7) * 0.6
-                    ax.plot(epochs, recall_values, color=base_colors[q_idx],
-                            alpha=alpha, linewidth=1)
+                recall_values = [
+                    h['query_quality_metrics'][q_key]['recall_at_1']
+                    for h in history
+                ]
+                ax.plot(epochs, recall_values, color=seed_colors[seed],
+                        alpha=0.8, linewidth=1)
 
             # Facet labels
             if i == 0:
@@ -943,17 +938,17 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
             ax.grid(True, alpha=0.3)
             ax.set_ylim(0, 1)
 
-    # Legend for query thresholds
+    # Legend for seeds
     legend_elements = [
-        Line2D([0], [0], color=base_colors[i], label=f'q>={q:.1f}', linewidth=2)
-        for i, q in enumerate(query_thresholds)
+        Line2D([0], [0], color=seed_colors[s], label=f'seed {s}', linewidth=2)
+        for s in range(8)
     ]
     fig.legend(handles=legend_elements, loc='upper right', fontsize=9,
-               title='Query Quality')
+               title='Seed')
 
     fig.supxlabel('Epoch', fontsize=12)
     fig.supylabel('Recall@1', fontsize=12)
-    fig.suptitle('Validation Recall@1 by Configuration and Query Quality', fontsize=14, y=1.01)
+    fig.suptitle('Validation Recall@1 (q>=0.3) by Configuration', fontsize=14, y=1.01)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
