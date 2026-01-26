@@ -462,8 +462,8 @@ def plot_recall_strategies(results: ResultsCollection, output_path: str):
     all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
     all_ci_upper = [v for s in strategies.values() for v in s['ci_upper']]
     if all_ci_lower and all_ci_upper:
-        y_min = np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05
-        y_max = np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05
+        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
+        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
         ax.set_ylim(y_min, y_max)
         ax.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
@@ -589,8 +589,8 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
     all_ci_lower = [v for s in strategies.values() for v in s['ci_lower']]
     all_ci_upper = [v for s in strategies.values() for v in s['ci_upper']]
     if all_ci_lower and all_ci_upper:
-        y_min = np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05
-        y_max = np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05
+        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
+        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
         ax1.set_ylim(y_min, y_max)
         ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
