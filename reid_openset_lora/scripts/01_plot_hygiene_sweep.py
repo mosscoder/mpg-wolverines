@@ -894,23 +894,24 @@ def print_summary_table(results: ResultsCollection):
               f"BA={best_data['mean']:.4f}")
 
 
-def plot_training_loss_curves(results: ResultsCollection, output_path: str):
-    """Create faceted figure showing training and validation loss curves over epochs.
+def plot_recall_curves(results: ResultsCollection, output_path: str):
+    """Create faceted figure showing recall@1 curves over epochs.
 
-    Grid: 6 rows (gallery_size) × 6 columns (threshold)
-    Each facet shows 16 lines (8 seeds × 2 loss types: train in blue, val in orange)
+    Grid: 6 rows (gallery_size) × 6 columns (hygiene threshold)
+    Each facet shows lines for 8 seeds × 6 query thresholds
+    Color by query threshold, seeds share color with varying shades.
     """
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 
     n_rows, n_cols = len(gallery_sizes), len(thresholds)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
 
-    # Different color maps for train vs val
-    train_colors = plt.cm.Blues(np.linspace(0.4, 0.9, 8))
-    val_colors = plt.cm.Oranges(np.linspace(0.4, 0.9, 8))
+    # 6 distinct colors for query thresholds
+    base_colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(query_thresholds)))
 
     for i, gallery_size in enumerate(gallery_sizes):
         for j, threshold in enumerate(thresholds):
@@ -921,11 +922,17 @@ def plot_training_loss_curves(results: ResultsCollection, output_path: str):
                 seed = r['seed']
                 history = r.get('epoch_history', [])
                 epochs = [h['epoch'] for h in history]
-                train_losses = [h['train_loss'] for h in history]
-                val_losses = [h['val_loss'] for h in history]
 
-                ax.plot(epochs, train_losses, color=train_colors[seed], alpha=0.7, linewidth=1)
-                ax.plot(epochs, val_losses, color=val_colors[seed], alpha=0.7, linewidth=1)
+                for q_idx, q_thresh in enumerate(query_thresholds):
+                    q_key = f"q>={q_thresh}"
+                    recall_values = [
+                        h['query_quality_metrics'][q_key]['recall_at_1']
+                        for h in history
+                    ]
+                    # Vary alpha by seed (0.3 to 0.9)
+                    alpha = 0.3 + (seed / 7) * 0.6
+                    ax.plot(epochs, recall_values, color=base_colors[q_idx],
+                            alpha=alpha, linewidth=1)
 
             # Facet labels
             if i == 0:
@@ -934,18 +941,19 @@ def plot_training_loss_curves(results: ResultsCollection, output_path: str):
                 ax.set_ylabel(f'gallery={gallery_size}', fontsize=9)
 
             ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1)
 
-    # Legend
+    # Legend for query thresholds
     legend_elements = [
-        Line2D([0], [0], color='steelblue', label='Train'),
-        Line2D([0], [0], color='darkorange', label='Validation')
+        Line2D([0], [0], color=base_colors[i], label=f'q>={q:.1f}', linewidth=2)
+        for i, q in enumerate(query_thresholds)
     ]
-    fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
+    fig.legend(handles=legend_elements, loc='upper right', fontsize=9,
+               title='Query Quality')
 
-    # Shared axis labels
     fig.supxlabel('Epoch', fontsize=12)
-    fig.supylabel('Loss', fontsize=12)
-    fig.suptitle('Training and Validation Loss Curves by Configuration', fontsize=14, y=1.01)
+    fig.supylabel('Recall@1', fontsize=12)
+    fig.suptitle('Validation Recall@1 by Configuration and Query Quality', fontsize=14, y=1.01)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -1027,8 +1035,8 @@ def main():
     create_closed_set_figure(results, args.output_dir)
     create_open_set_figure(results, args.output_dir)
 
-    # Faceted loss figure (train + validation)
-    plot_training_loss_curves(results, os.path.join(args.output_dir, 'loss_curves.png'))
+    # Faceted recall@1 curves by query quality threshold
+    plot_recall_curves(results, os.path.join(args.output_dir, 'recall_curves.png'))
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
 
