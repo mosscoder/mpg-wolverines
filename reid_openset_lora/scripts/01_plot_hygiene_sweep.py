@@ -894,6 +894,64 @@ def print_summary_table(results: ResultsCollection):
               f"BA={best_data['mean']:.4f}")
 
 
+def plot_training_loss_curves(results: ResultsCollection, output_path: str):
+    """Create faceted figure showing training and validation loss curves over epochs.
+
+    Grid: 6 rows (gallery_size) × 6 columns (threshold)
+    Each facet shows 16 lines (8 seeds × 2 loss types: train in blue, val in orange)
+    """
+    from matplotlib.lines import Line2D
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    thresholds = sorted(results.get_unique('threshold'))
+
+    n_rows, n_cols = len(gallery_sizes), len(thresholds)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
+
+    # Different color maps for train vs val
+    train_colors = plt.cm.Blues(np.linspace(0.4, 0.9, 8))
+    val_colors = plt.cm.Oranges(np.linspace(0.4, 0.9, 8))
+
+    for i, gallery_size in enumerate(gallery_sizes):
+        for j, threshold in enumerate(thresholds):
+            ax = axes[i, j]
+            filtered = results.filter(threshold=threshold, gallery_size=gallery_size)
+
+            for r in filtered:
+                seed = r['seed']
+                history = r.get('epoch_history', [])
+                epochs = [h['epoch'] for h in history]
+                train_losses = [h['train_loss'] for h in history]
+                val_losses = [h['val_loss'] for h in history]
+
+                ax.plot(epochs, train_losses, color=train_colors[seed], alpha=0.7, linewidth=1)
+                ax.plot(epochs, val_losses, color=val_colors[seed], alpha=0.7, linewidth=1)
+
+            # Facet labels
+            if i == 0:
+                ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
+            if j == 0:
+                ax.set_ylabel(f'gallery={gallery_size}', fontsize=9)
+
+            ax.grid(True, alpha=0.3)
+
+    # Legend
+    legend_elements = [
+        Line2D([0], [0], color='steelblue', label='Train'),
+        Line2D([0], [0], color='darkorange', label='Validation')
+    ]
+    fig.legend(handles=legend_elements, loc='upper right', fontsize=10)
+
+    # Shared axis labels
+    fig.supxlabel('Epoch', fontsize=12)
+    fig.supylabel('Loss', fontsize=12)
+    fig.suptitle('Training and Validation Loss Curves by Configuration', fontsize=14, y=1.01)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_path}")
+
+
 def print_trainable_params_summary(results: ResultsCollection):
     """Print summary of trainable parameters from LoRA configuration."""
     print("\n" + "=" * 60)
@@ -968,6 +1026,9 @@ def main():
     # Generate combined figures
     create_closed_set_figure(results, args.output_dir)
     create_open_set_figure(results, args.output_dir)
+
+    # Faceted loss figure (train + validation)
+    plot_training_loss_curves(results, os.path.join(args.output_dir, 'loss_curves.png'))
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
 
