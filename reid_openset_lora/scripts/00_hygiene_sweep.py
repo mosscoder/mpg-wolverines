@@ -79,7 +79,7 @@ LORA_DROPOUT = 0.1
 # ArcFace hyperparameters
 ARCFACE_MARGIN = 0.5
 ARCFACE_SCALE = 64
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0005
 EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
