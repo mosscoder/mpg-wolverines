@@ -3,14 +3,14 @@
 Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + ArcFace with LoRA
 
 Extends reid_openset_arcface with LoRA-adapted backbone:
-1. Adds LoRA adapters to q_proj, k_proj, and v_proj in ViT attention layers
+1. Adds LoRA adapters to query, key, and value projections in ViT attention layers
 2. At each epoch, calibrate optimal distance threshold using validation set
 3. Apply threshold to rare/unknown individuals from the broader dataset
 4. Measure Correct Flag Rate - proportion of unknowns correctly rejected
 
 Key differences from reid_openset_arcface:
 - Backbone: LoRA adapters (~150K params) instead of frozen
-- Target modules: q_proj, k_proj, v_proj in ViT attention
+- Target modules: query, key, value in ViT attention
 - Trainable params: ~250K (LoRA + head) vs ~100K (head only)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
@@ -341,7 +341,7 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
 
     Architecture: DINOv3 with LoRA -> 768-d CLS -> EmbeddingHead (768->128) -> ArcFace
 
-    LoRA is applied to q_proj, k_proj, and v_proj in the ViT attention layers,
+    LoRA is applied to query, key, and value projections in the ViT attention layers,
     allowing efficient fine-tuning with minimal additional parameters.
 
     Returns:
@@ -350,10 +350,11 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
     backbone = AutoModel.from_pretrained("facebook/dinov3-vitb16-pretrain-lvd1689m")
 
     # Configure LoRA for ViT attention layers
+    # DINOv2/v3 uses "query", "key", "value" naming (not q_proj/k_proj/v_proj)
     lora_config = LoraConfig(
         r=LORA_R,
         lora_alpha=LORA_ALPHA,
-        target_modules=["q_proj", "k_proj", "v_proj"],  # ViT attention projections
+        target_modules=["query", "key", "value"],  # DINOv2/v3 attention projections
         lora_dropout=LORA_DROPOUT,
         bias="none",
         task_type=None  # Generic feature extraction
@@ -362,6 +363,14 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
     # Apply LoRA to backbone
     backbone = get_peft_model(backbone, lora_config)
     backbone.print_trainable_parameters()  # Log for verification
+
+    # Sanity check: verify LoRA actually attached to something
+    trainable_names = [n for n, p in backbone.named_parameters() if p.requires_grad]
+    if not any("lora" in n.lower() for n in trainable_names):
+        raise ValueError(
+            "LoRA failed to attach! Check target_modules names against model.named_modules(). "
+            f"Trainable params found: {trainable_names[:5]}..."
+        )
 
     # Count LoRA parameters
     lora_params = count_trainable_parameters(backbone)
@@ -383,8 +392,13 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
             return self.head(features)
 
         def get_trainable_parameters(self):
-            """Return all trainable parameters (LoRA + head)."""
-            return list(self.backbone.parameters()) + list(self.head.parameters())
+            """Return only trainable parameters (LoRA adapters + head).
+
+            Filters backbone.parameters() for requires_grad=True to avoid
+            passing frozen params to optimizer (wastes iteration time).
+            """
+            backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
+            return backbone_params + list(self.head.parameters())
 
     model = DINOv3LoRAModel(backbone, head)
 

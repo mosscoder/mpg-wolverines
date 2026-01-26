@@ -15,7 +15,7 @@
 #
 # Key differences from reid_openset_arcface:
 # - Backbone: LoRA adapters (r=16, alpha=32) instead of frozen
-# - Target modules: q_proj, k_proj, v_proj in ViT attention
+# - Target modules: query, key, value in ViT attention
 # - Trainable params: ~250K (LoRA + head) vs ~100K (head only)
 # - Optimizer: AdamW with weight_decay=0.01
 
