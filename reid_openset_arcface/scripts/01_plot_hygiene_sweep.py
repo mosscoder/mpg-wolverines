@@ -844,6 +844,67 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
     print(f"Saved open-set figure: {output_path}")
 
 
+def plot_recall_curves(results: ResultsCollection, output_path: str):
+    """Create faceted figure showing recall@1 curves over epochs.
+
+    Grid: 6 rows (gallery_size) × 6 columns (hygiene threshold)
+    Each facet shows 8 lines (one per seed) for query threshold >= 0.3.
+    """
+    from matplotlib.lines import Line2D
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    thresholds = sorted(results.get_unique('threshold'))
+    q_key = "q>=0.3"
+
+    n_rows, n_cols = len(gallery_sizes), len(thresholds)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
+
+    # 8 distinct colors for seeds
+    seed_colors = plt.cm.tab10(np.linspace(0, 0.8, 8))
+
+    for i, gallery_size in enumerate(gallery_sizes):
+        for j, threshold in enumerate(thresholds):
+            ax = axes[i, j]
+            filtered = results.filter(threshold=threshold, gallery_size=gallery_size)
+
+            for r in filtered:
+                seed = r['seed']
+                history = r.get('epoch_history', [])
+                epochs = [h['epoch'] for h in history]
+
+                recall_values = [
+                    h['query_quality_metrics'][q_key]['recall_at_1']
+                    for h in history
+                ]
+                ax.plot(epochs, recall_values, color=seed_colors[seed],
+                        alpha=0.8, linewidth=1)
+
+            # Facet labels
+            if i == 0:
+                ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
+            if j == 0:
+                ax.set_ylabel(f'gallery={gallery_size}', fontsize=9)
+
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1)
+
+    # Legend for seeds
+    legend_elements = [
+        Line2D([0], [0], color=seed_colors[s], label=f'seed {s}', linewidth=2)
+        for s in range(8)
+    ]
+    fig.legend(handles=legend_elements, loc='upper right', fontsize=9,
+               title='Seed')
+
+    fig.supxlabel('Epoch', fontsize=12)
+    fig.supylabel('Recall@1 (val)', fontsize=12)
+    fig.suptitle('Validation Recall@1 (q>=0.3) by Configuration', fontsize=14, y=1.01)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_path}")
+
+
 def print_summary_table(results: ResultsCollection):
     """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 80)
@@ -942,6 +1003,9 @@ def main():
     # Generate combined figures
     create_closed_set_figure(results, args.output_dir)
     create_open_set_figure(results, args.output_dir)
+
+    # Faceted recall@1 curves by query quality threshold
+    plot_recall_curves(results, os.path.join(args.output_dir, 'recall_curves.png'))
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
 
