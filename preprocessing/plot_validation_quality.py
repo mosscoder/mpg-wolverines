@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Plot quality score distribution for validation data, faceted by individual.
-Includes both known individuals and unknown wolverines.
+Includes both known individuals (validation samples) and open-set unknowns (all samples).
 """
 
 import os
@@ -26,46 +26,61 @@ def main():
     with open(args.config, 'r') as f:
         config = json.load(f)
 
-    # Load dataset
+    # Load dataset with Arrow columnar access for efficiency
     dataset = load_dataset("kdoherty/wolverines", "reidentification", split="train")
 
-    # Collect all validation indices from known individuals
-    known_validation_indices = set()
+    # Use Arrow columnar access (fast)
+    all_ids = np.array(dataset['id'], dtype=object)
+    all_quality = np.array(dataset['pelage_score'], dtype=np.float32)
+
+    valid_individuals_set = set(config['valid_individuals'])
     records = []
 
-    # Extract validation samples for known individuals
+    # Extract validation samples for closed-set individuals
     for ind_id in config['valid_individuals']:
         indices = config['validation_indices'][ind_id]['indices']
-        known_validation_indices.update(indices)
         for idx in indices:
-            sample = dataset[idx]
             records.append({
                 'individual': ind_id,
-                'pelage_score': sample['pelage_score']
+                'pelage_score': all_quality[idx],
+                'set_type': 'closed-set'
             })
 
-    # Find and add unknown wolverines (id == 'unknown')
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
-        if sample['id'] == 'unknown':
+    # Find open-set individuals: those NOT in valid_individuals
+    # Each gets their own facet with their actual name
+    unique_ids = np.unique(all_ids)
+    open_set_individuals = [ind_id for ind_id in unique_ids if ind_id not in valid_individuals_set]
+
+    for ind_id in open_set_individuals:
+        mask = all_ids == ind_id
+        quality_scores = all_quality[mask]
+        for q in quality_scores:
             records.append({
-                'individual': 'unknown',
-                'pelage_score': sample['pelage_score']
+                'individual': ind_id,
+                'pelage_score': q,
+                'set_type': 'open-set'
             })
 
     df = pd.DataFrame(records)
 
-    # Order individuals: known first (sorted), then unknown last
-    individual_order = sorted(config['valid_individuals']) + ['unknown']
-    individual_order = [ind for ind in individual_order if ind in df['individual'].unique()]
+    print(f"Closed-set individuals: {len(config['valid_individuals'])}")
+    print(f"Open-set individuals: {len(open_set_individuals)}")
+    for ind_id in open_set_individuals:
+        count = (df['individual'] == ind_id).sum()
+        print(f"  {ind_id}: {count} samples")
+
+    # Order individuals: closed-set first (sorted), then open-set (sorted)
+    individual_order = sorted(config['valid_individuals']) + sorted(open_set_individuals)
     df['individual'] = pd.Categorical(df['individual'], categories=individual_order, ordered=True)
 
     # Create faceted histogram with independent y-axis scales
-    g = sns.FacetGrid(df, col='individual', col_wrap=3, height=3, sharey=False)
+    n_individuals = len(individual_order)
+    col_wrap = 4 if n_individuals > 6 else 3
+    g = sns.FacetGrid(df, col='individual', col_wrap=col_wrap, height=2.5, sharey=False)
     g.map(plt.hist, 'pelage_score', bins=20, edgecolor='black', alpha=0.7)
     g.set_xlabels('Quality Score')
     g.set_ylabels('Count')
-    g.fig.suptitle('Validation Quality Score Distribution by Individual', y=1.02)
+    g.fig.suptitle('Quality Score Distribution by Individual', y=1.02)
     g.tight_layout()
 
     # Save
