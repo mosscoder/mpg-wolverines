@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + LoRA + T-Norm
+Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + ArcFace + T-Norm
 
-Combines LoRA-adapted backbone with T-Norm (Test Normalization) for score calibration:
-1. Adds LoRA adapters to attention (q/k/v_proj) and MLP (up/down_proj) layers
+Uses frozen DINOv3 backbone with T-Norm (Test Normalization) for score calibration:
+1. Freezes DINOv3 backbone (only trainable projection head)
 2. Computes T-Norm statistics (mean, std) from imposter distributions in gallery
 3. Normalizes similarity scores to Z-scores for better open-set discrimination
 4. Calibrates threshold on normalized scores using LOO within gallery
 5. Measures Balanced Accuracy = (Known Accept Rate + Unknown Reject Rate) / 2
 
-Key differences from reid_openset_lora:
+Key differences from reid_openset_arcface:
 - Score normalization: T-Norm Z-scores instead of raw cosine similarity
 - Threshold scale: Z-scores (e.g., 2.5, 3.8) vs cosine (e.g., 0.3, 0.4)
 - Better handling of low-quality gallery templates
-
-Key differences from reid_openset_arcface:
-- Backbone: LoRA adapters (~2.4M params) instead of frozen
-- Trainable params: ~2.5M (LoRA + head) vs ~100K (head only)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
 Distributed across 24 SLURM jobs (12 configs/job).
@@ -37,7 +33,6 @@ from datasets import load_dataset
 import torchvision.transforms as T
 from PIL import Image
 from transformers import AutoModel
-from peft import get_peft_model, LoraConfig
 
 # Control parallelism and set HuggingFace cache location
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -47,7 +42,6 @@ os.environ["HF_HOME"] = "/data/hf_cache"
 # Add project root to path
 sys.path.append('.')
 
-from utils.dataset import set_all_seeds
 from utils.triplet import (
     ArcFaceLoss,
     PKBatchSampler,
@@ -57,6 +51,16 @@ from utils.training import check_result_exists
 
 import datasets
 datasets.config.NUM_PROC = 1
+
+
+def set_all_seeds(seed: int):
+    """Set all random seeds for reproducibility."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class EmbeddingHead(nn.Module):
@@ -73,11 +77,6 @@ class EmbeddingHead(nn.Module):
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
-
-# Fixed LoRA hyperparameters
-LORA_R = 16
-LORA_ALPHA = 32
-LORA_DROPOUT = 0.1
 
 # ArcFace hyperparameters
 ARCFACE_MARGIN = 0.5
@@ -338,72 +337,44 @@ def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
+def create_dinov3_arcface_model(embedding_dim: int = 128, device="cuda"):
     """
-    Create DINOv3 backbone with LoRA adapters and trainable projection head.
+    Create DINOv3 backbone with trainable projection head.
 
-    Architecture: DINOv3 with LoRA -> 768-d CLS -> EmbeddingHead (768->128) -> ArcFace
+    Architecture: Frozen DINOv3 -> 768-d CLS -> EmbeddingHead (768->128) -> ArcFace
 
-    LoRA is applied to attention (q/k/v_proj) and MLP (up/down_proj) layers,
-    allowing efficient fine-tuning with minimal additional parameters.
+    The trainable projection head allows embeddings to improve during training,
+    while keeping the backbone frozen for efficiency.
 
     Returns:
-        Tuple of (model, embedding_dim, trainable_params_dict)
+        Tuple of (model, embedding_dim)
     """
     backbone = AutoModel.from_pretrained("facebook/dinov3-vitb16-pretrain-lvd1689m")
 
-    # Configure LoRA for ViT attention and MLP layers
-    # DINOv3 module names: attention (q/k/v_proj), MLP (up/down_proj)
-    lora_config = LoraConfig(
-        r=LORA_R,
-        lora_alpha=LORA_ALPHA,
-        target_modules=["q_proj", "k_proj", "v_proj", "up_proj", "down_proj"],
-        lora_dropout=LORA_DROPOUT,
-        bias="none",
-        task_type=None  # Generic feature extraction
-    )
+    # Freeze backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval()
 
-    # Apply LoRA to backbone
-    backbone = get_peft_model(backbone, lora_config)
-    backbone.print_trainable_parameters()  # Log for verification
-
-    # Sanity check: verify LoRA actually attached to something
-    trainable_names = [n for n, p in backbone.named_parameters() if p.requires_grad]
-    if not any("lora" in n.lower() for n in trainable_names):
-        raise ValueError(
-            "LoRA failed to attach! Check target_modules names against model.named_modules(). "
-            f"Trainable params found: {trainable_names[:5]}..."
-        )
-
-    # Count LoRA parameters
-    lora_params = count_trainable_parameters(backbone)
-
-    # Trainable projection head (768 -> 128 to match reid_hygiene_filter)
+    # Trainable projection head (768 -> 128)
     head = EmbeddingHead(input_dim=768, embedding_dim=embedding_dim)
-    head_params = count_trainable_parameters(head)
 
-    class DINOv3LoRAModel(nn.Module):
+    class DINOv3WithHead(nn.Module):
         def __init__(self, backbone, head):
             super().__init__()
             self.backbone = backbone
             self.head = head
 
         def forward(self, x):
-            # No torch.no_grad() - gradients flow through LoRA adapters
-            outputs = self.backbone(x)
-            features = outputs.last_hidden_state[:, 0, :]
-            return self.head(features)
+            with torch.no_grad():
+                outputs = self.backbone(x)
+                features = outputs.last_hidden_state[:, 0, :]
+            return self.head(features)  # Trainable transformation
 
         def get_trainable_parameters(self):
-            """Return only trainable parameters (LoRA adapters + head).
+            return self.head.parameters()
 
-            Filters backbone.parameters() for requires_grad=True to avoid
-            passing frozen params to optimizer (wastes iteration time).
-            """
-            backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
-            return backbone_params + list(self.head.parameters())
-
-    model = DINOv3LoRAModel(backbone, head)
+    model = DINOv3WithHead(backbone, head)
 
     # Move to device
     if isinstance(device, str):
@@ -421,17 +392,12 @@ def create_dinov3_lora_model(embedding_dim: int = 128, device="cuda"):
         else:
             device = torch.device("cpu")
 
-    trainable_params = {
-        'lora': lora_params,
-        'head': head_params,
-    }
-
-    return model.to(device), embedding_dim, trainable_params
+    return model.to(device), embedding_dim
 
 
 def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
-    """Train for one epoch with ArcFace loss and LoRA adapters."""
-    model.train()  # LoRA adapters and projection head are trainable
+    """Train for one epoch with ArcFace loss."""
+    model.train()  # Projection head is trainable
     criterion.train()  # ArcFace weights are trainable
     total_loss = 0
     num_batches = 0
@@ -440,7 +406,7 @@ def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
         images = images.to(device)
         labels = labels.to(device)
 
-        # Get embeddings (LoRA adapters + trainable head)
+        # Get embeddings (trainable head)
         embeddings = model(images)
 
         # Compute ArcFace loss
@@ -818,9 +784,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         print(f"Not enough training samples ({len(train_dataset)}) for PK batching")
         return None
 
-    # Create model with LoRA
+    # Create model with frozen backbone
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model, embedding_dim, trainable_params = create_dinov3_lora_model(device=device)
+    model, embedding_dim = create_dinov3_arcface_model(device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset
@@ -860,21 +826,23 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         scale=ARCFACE_SCALE
     ).to(device)
 
+    head_params = count_trainable_parameters(model.head)
     arcface_params = count_trainable_parameters(criterion)
-    trainable_params['arcface'] = arcface_params
-    trainable_params['total'] = trainable_params['lora'] + trainable_params['head'] + arcface_params
+    trainable_params = {
+        'head': head_params,
+        'arcface': arcface_params,
+        'total': head_params + arcface_params
+    }
 
-    print(f"Trainable parameters:")
-    print(f"  LoRA: {trainable_params['lora']:,}")
-    print(f"  Head: {trainable_params['head']:,}")
-    print(f"  ArcFace: {trainable_params['arcface']:,}")
+    print(f"  Model parameters (trainable):")
+    print(f"  Projection head: {trainable_params['head']:,}")
+    print(f"  ArcFace centers: {trainable_params['arcface']:,}")
     print(f"  Total: {trainable_params['total']:,}")
 
-    # Train LoRA adapters, projection head, and ArcFace class centers with AdamW
+    # Train projection head and ArcFace class centers with AdamW
     optimizer = torch.optim.AdamW(
         list(model.get_trainable_parameters()) + list(criterion.parameters()),
-        lr=LEARNING_RATE,
-        weight_decay=0.01
+        lr=LEARNING_RATE
     )
 
     # Training loop
@@ -935,16 +903,12 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'arcface_margin': ARCFACE_MARGIN,
             'arcface_scale': ARCFACE_SCALE,
             'embedding_dim': EMBEDDING_DIM,
-            'lora_r': LORA_R,
-            'lora_alpha': LORA_ALPHA,
-            'lora_dropout': LORA_DROPOUT,
             'optimizer': 'AdamW',
-            'weight_decay': 0.01,
             'scheduler': 'None (fixed LR)',
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,
-            'backbone': 'DINOv3-ViT-B/16 + LoRA',
+            'backbone': 'Frozen DINOv3-ViT-B/16',
             'score_normalization': 'T-Norm'
         },
         'trainable_params': trainable_params,
@@ -982,7 +946,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Open-Set DINOv3 + LoRA + T-Norm Gallery Hygiene Sweep')
+    parser = argparse.ArgumentParser(description='Open-Set DINOv3 + ArcFace + T-Norm Gallery Hygiene Sweep')
     parser.add_argument('--idx', type=int, required=True, help='Job index (0-23)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
@@ -994,7 +958,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 80)
-    print(f"Open-Set DINOv3 + LoRA + T-Norm Gallery Hygiene Sweep - Job {args.idx}")
+    print(f"Open-Set DINOv3 + ArcFace + T-Norm Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
     # Load dataset and config
@@ -1010,10 +974,10 @@ def main():
     # Show experiment info
     total_combinations = len(THRESHOLDS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
+    print(f"  Model: Frozen DINOv3 + Projection Head ({EMBEDDING_DIM}-d) + ArcFace")
     print(f"  Loss: ArcFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE})")
-    print(f"  LoRA: r={LORA_R}, alpha={LORA_ALPHA}, dropout={LORA_DROPOUT}")
     print(f"  Score Normalization: T-Norm (imposter cohort statistics)")
-    print(f"  Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay=0.01)")
+    print(f"  Optimizer: AdamW (lr={LEARNING_RATE}, default settings)")
     print(f"  Embedding: {EMBEDDING_DIM}-d (trainable projection from DINOv3 CLS)")
     print(f"  Thresholds: {THRESHOLDS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")

@@ -1,30 +1,23 @@
-# Open-Set Re-Identification with LoRA + T-Norm Score Normalization
+# Open-Set Re-Identification with T-Norm Score Normalization
 
-This experiment combines **LoRA-adapted backbone** from `reid_openset_lora` with **T-Norm (Test Normalization)** for improved open-set recognition.
+This experiment uses **frozen DINOv3 backbone** with **T-Norm (Test Normalization)** for improved open-set recognition.
 
 ## Overview
 
-This experiment combines two key enhancements:
+This experiment uses T-Norm score normalization to improve open-set re-identification:
 
-1. **LoRA Adapters**: Fine-tune DINOv3 backbone efficiently (~2.5M trainable params)
+1. **Frozen DINOv3 Backbone**: Efficient feature extraction (~100K trainable params in projection head only)
 2. **T-Norm Score Normalization**: Normalize similarity scores to Z-scores using imposter distribution statistics
 
 T-Norm normalizes similarity scores to Z-scores using statistics from imposter (negative) distributions in the gallery. This helps create more discriminative scores for distinguishing known individuals from unknown individuals.
 
-### Key Differences from `reid_openset_lora`
+### Key Differences from `reid_openset_arcface`
 
 1. **Score Normalization**: T-Norm Z-scores instead of raw cosine similarity
 2. **Threshold Scale**: Z-scores (e.g., 2.5, 3.8, 5.0) vs cosine (e.g., 0.3, 0.4, 0.5)
 3. **Better Handling**: More aggressive filtering of low-quality gallery templates
 4. **Statistical Properties**: Negatives are normalized to N(0,1) distribution
-
-### Key Differences from `reid_openset_arcface`
-
-1. **Backbone**: LoRA adapters (~2.4M params) instead of frozen backbone
-2. **Trainable Params**: ~2.5M (LoRA + head) vs ~100K (head only)
-3. **Optimizer**: AdamW with weight_decay=0.01 vs SGD with momentum=0.9
-4. **Learning Rate**: 0.0005 vs 0.001
-5. **Score Normalization**: T-Norm Z-scores instead of raw cosine similarity
+5. **Same Architecture**: Both use frozen DINOv3 with trainable projection head (~100K params)
 
 ## T-Norm Implementation
 
@@ -54,12 +47,11 @@ T-Norm normalizes similarity scores to Z-scores using statistics from imposter (
 - **Gallery Sizes**: [2, 4, 8, 16, 32, 64] (examples per individual)
 - **Seeds**: [0, 1, 2, 3, 4, 5, 6, 7]
 
-**Model**: DINOv3-ViT-B/16 + LoRA adapters + trainable projection head (768→128) + ArcFace loss
-- **LoRA Config**: r=16, alpha=32, dropout=0.1
-- **Target Modules**: q_proj, k_proj, v_proj, up_proj, down_proj
-- **Trainable Params**: ~2.5M (LoRA ~2.4M + head ~100K)
+**Model**: Frozen DINOv3-ViT-B/16 + trainable projection head (768→128) + ArcFace loss
+- **Backbone**: Frozen (no gradients)
+- **Trainable Params**: ~100K (projection head only)
 
-**Optimizer**: AdamW (lr=0.0005, weight_decay=0.01)
+**Optimizer**: AdamW (lr=0.0005, default settings)
 
 **Distributed**: 24 SLURM jobs (12 configs per job)
 
@@ -149,16 +141,15 @@ Each configuration saves a JSON file: `threshold={t:.2f}_gallery={g}_seed={s}.js
 
 ## Comparison with Baselines
 
-Compare LoRA + T-Norm results with:
+Compare T-Norm normalization with:
 - **`reid_openset_arcface`**: Frozen backbone + raw cosine similarity (baseline)
-- **`reid_openset_lora`**: LoRA-adapted backbone + raw cosine similarity (no T-Norm)
-- **`reid_openset_tnorm`**: LoRA-adapted backbone + T-Norm score normalization (this experiment)
+- **`reid_openset_tnorm`**: Frozen backbone + T-Norm score normalization (this experiment)
 
-Expected improvements from combining LoRA + T-Norm:
-- Higher Recall@1 from LoRA fine-tuning (better embeddings)
+Expected improvements from T-Norm:
 - Higher Balanced Accuracy from T-Norm (better open-set discrimination)
 - Better separation between known and unknown individuals
 - More robust to low-quality gallery images
+- Statistical interpretability of thresholds (Z-scores)
 
 ## References
 
