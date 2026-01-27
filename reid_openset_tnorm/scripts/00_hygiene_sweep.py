@@ -48,19 +48,16 @@ from utils.triplet import (
     compute_recall_at_k,
 )
 from utils.training import check_result_exists
+from utils.dataset import set_all_seeds
 
 import datasets
 datasets.config.NUM_PROC = 1
 
 
-def set_all_seeds(seed: int):
-    """Set all random seeds for reproducibility."""
-    import random
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+def build_metadata_cache(dataset):
+    """Build metadata cache using Arrow columnar access (optimized)."""
+    from utils.arrow_cache import build_metadata_cache_arrow
+    return build_metadata_cache_arrow(dataset)
 
 
 class EmbeddingHead(nn.Module):
@@ -138,73 +135,29 @@ def load_reidentification_dataset():
     return dataset
 
 
-def build_id_to_indices(dataset):
-    """Build individual ID to dataset indices mapping ONCE."""
-    print("Building ID to indices mapping...")
-    id_to_indices = {}
-    for idx, sample in enumerate(dataset):
-        ind_id = sample['id']
-        if ind_id not in id_to_indices:
-            id_to_indices[ind_id] = []
-        id_to_indices[ind_id].append(idx)
-    print(f"  Mapped {len(id_to_indices)} individuals")
-    return id_to_indices
 
 
-def filter_training_pool_by_quality(dataset, indices, threshold):
-    """
-    Return indices where pelage_score >= threshold.
-
-    Args:
-        dataset: HuggingFace dataset
-        indices: List of dataset indices to filter
-        threshold: Minimum pelage_score to include
-
-    Returns:
-        List of indices meeting the threshold
-    """
-    if threshold <= 0.0:
-        return indices  # No filtering needed for threshold 0.0
-
-    filtered = []
-    for idx in indices:
-        if dataset[idx]['pelage_score'] >= threshold:
-            filtered.append(idx)
-    return filtered
+def filter_training_pool_by_quality(metadata_cache, indices, threshold):
+    """Use vectorized filtering with cached quality scores."""
+    from utils.optimized_filters import filter_training_pool_by_quality_vectorized
+    return filter_training_pool_by_quality_vectorized(
+        metadata_cache['quality_scores'],
+        indices,
+        threshold
+    )
 
 
-def get_rare_individual_indices(dataset, valid_individuals: list, id_to_indices: dict,
-                                 quality_threshold: float = 0.0):
-    """
-    Get indices of individuals NOT in valid_individuals.
-    Filter by pelage_score >= quality_threshold (match gallery filtering).
-
-    Args:
-        dataset: HuggingFace dataset
-        valid_individuals: List of known individual IDs (used in training)
-        id_to_indices: Mapping from individual ID to dataset indices
-        quality_threshold: Minimum pelage_score to include
-
-    Returns:
-        Tuple of (rare_indices, rare_quality, rare_labels) lists
-    """
-    rare_indices = []
-    rare_quality = []
-    rare_labels = []
-
-    for ind_id, indices in id_to_indices.items():
-        if ind_id not in valid_individuals:
-            for idx in indices:
-                q = dataset[idx]['pelage_score']
-                if q >= quality_threshold:  # Match gallery threshold
-                    rare_indices.append(idx)
-                    rare_quality.append(q)
-                    rare_labels.append(ind_id)
-
-    return rare_indices, rare_quality, rare_labels
+def get_rare_individual_indices(metadata_cache, valid_individuals: list, quality_threshold: float = 0.0):
+    """Use vectorized operations with metadata cache."""
+    from utils.optimized_filters import get_rare_individual_indices_vectorized
+    return get_rare_individual_indices_vectorized(
+        metadata_cache,
+        valid_individuals,
+        quality_threshold
+    )
 
 
-def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, id_to_indices):
+def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, metadata_cache):
     """
     Create gallery/query split with filtered gallery.
 
@@ -220,6 +173,8 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     import random
 
     set_all_seeds(seed)
+
+    id_to_indices = metadata_cache['id_to_indices']
 
     print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
 
@@ -239,14 +194,14 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
         all_val_indices.extend(val_indices)
         dataset_info['query_samples_per_individual'][ind_id] = len(val_indices)
 
-        # Get all indices for this individual
+        # Get all indices for this individual (from cache)
         all_ind_indices = set(id_to_indices.get(ind_id, []))
 
         # Training candidates: exclude validation indices
         train_candidates = list(all_ind_indices - set(val_indices))
 
-        # FILTER by quality threshold
-        eligible_pool = filter_training_pool_by_quality(dataset, train_candidates, threshold)
+        # FILTER by quality threshold (VECTORIZED)
+        eligible_pool = filter_training_pool_by_quality(metadata_cache, train_candidates, threshold)
         dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
 
         # Sample from filtered pool
@@ -538,7 +493,7 @@ def apply_tnorm(query_emb, gallery_emb, mu, sigma):
 
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
-                                  transform, device, dataset, valid_individuals, id_to_indices,
+                                  transform, device, dataset, valid_individuals, metadata_cache,
                                   gallery_threshold, criterion, batch_size=32):
     """
     Evaluate model computing Recall@1 and open-set metrics with T-Norm.
@@ -588,9 +543,9 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     # Compute validation loss using ArcFace criterion
     val_loss = compute_validation_loss(query_embeddings, query_labels, criterion, device)
 
-    # Rare/Unknown
+    # Rare/Unknown (VECTORIZED)
     rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
-        dataset, valid_individuals, id_to_indices, quality_threshold=0.0
+        metadata_cache, valid_individuals, quality_threshold=0.0
     )
     if rare_indices:
         rare_emb, rare_quality_arr, rare_labels_arr = compute_rare_embeddings(
@@ -751,7 +706,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     return query_quality_metrics, open_set_metrics, val_loss
 
 
-def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
+def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, metadata_cache) -> dict:
     """Train one configuration and return results."""
     set_all_seeds(seed)
 
@@ -794,7 +749,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
     # Create filtered gallery dataset
     train_dataset, val_dataset, individual_to_class, dataset_info = create_filtered_gallery_dataset(
-        dataset, feasible_individuals, gallery_size, threshold, seed, config, id_to_indices
+        dataset, feasible_individuals, gallery_size, threshold, seed, config, metadata_cache
     )
 
     if train_dataset is None or len(train_dataset) == 0:
@@ -882,7 +837,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         # Evaluation - returns metrics for closed-set and open-set
         query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
-            dataset, feasible_individuals, id_to_indices, gallery_threshold=threshold,
+            dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold,
             criterion=criterion
         )
 
@@ -989,7 +944,7 @@ def main():
     # Load dataset and config
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
-    id_to_indices = build_id_to_indices(dataset)
+    metadata_cache = build_metadata_cache(dataset)
     config = load_feasibility_config()
 
     if not config:
@@ -1029,7 +984,7 @@ def main():
     for i, (threshold, gallery_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(threshold, gallery_size, seed, args, dataset, config, id_to_indices)
+            result = train_single_config(threshold, gallery_size, seed, args, dataset, config, metadata_cache)
             if result:
                 results_summary.append(result)
         except Exception as e:
