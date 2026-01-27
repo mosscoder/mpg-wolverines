@@ -461,6 +461,18 @@ def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, rare_lab
     return embeddings, np.array(qualities), np.array(rare_labels)
 
 
+def compute_validation_loss(val_embeddings, val_labels, criterion, device):
+    """Compute ArcFace loss on validation set."""
+    criterion.eval()
+    val_embeddings = val_embeddings.to(device)
+    val_labels = val_labels.to(device)
+
+    with torch.no_grad():
+        loss = criterion(val_embeddings, val_labels)
+
+    return loss.item()
+
+
 def compute_tnorm_stats(gallery_emb, gallery_labels):
     """
     Compute T-Norm stats (mean, std) for each gallery sample using a
@@ -527,7 +539,7 @@ def apply_tnorm(query_emb, gallery_emb, mu, sigma):
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, valid_individuals, id_to_indices,
-                                  gallery_threshold, batch_size=32):
+                                  gallery_threshold, criterion, batch_size=32):
     """
     Evaluate model computing Recall@1 and open-set metrics with T-Norm.
 
@@ -537,6 +549,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     Returns:
         dict: query_quality_metrics with recall at each quality threshold
               open_set metrics with balanced accuracy at each quality threshold
+              val_loss: validation loss value
     """
     model.eval()
 
@@ -571,6 +584,9 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     query_embeddings = torch.cat(query_embeddings, dim=0)
     query_labels = torch.tensor(query_labels).to(device)
     query_quality = np.array(query_quality)
+
+    # Compute validation loss using ArcFace criterion
+    val_loss = compute_validation_loss(query_embeddings, query_labels, criterion, device)
 
     # Rare/Unknown
     rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
@@ -725,7 +741,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         'by_quality': balanced_metrics_by_quality
     }
 
-    return query_quality_metrics, open_set_metrics
+    return query_quality_metrics, open_set_metrics, val_loss
 
 
 def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
@@ -857,9 +873,10 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
 
         # Evaluation - returns metrics for closed-set and open-set
-        query_quality_metrics, open_set_metrics = evaluate_recall_with_openset(
+        query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
-            dataset, feasible_individuals, id_to_indices, gallery_threshold=threshold
+            dataset, feasible_individuals, id_to_indices, gallery_threshold=threshold,
+            criterion=criterion
         )
 
         # Overall recall is at q>=0.0 (includes all queries)
@@ -880,12 +897,13 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         known_rate = by_quality.get('q>=0.0', {}).get('known_accept_rate', 0.0)
         unknown_rate = by_quality.get('q>=0.0', {}).get('unknown_reject_rate', 0.0)
 
-        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, R@1={recall_1:.4f}, "
+        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, R@1={recall_1:.4f}, "
               f"BA={ba_q0:.4f} (K={known_rate:.2f}, U={unknown_rate:.2f}), thresh={thresh_mean:.3f}")
 
         epoch_history.append({
             'epoch': epoch + 1,
             'train_loss': train_loss,
+            'val_loss': val_loss,
             'learning_rate': LEARNING_RATE,  # Fixed LR (no scheduler)
             'query_quality_metrics': query_quality_metrics,  # q>=0.0 is the overall recall
             'open_set': open_set_metrics  # Open-set evaluation metrics with balanced accuracy
