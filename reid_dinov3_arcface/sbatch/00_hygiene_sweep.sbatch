@@ -37,7 +37,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the DINOv3 + ArcFace hygiene sweep script
-python reid_dinov3_arcface/scripts/00_hygiene_sweep.py \
+python -u reid_dinov3_arcface/scripts/00_hygiene_sweep.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_dinov3_arcface/results \
     --device gpu

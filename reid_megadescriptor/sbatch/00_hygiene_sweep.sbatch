@@ -38,7 +38,7 @@ echo "Backbone: MegaDescriptor-L-384"
 echo "========================================"
 
 # Run the MegaDescriptor hygiene sweep script
-python reid_megadescriptor/scripts/00_hygiene_sweep.py \
+python -u reid_megadescriptor/scripts/00_hygiene_sweep.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --device gpu
 

@@ -36,7 +36,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the hygiene sweep script
-python reid_hygiene_filter/scripts/00_hygiene_sweep.py \
+python -u reid_hygiene_filter/scripts/00_hygiene_sweep.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --device gpu
 

@@ -34,7 +34,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
 # Run script with array index (using relative paths)
-python scripts/00_find_best_epoch.py \
+python -u scripts/00_find_best_epoch.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
     --output_dir results/00_best_epoch \
     --device gpu

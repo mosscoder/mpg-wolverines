@@ -34,7 +34,7 @@ python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 export PYTHONUNBUFFERED=1
 
 # Run script with array index
-python megadescriptor/scripts/01_megadescriptor_sweep.py \
+python -u megadescriptor/scripts/01_megadescriptor_sweep.py \
     --idx ${SLURM_ARRAY_TASK_ID} \
     --output_dir megadescriptor/results \
     --device gpu

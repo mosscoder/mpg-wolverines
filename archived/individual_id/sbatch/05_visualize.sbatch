@@ -45,7 +45,7 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 
-python individual_id/scripts/05_visualize_important_features.py \
+python -u individual_id/scripts/05_visualize_important_features.py \
     --model_path individual_id/models/individual_id_final.pth \
     --output_path individual_id/figures/feature_importance_grid.png \
     --device gpu \

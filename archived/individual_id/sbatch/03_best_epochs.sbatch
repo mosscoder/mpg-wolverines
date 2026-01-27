@@ -37,7 +37,7 @@ echo "Array Task ID: ${SLURM_ARRAY_TASK_ID}"
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 
-python individual_id/scripts/03_best_epochs.py \
+python -u individual_id/scripts/03_best_epochs.py \
     --fold ${SLURM_ARRAY_TASK_ID} \
     --output_dir individual_id/results/best_epoch_cv \
     --device gpu

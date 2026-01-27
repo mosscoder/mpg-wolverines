@@ -33,7 +33,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
 # Run production training script (single job, no array)
-python scripts/02_train_production.py \
+python -u scripts/02_train_production.py \
     --idx 0 \
     --output_dir results/02_production \
     --device gpu

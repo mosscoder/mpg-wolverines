@@ -41,7 +41,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the open-set hygiene sweep script
-python reid_openset_arcface/scripts/00_hygiene_sweep.py \
+python -u reid_openset_arcface/scripts/00_hygiene_sweep.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset_arcface/results \
     --device gpu

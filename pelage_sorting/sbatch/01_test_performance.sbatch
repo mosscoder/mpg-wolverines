@@ -33,7 +33,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 
 # Run script (using relative paths)
-python scripts/01_test_performance.py \
+python -u scripts/01_test_performance.py \
     --idx 0 \
     --output_dir results/01_test \
     --device gpu

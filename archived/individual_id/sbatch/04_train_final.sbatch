@@ -49,7 +49,7 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 
-python individual_id/scripts/04_train_final.py \
+python -u individual_id/scripts/04_train_final.py \
     --cv_results_dir individual_id/results/best_epoch_cv \
     --models_dir individual_id/models \
     --output_file individual_id/results/test_performance.json \

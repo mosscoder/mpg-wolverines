@@ -43,7 +43,7 @@ echo "Experiment: DINOv3 + ArcFace + LoRA (r=16, alpha=32)"
 echo "========================================"
 
 # Run the open-set hygiene sweep script with LoRA
-python reid_openset_lora/scripts/00_hygiene_sweep.py \
+python -u reid_openset_lora/scripts/00_hygiene_sweep.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset_lora/results \
     --device gpu
