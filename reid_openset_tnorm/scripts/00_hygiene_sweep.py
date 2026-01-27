@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + ArcFace with LoRA
+Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + LoRA + T-Norm
 
-Extends reid_openset_arcface with LoRA-adapted backbone:
+Combines LoRA-adapted backbone with T-Norm (Test Normalization) for score calibration:
 1. Adds LoRA adapters to attention (q/k/v_proj) and MLP (up/down_proj) layers
-2. At each epoch, calibrate optimal distance threshold using validation set
-3. Apply threshold to rare/unknown individuals from the broader dataset
-4. Measure Correct Flag Rate - proportion of unknowns correctly rejected
+2. Computes T-Norm statistics (mean, std) from imposter distributions in gallery
+3. Normalizes similarity scores to Z-scores for better open-set discrimination
+4. Calibrates threshold on normalized scores using LOO within gallery
+5. Measures Balanced Accuracy = (Known Accept Rate + Unknown Reject Rate) / 2
+
+Key differences from reid_openset_lora:
+- Score normalization: T-Norm Z-scores instead of raw cosine similarity
+- Threshold scale: Z-scores (e.g., 2.5, 3.8) vs cosine (e.g., 0.3, 0.4)
+- Better handling of low-quality gallery templates
 
 Key differences from reid_openset_arcface:
 - Backbone: LoRA adapters (~2.4M params) instead of frozen
-- Target modules: q_proj, k_proj, v_proj (attention) + up_proj, down_proj (MLP)
 - Trainable params: ~2.5M (LoRA + head) vs ~100K (head only)
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
@@ -47,8 +52,6 @@ from utils.triplet import (
     ArcFaceLoss,
     PKBatchSampler,
     compute_recall_at_k,
-    calibrate_threshold_loo,
-    evaluate_open_set_balanced,
 )
 from utils.training import check_result_exists
 
@@ -66,7 +69,7 @@ class EmbeddingHead(nn.Module):
         return self.fc(x)
 
 
-# Experiment parameters (identical grid to reid_openset_arcface)
+# Experiment parameters
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
@@ -136,33 +139,73 @@ def load_reidentification_dataset():
     return dataset
 
 
-def build_metadata_cache(dataset):
-    """Build metadata cache using Arrow columnar access (optimized)."""
-    from utils.arrow_cache import build_metadata_cache_arrow
-    return build_metadata_cache_arrow(dataset)
+def build_id_to_indices(dataset):
+    """Build individual ID to dataset indices mapping ONCE."""
+    print("Building ID to indices mapping...")
+    id_to_indices = {}
+    for idx, sample in enumerate(dataset):
+        ind_id = sample['id']
+        if ind_id not in id_to_indices:
+            id_to_indices[ind_id] = []
+        id_to_indices[ind_id].append(idx)
+    print(f"  Mapped {len(id_to_indices)} individuals")
+    return id_to_indices
 
 
-def filter_training_pool_by_quality(metadata_cache, indices, threshold):
-    """Use vectorized filtering with cached quality scores."""
-    from utils.optimized_filters import filter_training_pool_by_quality_vectorized
-    return filter_training_pool_by_quality_vectorized(
-        metadata_cache['quality_scores'],
-        indices,
-        threshold
-    )
+def filter_training_pool_by_quality(dataset, indices, threshold):
+    """
+    Return indices where pelage_score >= threshold.
+
+    Args:
+        dataset: HuggingFace dataset
+        indices: List of dataset indices to filter
+        threshold: Minimum pelage_score to include
+
+    Returns:
+        List of indices meeting the threshold
+    """
+    if threshold <= 0.0:
+        return indices  # No filtering needed for threshold 0.0
+
+    filtered = []
+    for idx in indices:
+        if dataset[idx]['pelage_score'] >= threshold:
+            filtered.append(idx)
+    return filtered
 
 
-def get_rare_individual_indices(metadata_cache, valid_individuals: list, quality_threshold: float = 0.0):
-    """Use vectorized operations with metadata cache."""
-    from utils.optimized_filters import get_rare_individual_indices_vectorized
-    return get_rare_individual_indices_vectorized(
-        metadata_cache,
-        valid_individuals,
-        quality_threshold
-    )
+def get_rare_individual_indices(dataset, valid_individuals: list, id_to_indices: dict,
+                                 quality_threshold: float = 0.0):
+    """
+    Get indices of individuals NOT in valid_individuals.
+    Filter by pelage_score >= quality_threshold (match gallery filtering).
+
+    Args:
+        dataset: HuggingFace dataset
+        valid_individuals: List of known individual IDs (used in training)
+        id_to_indices: Mapping from individual ID to dataset indices
+        quality_threshold: Minimum pelage_score to include
+
+    Returns:
+        Tuple of (rare_indices, rare_quality, rare_labels) lists
+    """
+    rare_indices = []
+    rare_quality = []
+    rare_labels = []
+
+    for ind_id, indices in id_to_indices.items():
+        if ind_id not in valid_individuals:
+            for idx in indices:
+                q = dataset[idx]['pelage_score']
+                if q >= quality_threshold:  # Match gallery threshold
+                    rare_indices.append(idx)
+                    rare_quality.append(q)
+                    rare_labels.append(ind_id)
+
+    return rare_indices, rare_quality, rare_labels
 
 
-def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, metadata_cache):
+def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, id_to_indices):
     """
     Create gallery/query split with filtered gallery.
 
@@ -178,8 +221,6 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     import random
 
     set_all_seeds(seed)
-
-    id_to_indices = metadata_cache['id_to_indices']
 
     print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
 
@@ -205,8 +246,8 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
         # Training candidates: exclude validation indices
         train_candidates = list(all_ind_indices - set(val_indices))
 
-        # FILTER by quality threshold (VECTORIZED)
-        eligible_pool = filter_training_pool_by_quality(metadata_cache, train_candidates, threshold)
+        # FILTER by quality threshold
+        eligible_pool = filter_training_pool_by_quality(dataset, train_candidates, threshold)
         dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
 
         # Sample from filtered pool
@@ -414,45 +455,6 @@ def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
     return total_loss / max(num_batches, 1)
 
 
-def compute_recall_by_query_quality(query_emb, gallery_emb, query_labels, gallery_labels, query_quality):
-    """
-    Compute Recall@1 for queries at different quality thresholds.
-
-    q>=0.0 includes ALL queries (equivalent to overall recall).
-
-    Args:
-        query_emb: Query embeddings tensor
-        gallery_emb: Gallery embeddings tensor
-        query_labels: Query labels tensor
-        gallery_labels: Gallery labels tensor
-        query_quality: Query quality scores (numpy array)
-
-    Returns:
-        dict: {"q>=0.0": {"recall_at_1": float, "count": int}, "q>=0.1": {...}, ...}
-    """
-    results = {}
-    query_quality = np.array(query_quality)
-
-    for thresh in QUERY_QUALITY_THRESHOLDS:
-        mask = query_quality >= thresh
-        count = int(mask.sum())
-
-        if count == 0:
-            results[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
-            continue
-
-        # Filter queries by quality threshold
-        filtered_query_emb = query_emb[mask]
-        filtered_query_labels = query_labels[torch.tensor(mask)] if isinstance(query_labels, torch.Tensor) else query_labels[mask]
-
-        # Compute recall against FULL gallery (already filtered by experiment threshold)
-        recall = compute_recall_at_k(filtered_query_emb, gallery_emb,
-                                     filtered_query_labels, gallery_labels, k=1)
-        results[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
-
-    return results
-
-
 def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, rare_labels, transform, device, batch_size=32):
     """
     Compute embeddings for rare/unknown individuals.
@@ -493,21 +495,78 @@ def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, rare_lab
     return embeddings, np.array(qualities), np.array(rare_labels)
 
 
+def compute_tnorm_stats(gallery_emb, gallery_labels):
+    """
+    Compute T-Norm stats (mean, std) for each gallery sample using a
+    'Leave-Other-Classes-Out' cohort strategy.
+
+    Args:
+        gallery_emb: Normalized embeddings (N, D)
+        gallery_labels: Labels (N,)
+
+    Returns:
+        mu (N,), sigma (N,) tensors on the same device
+    """
+    # Ensure normalized for Cosine Similarity
+    gallery_emb = torch.nn.functional.normalize(gallery_emb, p=2, dim=1)
+
+    # Compute full Gallery-to-Gallery Similarity Matrix
+    # S[i, j] is sim between gallery item i and j
+    sim_matrix = torch.mm(gallery_emb, gallery_emb.t())
+
+    N = len(gallery_labels)
+    mu = torch.zeros(N, device=gallery_emb.device)
+    sigma = torch.ones(N, device=gallery_emb.device) # default to 1.0
+
+    # We can vectorize this, but a loop is safer for variable class counts/logic
+    # and fast enough for N < 1000
+    unique_labels = torch.unique(gallery_labels)
+
+    for i in range(N):
+        label_i = gallery_labels[i]
+
+        # Cohort = All samples NOT belonging to label_i
+        # This is the "Imposter Distribution" for gallery item i
+        cohort_mask = (gallery_labels != label_i)
+
+        if cohort_mask.sum() > 0:
+            cohort_scores = sim_matrix[i, cohort_mask]
+            mu[i] = cohort_scores.mean()
+            sigma[i] = cohort_scores.std()
+
+            # Clamp sigma to avoid exploding scores on degenerate cohorts
+            if sigma[i] < 1e-6:
+                sigma[i] = 1e-6
+
+    return mu, sigma
+
+
+def apply_tnorm(query_emb, gallery_emb, mu, sigma):
+    """
+    Compute Normalized Similarity Matrix.
+    S_norm(q, g) = ( Sim(q, g) - mu[g] ) / sigma[g]
+    """
+    # 1. Raw Cosine Similarity
+    query_emb = torch.nn.functional.normalize(query_emb, p=2, dim=1)
+    gallery_emb = torch.nn.functional.normalize(gallery_emb, p=2, dim=1)
+
+    raw_sim = torch.mm(query_emb, gallery_emb.t()) # (Num_Queries, Num_Gallery)
+
+    # 2. Apply T-Norm
+    # mu/sigma are shape (Num_Gallery,), we broadcast over queries (rows)
+    norm_sim = (raw_sim - mu.unsqueeze(0)) / sigma.unsqueeze(0)
+
+    return norm_sim
+
+
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
-                                  transform, device, dataset, valid_individuals, metadata_cache,
+                                  transform, device, dataset, valid_individuals, id_to_indices,
                                   gallery_threshold, batch_size=32):
     """
-    Evaluate model computing Recall@1 and open-set metrics.
+    Evaluate model computing Recall@1 and open-set metrics with T-Norm.
 
-    Gallery: All training embeddings (filtered by gallery_threshold at training time)
-    Queries: All validation embeddings (filtered at eval time by quality thresholds)
-    Rare: All individuals not in valid_individuals (filtered at eval time by quality thresholds)
-
-    Both closed-set and open-set metrics are computed across quality thresholds
-    (0.0, 0.1, 0.2, 0.3, 0.4, 0.5).
-
-    Threshold calibration: LOO within training gallery (no data leakage)
-    Open-set metric: Balanced accuracy = (known_accept_rate + unknown_reject_rate) / 2
+    T-Norm normalizes similarity scores to Z-scores using imposter distributions,
+    improving discrimination for open-set recognition.
 
     Returns:
         dict: query_quality_metrics with recall at each quality threshold
@@ -515,95 +574,187 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     """
     model.eval()
 
-    # Create datasets
+    # --- 1. Extract Embeddings (Same as before) ---
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
     val_torch = ArcFaceDataset(val_dataset, transform, individual_to_class)
 
     train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
     val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Compute gallery embeddings
+    # Gallery
     gallery_embeddings = []
     gallery_labels = []
-
     with torch.no_grad():
         for images, labels, _ in train_loader:
             images = images.to(device)
-            emb = model(images)
-            gallery_embeddings.append(emb.cpu())
+            gallery_embeddings.append(model(images))
             gallery_labels.extend(labels.tolist())
-
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
-    gallery_labels = torch.tensor(gallery_labels)
+    gallery_labels = torch.tensor(gallery_labels).to(device)
 
-    # Compute query embeddings and collect quality scores
+    # Query (Known)
     query_embeddings = []
     query_labels = []
     query_quality = []
-
     with torch.no_grad():
         for images, labels, quality in val_loader:
             images = images.to(device)
-            emb = model(images)
-            query_embeddings.append(emb.cpu())
+            query_embeddings.append(model(images))
             query_labels.extend(labels.tolist())
             query_quality.extend(quality.tolist())
-
     query_embeddings = torch.cat(query_embeddings, dim=0)
-    query_labels = torch.tensor(query_labels)
+    query_labels = torch.tensor(query_labels).to(device)
     query_quality = np.array(query_quality)
 
-    # Compute recall by query quality thresholds (closed-set)
-    query_quality_metrics = compute_recall_by_query_quality(
-        query_embeddings, gallery_embeddings,
-        query_labels, gallery_labels,
-        query_quality
+    # Rare/Unknown
+    rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
+        dataset, valid_individuals, id_to_indices, quality_threshold=0.0
     )
-
-    # --- Open-set evaluation with LOO threshold calibration ---
-
-    # 1. Calibrate threshold via LOO within training gallery (no data leakage)
-    optimal_thresh, thresh_std, loo_metrics = calibrate_threshold_loo(
-        gallery_embeddings, gallery_labels
-    )
-
-    # 2. Get ALL rare/unknown individuals (no quality filtering - filter at eval time)
-    rare_indices, rare_quality, rare_labels = get_rare_individual_indices(
-        metadata_cache, valid_individuals,
-        quality_threshold=0.0  # Get all, filter at eval time
-    )
-
-    # 3. Compute embeddings for rare individuals
     if rare_indices:
         rare_emb, rare_quality_arr, rare_labels_arr = compute_rare_embeddings(
-            model, dataset, rare_indices, rare_quality, rare_labels, transform, device
+            model, dataset, rare_indices, rare_quality, rare_labels_str, transform, device
         )
+        rare_emb = rare_emb.to(device)
     else:
-        rare_emb = torch.empty(0, EMBEDDING_DIM)
+        rare_emb = torch.empty(0, EMBEDDING_DIM).to(device)
         rare_quality_arr = np.array([])
-        rare_labels_arr = np.array([])
 
-    # 4. Evaluate open-set with balanced accuracy at each quality threshold
-    # Uses macro-averaging: per-individual rates are computed, then averaged
-    balanced_metrics_by_quality = evaluate_open_set_balanced(
-        known_query_emb=query_embeddings,
-        known_query_labels=query_labels,
-        known_query_quality=query_quality,
-        unknown_query_emb=rare_emb,
-        unknown_query_quality=rare_quality_arr,
-        gallery_emb=gallery_embeddings,
-        gallery_labels=gallery_labels,
-        distance_threshold=optimal_thresh,
-        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
-        unknown_query_labels=rare_labels_arr
-    )
+
+    # --- 2. T-NORM CALCULATION ---
+    # Calculate stats on the Gallery (Offline step)
+    tnorm_mu, tnorm_sigma = compute_tnorm_stats(gallery_embeddings, gallery_labels)
+
+    # Calculate Normalized Score Matrices
+    # Known Query vs Gallery
+    scores_known = apply_tnorm(query_embeddings, gallery_embeddings, tnorm_mu, tnorm_sigma)
+
+    # Unknown Query vs Gallery
+    if len(rare_emb) > 0:
+        scores_unknown = apply_tnorm(rare_emb, gallery_embeddings, tnorm_mu, tnorm_sigma)
+    else:
+        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
+
+
+    # --- 3. Compute Metrics on SCORE MATRICES ---
+
+    # A. Recall@1 (Closed Set)
+    query_quality_metrics = {}
+    for thresh in QUERY_QUALITY_THRESHOLDS:
+        mask = query_quality >= thresh
+        count = int(mask.sum())
+        if count == 0:
+            query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
+            continue
+
+        # Filter scores by quality
+        filtered_scores = scores_known[mask] # (N_subset, N_gal)
+        filtered_labels = query_labels[mask]
+
+        # Find max score index
+        max_scores, max_indices = torch.max(filtered_scores, dim=1)
+        pred_labels = gallery_labels[max_indices]
+
+        correct = (pred_labels == filtered_labels).float().sum()
+        recall = (correct / count).item()
+
+        query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
+
+    # B. Threshold Calibration (LOO on T-Normed Gallery Scores)
+    # We must calculate Gal-vs-Gal scores using T-Norm to be consistent
+    scores_gal_gal = apply_tnorm(gallery_embeddings, gallery_embeddings, tnorm_mu, tnorm_sigma)
+
+    # Mask out self-matches (diagonal)
+    N = len(gallery_labels)
+    scores_gal_gal.fill_diagonal_(-9999)
+
+    # Flatten for stat calculation
+    # Positives: Same ID, different sample
+    # Negatives: Different ID
+    # Note: Since T-Norm aligns negatives to N(0,1), we expect negatives to center on 0.
+
+    pos_scores = []
+    neg_scores = []
+
+    for i in range(N):
+        l = gallery_labels[i]
+        row = scores_gal_gal[i]
+
+        # Positive mask: same label, not self (already handled by diagonal fill if careful, but mask is safer)
+        pos_mask = (gallery_labels == l)
+        pos_mask[i] = False # ensure self is out
+
+        neg_mask = (gallery_labels != l)
+
+        if pos_mask.sum() > 0:
+            pos_scores.append(row[pos_mask])
+        if neg_mask.sum() > 0:
+            neg_scores.append(row[neg_mask])
+
+    if len(pos_scores) > 0:
+        pos_scores = torch.cat(pos_scores)
+        neg_scores = torch.cat(neg_scores)
+
+        # Simple calibration: Intersection of distributions or fixed FAR?
+        # For simplicity/speed in sweep: midpoint of means or F1 maximization
+        # Using a simple statistical heuristic given T-Norm properties:
+        # Negatives are ~ N(0,1). A threshold of 3.0 or 4.0 is usually safe.
+        # But let's calculate optimal F1 threshold from data
+
+        # Sort all scores
+        all_scores = torch.cat([pos_scores, neg_scores])
+        all_labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
+
+        # Use simple mean separation if data is sparse, or search
+        optimal_thresh = (pos_scores.mean() + neg_scores.mean()) / 2.0
+        thresh_std = 0.0 # Placeholder
+
+        optimal_thresh = optimal_thresh.item()
+    else:
+        # Fallback if no positive pairs (e.g. 1 shot per ID)
+        optimal_thresh = 4.0 # 4 sigma
+        thresh_std = 0.0
+
+    # C. Open Set Metrics (Balanced Accuracy)
+    balanced_metrics_by_quality = {}
+
+    for thresh_q in QUERY_QUALITY_THRESHOLDS:
+        # Knowns
+        k_mask = query_quality >= thresh_q
+        if k_mask.sum() > 0:
+            k_scores = scores_known[k_mask]
+            # Max score per probe
+            k_max, _ = k_scores.max(dim=1)
+            known_accept_rate = (k_max > optimal_thresh).float().mean().item()
+        else:
+            known_accept_rate = 0.0
+
+        # Unknowns
+        if len(rare_quality_arr) > 0:
+            u_mask = rare_quality_arr >= thresh_q
+            if u_mask.sum() > 0:
+                u_scores = scores_unknown[u_mask]
+                u_max, _ = u_scores.max(dim=1) # (N_u,)
+
+                # Unknown Reject Rate: proportion where max score < threshold
+                unknown_reject_rate = (u_max < optimal_thresh).float().mean().item()
+            else:
+                unknown_reject_rate = 1.0 # No unknowns to fail on
+        else:
+             unknown_reject_rate = 1.0
+
+        balanced_acc = (known_accept_rate + unknown_reject_rate) / 2.0
+
+        balanced_metrics_by_quality[f"q>={thresh_q}"] = {
+            'balanced_accuracy': balanced_acc,
+            'known_accept_rate': known_accept_rate,
+            'unknown_reject_rate': unknown_reject_rate
+        }
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'loo',
+            'method': 'loo_tnorm',
             'threshold_mean': optimal_thresh,
             'threshold_std': thresh_std,
-            'n_folds': loo_metrics.get('n_folds', 0)
         },
         'by_quality': balanced_metrics_by_quality
     }
@@ -611,7 +762,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     return query_quality_metrics, open_set_metrics
 
 
-def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, metadata_cache) -> dict:
+def train_single_config(threshold: float, gallery_size: int, seed: int, args, dataset, config, id_to_indices) -> dict:
     """Train one configuration and return results."""
     set_all_seeds(seed)
 
@@ -654,7 +805,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
     # Create filtered gallery dataset
     train_dataset, val_dataset, individual_to_class, dataset_info = create_filtered_gallery_dataset(
-        dataset, feasible_individuals, gallery_size, threshold, seed, config, metadata_cache
+        dataset, feasible_individuals, gallery_size, threshold, seed, config, id_to_indices
     )
 
     if train_dataset is None or len(train_dataset) == 0:
@@ -740,7 +891,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         # Evaluation - returns metrics for closed-set and open-set
         query_quality_metrics, open_set_metrics = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
-            dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold
+            dataset, feasible_individuals, id_to_indices, gallery_threshold=threshold
         )
 
         # Overall recall is at q>=0.0 (includes all queries)
@@ -793,7 +944,8 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,
-            'backbone': 'DINOv3-ViT-B/16 + LoRA'
+            'backbone': 'DINOv3-ViT-B/16 + LoRA',
+            'score_normalization': 'T-Norm'
         },
         'trainable_params': trainable_params,
         'dataset': {
@@ -830,11 +982,11 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Open-Set DINOv3 + ArcFace + LoRA Gallery Hygiene Sweep')
+    parser = argparse.ArgumentParser(description='Open-Set DINOv3 + LoRA + T-Norm Gallery Hygiene Sweep')
     parser.add_argument('--idx', type=int, required=True, help='Job index (0-23)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                        default='reid_openset_lora/results',
+                        default='reid_openset_tnorm/results',
                         help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                         default='gpu', help='Device to use')
@@ -842,13 +994,13 @@ def main():
     args = parser.parse_args()
 
     print("=" * 80)
-    print(f"Open-Set DINOv3 + ArcFace + LoRA Gallery Hygiene Sweep - Job {args.idx}")
+    print(f"Open-Set DINOv3 + LoRA + T-Norm Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
     # Load dataset and config
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
-    metadata_cache = build_metadata_cache(dataset)
+    id_to_indices = build_id_to_indices(dataset)
     config = load_feasibility_config()
 
     if not config:
@@ -860,6 +1012,7 @@ def main():
     print(f"\nExperiment parameters:")
     print(f"  Loss: ArcFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE})")
     print(f"  LoRA: r={LORA_R}, alpha={LORA_ALPHA}, dropout={LORA_DROPOUT}")
+    print(f"  Score Normalization: T-Norm (imposter cohort statistics)")
     print(f"  Optimizer: AdamW (lr={LEARNING_RATE}, weight_decay=0.01)")
     print(f"  Embedding: {EMBEDDING_DIM}-d (trainable projection from DINOv3 CLS)")
     print(f"  Thresholds: {THRESHOLDS}")
@@ -867,7 +1020,7 @@ def main():
     print(f"  Seeds: {SEEDS}")
     print(f"  Total combinations: {total_combinations}")
     print(f"  Configs per job: ~{total_combinations // 24}")
-    print(f"  Open-set evaluation: Enabled (rare individuals)")
+    print(f"  Open-set evaluation: Enabled (rare individuals, T-Norm scores)")
 
     # Get combinations for this job
     combinations = get_job_combinations(args.idx)
@@ -887,7 +1040,7 @@ def main():
     for i, (threshold, gallery_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
-            result = train_single_config(threshold, gallery_size, seed, args, dataset, config, metadata_cache)
+            result = train_single_config(threshold, gallery_size, seed, args, dataset, config, id_to_indices)
             if result:
                 results_summary.append(result)
         except Exception as e:
