@@ -676,24 +676,31 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         pos_scores = torch.cat(pos_scores)
         neg_scores = torch.cat(neg_scores)
 
-        # Simple calibration: Intersection of distributions or fixed FAR?
-        # For simplicity/speed in sweep: midpoint of means or F1 maximization
-        # Using a simple statistical heuristic given T-Norm properties:
-        # Negatives are ~ N(0,1). A threshold of 3.0 or 4.0 is usually safe.
-        # But let's calculate optimal F1 threshold from data
+        # T-Norm threshold calibration with safety floor
+        #
+        # Key insight: Open-set test uses MAX score across gallery, not individual scores.
+        # If each imposter score ~ N(0,1), the MAX of N samples has expected value ≈ √(2 ln N).
+        # For N=64: E[max] ≈ 2.88
+        #
+        # Using mean-based calibration (pos_mean + neg_mean) / 2 ≈ 0.8 allows almost all
+        # unknowns to pass (since their max score ≈ 2.88 > 0.8).
+        #
+        # Fix: Use a safety floor of 4σ to ensure robust unknown rejection.
+        # At 4σ, P(Z > 4) ≈ 0.003% per comparison - even with large galleries,
+        # false accept rate remains very low.
 
-        # Sort all scores
-        all_scores = torch.cat([pos_scores, neg_scores])
-        all_labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
+        safe_sigma = 4.0
+        pos_mean = pos_scores.mean().item()
+        neg_mean = neg_scores.mean().item()  # Should be ~0 by T-Norm design
 
-        # Use simple mean separation if data is sparse, or search
-        optimal_thresh = (pos_scores.mean() + neg_scores.mean()) / 2.0
-        thresh_std = 0.0 # Placeholder
+        # Use safety floor unless positive scores are strong enough that midpoint exceeds it
+        midpoint = (pos_mean + neg_mean) / 2.0
+        optimal_thresh = max(safe_sigma, midpoint)
 
-        optimal_thresh = optimal_thresh.item()
+        thresh_std = pos_scores.std().item() if len(pos_scores) > 1 else 0.0
     else:
         # Fallback if no positive pairs (e.g. 1 shot per ID)
-        optimal_thresh = 4.0 # 4 sigma
+        optimal_thresh = 4.0  # 4 sigma
         thresh_std = 0.0
 
     # C. Open Set Metrics (Balanced Accuracy)
