@@ -574,7 +574,13 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     # --- 3. Compute Metrics on SCORE MATRICES ---
 
-    # A. Recall@1 (Closed Set)
+    # A. Recall@1 (Closed Set) - use RAW cosine similarity, not T-Norm
+    # T-Norm changes ranking (different μ, σ per gallery sample), which is wrong for closed-set
+    raw_scores_known = torch.mm(
+        torch.nn.functional.normalize(query_embeddings, p=2, dim=1),
+        torch.nn.functional.normalize(gallery_embeddings, p=2, dim=1).t()
+    )
+
     query_quality_metrics = {}
     for thresh in QUERY_QUALITY_THRESHOLDS:
         mask = query_quality >= thresh
@@ -583,8 +589,8 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
             query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
             continue
 
-        # Filter scores by quality
-        filtered_scores = scores_known[mask] # (N_subset, N_gal)
+        # Filter by quality
+        filtered_scores = raw_scores_known[mask]
         filtered_labels = query_labels[mask]
 
         # Find max score index
