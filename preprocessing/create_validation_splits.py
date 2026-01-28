@@ -163,14 +163,29 @@ def compute_individual_stats(train_df, individuals):
 
 
 def save_config(individuals, individual_stats, validation_indices, training_compatibility, training_sizes, output_dir, train_df):
-    """Save the configuration needed by reid experiments"""
+    """Save the configuration needed by reid experiments."""
     print("Saving configuration...")
+
+    # Manual exclusions - these individuals are excluded from all consideration
+    EXCLUDED_ENTIRELY = ['PA23-M1', 'HLC21-H1']
+
+    # Manual promotions - these individuals are promoted to novel set (excluded from closed-set)
+    PROMOTED_TO_RARE = ['Tex']
 
     max_size = max(training_sizes)
     valid_individuals = []
     excluded_individuals = []
 
     for ind_id in individuals:
+        # Skip manually excluded individuals
+        if ind_id in EXCLUDED_ENTIRELY:
+            excluded_individuals.append((ind_id, "Manually excluded from all consideration"))
+            continue
+
+        # Skip manually promoted individuals (they go to rare/novel set)
+        if ind_id in PROMOTED_TO_RARE:
+            continue
+
         if validation_indices[ind_id]['count'] == 0:
             excluded_individuals.append((ind_id, "No validation samples"))
             continue
@@ -201,6 +216,11 @@ def save_config(individuals, individual_stats, validation_indices, training_comp
         val_count = validation_indices[ind_id]['count']
         print(f"  {ind_id}: pelage_score={score:.3f}, {val_count} validation samples")
 
+    if PROMOTED_TO_RARE:
+        print(f"\nPromoted to rare/novel set ({len(PROMOTED_TO_RARE)} individuals):")
+        for ind_id in PROMOTED_TO_RARE:
+            print(f"  {ind_id}: Manually promoted to novel set for open-set evaluation")
+
     if excluded_individuals:
         print(f"\nExcluded {len(excluded_individuals)} individuals:")
         for ind_id, reason in excluded_individuals:
@@ -208,6 +228,8 @@ def save_config(individuals, individual_stats, validation_indices, training_comp
 
     config = {
         'valid_individuals': valid_individuals,
+        'promoted_to_rare': PROMOTED_TO_RARE,
+        'excluded_entirely': EXCLUDED_ENTIRELY,
         'max_examples_per_class': max_size,
         'training_sizes': training_sizes,
         'thresholds': [0, 0.1, 0.2, 0.3, 0.4, 0.5],

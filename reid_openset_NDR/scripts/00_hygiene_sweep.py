@@ -158,13 +158,16 @@ def filter_training_pool_by_quality(metadata_cache, indices, threshold):
     )
 
 
-def get_rare_individual_indices(metadata_cache, valid_individuals: list, quality_threshold: float = 0.0):
+def get_rare_individual_indices(metadata_cache, valid_individuals: list, quality_threshold: float = 0.0,
+                                promoted_individuals: list = None, excluded_individuals: list = None):
     """Use vectorized operations with metadata cache."""
     from utils.optimized_filters import get_rare_individual_indices_vectorized
     return get_rare_individual_indices_vectorized(
         metadata_cache,
         valid_individuals,
-        quality_threshold
+        quality_threshold,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals
     )
 
 
@@ -605,7 +608,8 @@ def compute_open_set_metrics_ndr(
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, valid_individuals, metadata_cache,
-                                  gallery_threshold, criterion, batch_size=32):
+                                  gallery_threshold, criterion, batch_size=32,
+                                  promoted_individuals=None, excluded_individuals=None):
     """
     Evaluate model computing Recall@1 and open-set metrics with T-Norm + NDR.
 
@@ -656,9 +660,11 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     # Compute validation loss using ArcFace criterion
     val_loss = compute_validation_loss(query_embeddings, query_labels, criterion, device)
 
-    # Rare/Unknown (VECTORIZED)
+    # Rare/Unknown (VECTORIZED) - includes promoted individuals, excludes excluded individuals
     rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
-        metadata_cache, valid_individuals, quality_threshold=0.0
+        metadata_cache, valid_individuals, quality_threshold=0.0,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals
     )
     if rare_indices:
         rare_emb, rare_quality_arr, rare_labels_arr = compute_rare_embeddings(
@@ -743,8 +749,10 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
     print(f"Training: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
     print(f"{'='*60}")
 
-    # Get valid individuals from config
+    # Get valid individuals and diversity-based classification from config
     valid_individuals = config.get('valid_individuals', [])
+    promoted_individuals = config.get('promoted_to_rare', [])
+    excluded_individuals = config.get('excluded_entirely', [])
 
     # Check feasibility for this threshold and gallery_size
     feasible_individuals = []
@@ -859,7 +867,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
             dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold,
-            criterion=criterion
+            criterion=criterion,
+            promoted_individuals=promoted_individuals,
+            excluded_individuals=excluded_individuals
         )
 
         # Overall recall is at q>=0.0 (includes all queries)

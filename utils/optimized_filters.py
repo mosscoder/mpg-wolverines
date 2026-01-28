@@ -138,14 +138,26 @@ def create_filtered_gallery_dataset_optimized(dataset, individuals, gallery_size
 
 def get_rare_individual_indices_vectorized(metadata_cache: Dict[str, Any],
                                           valid_individuals: List[str],
-                                          quality_threshold: float = 0.0) -> Tuple[List[int], List[float], List[str]]:
+                                          quality_threshold: float = 0.0,
+                                          promoted_individuals: List[str] = None,
+                                          excluded_individuals: List[str] = None) -> Tuple[List[int], List[float], List[str]]:
     """
-    Get indices of rare individuals using vectorized operations on cached metadata.
+    Get indices of rare/novel individuals using vectorized operations on cached metadata.
+
+    Includes:
+    - Individuals NOT in valid_individuals (existing rare)
+    - promoted_individuals (demoted from closed-set but pass diversity)
+
+    Excludes:
+    - valid_individuals (used for closed-set)
+    - excluded_individuals (fail diversity requirements)
 
     Args:
         metadata_cache: Cached metadata from build_metadata_cache()
-        valid_individuals: List of known individual IDs
+        valid_individuals: List of known individual IDs (closed-set)
         quality_threshold: Minimum quality score
+        promoted_individuals: List of individuals promoted to rare/novel set
+        excluded_individuals: List of individuals to exclude entirely
 
     Returns:
         Tuple of (rare_indices, rare_quality, rare_labels) lists
@@ -163,11 +175,14 @@ def get_rare_individual_indices_vectorized(metadata_cache: Dict[str, Any],
     rare_quality = []
     rare_labels = []
 
-    # Convert valid_individuals to set for O(1) lookup
+    # Convert to sets for O(1) lookup
     valid_set = set(valid_individuals)
+    promoted_set = set(promoted_individuals or [])
+    excluded_set = set(excluded_individuals or [])
 
     for ind_id, indices in id_to_indices.items():
-        if ind_id not in valid_set:
+        # Include if: (not valid AND not excluded) OR promoted
+        if (ind_id not in valid_set and ind_id not in excluded_set) or ind_id in promoted_set:
             # Vectorized quality filtering for this individual
             indices_arr = np.array(indices)
             quality_arr = quality_cache[indices_arr]
