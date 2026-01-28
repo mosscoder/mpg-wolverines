@@ -552,7 +552,11 @@ def compute_recall_at_k(query_embeddings: torch.Tensor,
     if query_embeddings.size(0) == 0 or gallery_embeddings.size(0) == 0:
         return 0.0
 
-    # Compute pairwise distances
+    # Normalize embeddings for cosine-based ranking
+    query_embeddings = F.normalize(query_embeddings, p=2, dim=1)
+    gallery_embeddings = F.normalize(gallery_embeddings, p=2, dim=1)
+
+    # Compute pairwise distances (on normalized embeddings = cosine distance)
     distances = torch.cdist(query_embeddings, gallery_embeddings, p=2)
     _, top_k_indices = distances.topk(k, dim=1, largest=False)
 

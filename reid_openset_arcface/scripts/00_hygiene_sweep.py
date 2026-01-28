@@ -732,7 +732,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             ba = ba_data.get('balanced_accuracy', 0.0)
             kar = ba_data.get('known_accept_rate', 0.0)
             urr = ba_data.get('unknown_reject_rate', 0.0)
-            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}, U={urr:.2f})")
+            n_k_ind = ba_data.get('n_known_individuals', 0)
+            n_u_ind = ba_data.get('n_unknown_individuals', 0)
+            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k_ind}], U={urr:.2f}[{n_u_ind}])")
 
         epoch_history.append({
             'epoch': epoch + 1,

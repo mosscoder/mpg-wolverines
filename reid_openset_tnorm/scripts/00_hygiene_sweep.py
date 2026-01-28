@@ -46,6 +46,7 @@ from utils.triplet import (
     ArcFaceLoss,
     PKBatchSampler,
     compute_recall_at_k,
+    evaluate_open_set_balanced,
 )
 from utils.training import check_result_exists
 from utils.dataset import set_all_seeds
@@ -492,6 +493,121 @@ def apply_tnorm(query_emb, gallery_emb, mu, sigma):
     return norm_sim
 
 
+def compute_open_set_metrics_tnorm(
+    known_query_labels: torch.Tensor,
+    known_query_quality: np.ndarray,
+    known_scores: torch.Tensor,
+    unknown_query_labels: np.ndarray,
+    unknown_query_quality: np.ndarray,
+    unknown_scores: torch.Tensor,
+    score_threshold: float,
+    quality_thresholds: list,
+    gallery_labels: torch.Tensor
+):
+    """
+    Compute macro-averaged open-set metrics for T-normed scores.
+
+    Uses per-individual averaging for both known accept rate and unknown reject rate.
+    This matches the macro-averaging approach used in arcface/lora.
+
+    Args:
+        known_query_labels: Labels for known queries (n_known,)
+        known_query_quality: Quality scores for known queries (n_known,)
+        known_scores: T-normed score matrix for known queries (n_known, n_gallery)
+        unknown_query_labels: Individual IDs for unknown queries (n_unknown,)
+        unknown_query_quality: Quality scores for unknown queries (n_unknown,)
+        unknown_scores: T-normed score matrix for unknown queries (n_unknown, n_gallery)
+        score_threshold: Accept threshold (accept if score > threshold)
+        quality_thresholds: List of quality thresholds to evaluate
+        gallery_labels: Labels for gallery samples (n_gallery,)
+
+    Returns:
+        Dict mapping quality threshold to metrics
+    """
+    # Convert labels to numpy for grouping
+    if isinstance(known_query_labels, torch.Tensor):
+        known_labels_np = known_query_labels.cpu().numpy()
+    else:
+        known_labels_np = np.array(known_query_labels)
+
+    results = {}
+
+    for q_thresh in quality_thresholds:
+        # --- Known accept rate (macro-averaged) ---
+        k_mask = known_query_quality >= q_thresh
+        per_ind_accept = []
+        n_known_individuals = 0
+
+        if k_mask.sum() > 0:
+            known_indices = np.where(k_mask)[0]
+            unique_known_labels = np.unique(known_labels_np[known_indices])
+
+            for ind_label in unique_known_labels:
+                # Get indices for this individual within quality-filtered set
+                ind_mask = (known_labels_np == ind_label) & k_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # For each sample: accept if score > threshold AND correct match
+                accepted_correct = 0
+                for i in ind_indices:
+                    max_score, max_idx = known_scores[i].max(dim=0)
+                    pred_label = gallery_labels[max_idx].item()
+                    if max_score.item() > score_threshold and pred_label == ind_label:
+                        accepted_correct += 1
+
+                per_ind_accept.append(accepted_correct / len(ind_indices))
+
+            n_known_individuals = len(per_ind_accept)
+
+        known_accept_rate = np.mean(per_ind_accept) if per_ind_accept else 0.0
+
+        # --- Unknown reject rate (macro-averaged) ---
+        u_mask = unknown_query_quality >= q_thresh
+        per_ind_reject = []
+        n_unknown_individuals = 0
+
+        if len(unknown_query_labels) > 0 and u_mask.sum() > 0:
+            unknown_indices = np.where(u_mask)[0]
+            unique_unknown_labels = np.unique(unknown_query_labels[unknown_indices])
+
+            for ind_id in unique_unknown_labels:
+                # Get indices for this individual within quality-filtered set
+                ind_mask = (unknown_query_labels == ind_id) & u_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # For each sample: reject if max score < threshold
+                rejected = 0
+                for i in ind_indices:
+                    max_score = unknown_scores[i].max().item()
+                    if max_score < score_threshold:
+                        rejected += 1
+
+                per_ind_reject.append(rejected / len(ind_indices))
+
+            n_unknown_individuals = len(per_ind_reject)
+
+        unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 1.0
+
+        # Balanced accuracy
+        balanced_acc = (known_accept_rate + unknown_reject_rate) / 2.0
+
+        results[f"q>={q_thresh}"] = {
+            'balanced_accuracy': balanced_acc,
+            'known_accept_rate': known_accept_rate,
+            'unknown_reject_rate': unknown_reject_rate,
+            'n_known_individuals': n_known_individuals,
+            'n_unknown_individuals': n_unknown_individuals
+        }
+
+    return results
+
+
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, valid_individuals, metadata_cache,
                                   gallery_threshold, criterion, batch_size=32):
@@ -555,7 +671,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     else:
         rare_emb = torch.empty(0, EMBEDDING_DIM).to(device)
         rare_quality_arr = np.array([])
-
+        rare_labels_arr = np.array([])
 
     # --- 2. T-NORM CALCULATION ---
     # Calculate stats on the Gallery (Offline step)
@@ -572,15 +688,10 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
 
-    # --- 3. Compute Metrics on SCORE MATRICES ---
+    # --- 3. Compute Metrics ---
 
-    # A. Recall@1 (Closed Set) - use RAW cosine similarity, not T-Norm
-    # T-Norm changes ranking (different μ, σ per gallery sample), which is wrong for closed-set
-    raw_scores_known = torch.mm(
-        torch.nn.functional.normalize(query_embeddings, p=2, dim=1),
-        torch.nn.functional.normalize(gallery_embeddings, p=2, dim=1).t()
-    )
-
+    # A. Recall@1 (Closed Set) - macro-averaged, same as arcface/lora
+    # Uses compute_recall_at_k which normalizes embeddings and uses cosine-based ranking
     query_quality_metrics = {}
     for thresh in QUERY_QUALITY_THRESHOLDS:
         mask = query_quality >= thresh
@@ -589,17 +700,14 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
             query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
             continue
 
-        # Filter by quality
-        filtered_scores = raw_scores_known[mask]
-        filtered_labels = query_labels[mask]
-
-        # Find max score index
-        max_scores, max_indices = torch.max(filtered_scores, dim=1)
-        pred_labels = gallery_labels[max_indices]
-
-        correct = (pred_labels == filtered_labels).float().sum()
-        recall = (correct / count).item()
-
+        # Use macro-averaged recall (same as arcface/lora)
+        recall = compute_recall_at_k(
+            query_embeddings[mask],
+            gallery_embeddings,
+            query_labels[torch.tensor(mask)],
+            gallery_labels,
+            k=1
+        )
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
     # B. Threshold Calibration (LOO on T-Normed Gallery Scores)
@@ -664,41 +772,19 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         optimal_thresh = 4.0  # 4 sigma
         thresh_std = 0.0
 
-    # C. Open Set Metrics (Balanced Accuracy)
-    balanced_metrics_by_quality = {}
-
-    for thresh_q in QUERY_QUALITY_THRESHOLDS:
-        # Knowns
-        k_mask = query_quality >= thresh_q
-        if k_mask.sum() > 0:
-            k_scores = scores_known[k_mask]
-            # Max score per probe
-            k_max, _ = k_scores.max(dim=1)
-            known_accept_rate = (k_max > optimal_thresh).float().mean().item()
-        else:
-            known_accept_rate = 0.0
-
-        # Unknowns
-        if len(rare_quality_arr) > 0:
-            u_mask = rare_quality_arr >= thresh_q
-            if u_mask.sum() > 0:
-                u_scores = scores_unknown[u_mask]
-                u_max, _ = u_scores.max(dim=1) # (N_u,)
-
-                # Unknown Reject Rate: proportion where max score < threshold
-                unknown_reject_rate = (u_max < optimal_thresh).float().mean().item()
-            else:
-                unknown_reject_rate = 1.0 # No unknowns to fail on
-        else:
-             unknown_reject_rate = 1.0
-
-        balanced_acc = (known_accept_rate + unknown_reject_rate) / 2.0
-
-        balanced_metrics_by_quality[f"q>={thresh_q}"] = {
-            'balanced_accuracy': balanced_acc,
-            'known_accept_rate': known_accept_rate,
-            'unknown_reject_rate': unknown_reject_rate
-        }
+    # C. Open Set Metrics (Balanced Accuracy) - MACRO-AVERAGED
+    # Uses per-individual averaging for consistency with arcface/lora
+    balanced_metrics_by_quality = compute_open_set_metrics_tnorm(
+        known_query_labels=query_labels,
+        known_query_quality=query_quality,
+        known_scores=scores_known,
+        unknown_query_labels=rare_labels_arr,
+        unknown_query_quality=rare_quality_arr,
+        unknown_scores=scores_unknown,
+        score_threshold=optimal_thresh,
+        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
+        gallery_labels=gallery_labels
+    )
 
     open_set_metrics = {
         'threshold_calibration': {
@@ -875,7 +961,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             ba = ba_data.get('balanced_accuracy', 0.0)
             kar = ba_data.get('known_accept_rate', 0.0)
             urr = ba_data.get('unknown_reject_rate', 0.0)
-            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}, U={urr:.2f})")
+            n_k_ind = ba_data.get('n_known_individuals', 0)
+            n_u_ind = ba_data.get('n_unknown_individuals', 0)
+            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k_ind}], U={urr:.2f}[{n_u_ind}])")
 
         epoch_history.append({
             'epoch': epoch + 1,
