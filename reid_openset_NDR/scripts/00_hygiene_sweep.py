@@ -886,19 +886,19 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             best_ndr_at_5pct = ndr_q0
             best_ndr_epoch = epoch + 1
 
-        # Print NDR at all FN thresholds for q>=0.0
-        ndr1 = by_quality.get('q>=0.0', {}).get('NoveltyDetectionRate@FalseNovelty=1%', 0.0)
-        ndr5 = by_quality.get('q>=0.0', {}).get('NoveltyDetectionRate@FalseNovelty=5%', 0.0)
-        ndr10 = by_quality.get('q>=0.0', {}).get('NoveltyDetectionRate@FalseNovelty=10%', 0.0)
-        thresh1 = by_quality.get('q>=0.0', {}).get('Threshold_FN=1%', 0.0)
-        thresh5 = by_quality.get('q>=0.0', {}).get('Threshold_FN=5%', 0.0)
-        thresh10 = by_quality.get('q>=0.0', {}).get('Threshold_FN=10%', 0.0)
+        # Header
+        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}")
 
-        print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, "
-              f"R@1={recall_1:.4f}")
-        print(f"  NDR@FN=1%: {ndr1:.3f} (T={thresh1:.2f})")
-        print(f"  NDR@FN=5%: {ndr5:.3f} (T={thresh5:.2f})")
-        print(f"  NDR@FN=10%: {ndr10:.3f} (T={thresh10:.2f})")
+        # Per-quality metrics with NDR
+        for q_thresh in QUERY_QUALITY_THRESHOLDS:
+            q_key = f"q>={q_thresh}"
+            r1 = query_quality_metrics[q_key]['recall_at_1']
+            count = query_quality_metrics[q_key]['count']
+            ndr_data = by_quality.get(q_key, {})
+            ndr1 = ndr_data.get('NoveltyDetectionRate@FalseNovelty=1%', 0.0)
+            ndr5 = ndr_data.get('NoveltyDetectionRate@FalseNovelty=5%', 0.0)
+            ndr10 = ndr_data.get('NoveltyDetectionRate@FalseNovelty=10%', 0.0)
+            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), NDR@1%={ndr1:.2f}, NDR@5%={ndr5:.2f}, NDR@10%={ndr10:.2f}")
 
         epoch_history.append({
             'epoch': epoch + 1,
