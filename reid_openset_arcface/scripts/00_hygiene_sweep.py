@@ -719,11 +719,20 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             best_ba_epoch = epoch + 1
 
         thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold_mean', 0.0)
-        known_rate = by_quality.get('q>=0.0', {}).get('known_accept_rate', 0.0)
-        unknown_rate = by_quality.get('q>=0.0', {}).get('unknown_reject_rate', 0.0)
 
-        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, R@1={recall_1:.4f}, "
-              f"BA={ba_q0:.4f} (K={known_rate:.2f}, U={unknown_rate:.2f}), thresh={thresh_mean:.3f}")
+        # Header with loss and threshold info
+        print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, thresh={thresh_mean:.3f}")
+
+        # Per-quality metrics
+        for q_thresh in QUERY_QUALITY_THRESHOLDS:
+            q_key = f"q>={q_thresh}"
+            r1 = query_quality_metrics[q_key]['recall_at_1']
+            count = query_quality_metrics[q_key]['count']
+            ba_data = by_quality.get(q_key, {})
+            ba = ba_data.get('balanced_accuracy', 0.0)
+            kar = ba_data.get('known_accept_rate', 0.0)
+            urr = ba_data.get('unknown_reject_rate', 0.0)
+            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}, U={urr:.2f})")
 
         epoch_history.append({
             'epoch': epoch + 1,
