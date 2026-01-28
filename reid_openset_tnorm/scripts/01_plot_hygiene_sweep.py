@@ -965,6 +965,74 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
     print(f"Saved: {output_path}")
 
 
+def plot_tnorm_threshold(results: ResultsCollection, output_path: str):
+    """
+    Plot T-norm decision threshold (Z-score) by gallery size and quality threshold.
+
+    Shows mean threshold with 95% CI across 8 seeds for each configuration.
+    X-axis: Gallery size (examples per individual)
+    Lines: Different gallery quality thresholds (0.0, 0.1, ..., 0.5)
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+
+    # Use a colormap for different gallery thresholds
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(gallery_thresholds)))
+
+    for idx, gal_thresh in enumerate(gallery_thresholds):
+        x_vals = []
+        y_means = []
+        ci_lower = []
+        ci_upper = []
+
+        for gsize in gallery_sizes:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+
+            # Get threshold at best epoch for each seed
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.0')
+
+            thresh_values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch and 'open_set' in h:
+                        thresh_cal = h['open_set'].get('threshold_calibration', {})
+                        if 'threshold_mean' in thresh_cal:
+                            thresh_values.append(thresh_cal['threshold_mean'])
+                        break
+
+            if thresh_values:
+                mean = np.mean(thresh_values)
+                ci = stats.t.ppf(0.975, len(thresh_values) - 1) * stats.sem(thresh_values) if len(thresh_values) > 1 else 0
+                x_vals.append(gsize)
+                y_means.append(mean)
+                ci_lower.append(mean - ci)
+                ci_upper.append(mean + ci)
+
+        if x_vals:
+            ax.plot(x_vals, y_means, color=colors[idx], linewidth=2,
+                    marker='o', markersize=6, label=f'q>={gal_thresh}')
+            ax.fill_between(x_vals, ci_lower, ci_upper, color=colors[idx], alpha=0.2)
+
+    ax.set_xlabel('Examples per Individual', fontsize=14)
+    ax.set_ylabel('T-Norm Threshold (Z-score)', fontsize=14)
+    ax.set_title('T-Norm Decision Threshold by Configuration', fontsize=16)
+    ax.set_xticks(gallery_sizes)
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(title='Gallery quality filter', loc='best', fontsize=10, title_fontsize=10)
+
+    # Add reference line at 4.0 (safe_sigma floor)
+    ax.axhline(y=4.0, color='red', linestyle='--', alpha=0.5, label='4σ floor')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved: {output_path}")
+
+
 def print_summary_table(results: ResultsCollection):
     """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 80)
@@ -1071,6 +1139,12 @@ def main():
     plot_validation_loss_curves(
         results,
         os.path.join(args.output_dir, 'validation_loss_curves.png')
+    )
+
+    # T-norm threshold plot
+    plot_tnorm_threshold(
+        results,
+        os.path.join(args.output_dir, 'tnorm_threshold.png')
     )
 
     print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
