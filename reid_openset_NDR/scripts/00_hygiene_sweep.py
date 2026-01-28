@@ -518,13 +518,17 @@ def compute_open_set_metrics_ndr(
     fnr_levels: list = [1, 5, 10]
 ):
     """
-    Compute Novelty Detection Rate (NDR) at fixed False Novelty Rate (FNR) levels.
+    Compute macro-averaged Novelty Detection Rate (NDR) at fixed False Novelty Rate (FNR) levels.
 
     NDR Paradigm:
     - Positive class = Novel (unknown) wolverines
     - Negative class = Known wolverines
     - FNR = False Novelty Rate = % of known incorrectly flagged as novel
     - NDR = Novelty Detection Rate = % of unknown correctly flagged as novel
+
+    Macro-averaging:
+    - NDR is computed per unknown individual, then averaged across individuals
+    - This ensures each individual contributes equally regardless of sample count
 
     Dynamic threshold computation:
     - For each FNR level (1%, 5%, 10%), find threshold from known score percentiles
@@ -543,7 +547,7 @@ def compute_open_set_metrics_ndr(
         fnr_levels: List of FNR percentages to evaluate (default: [1, 5, 10])
 
     Returns:
-        Dict mapping quality threshold to NDR metrics at each FNR level
+        Dict mapping quality threshold to macro-averaged NDR metrics at each FNR level
     """
     # Convert labels to numpy for grouping
     if isinstance(known_query_labels, torch.Tensor):
@@ -571,17 +575,7 @@ def compute_open_set_metrics_ndr(
 
         known_max_scores = np.array(known_max_scores)
 
-        # Get max scores for unknown samples
-        unknown_max_scores = []
-        if len(unknown_query_labels) > 0 and u_mask.sum() > 0:
-            unknown_indices = np.where(u_mask)[0]
-            for i in unknown_indices:
-                max_score = unknown_scores[i].max().item()
-                unknown_max_scores.append(max_score)
-
-        unknown_max_scores = np.array(unknown_max_scores)
-
-        # --- Compute NDR at each FNR level ---
+        # --- Compute NDR at each FNR level (macro-averaged) ---
         for fnr_pct in fnr_levels:
             # Threshold = percentile of known max scores
             # FNR% of known samples will have max_score < threshold
@@ -590,11 +584,36 @@ def compute_open_set_metrics_ndr(
             else:
                 threshold = 0.0
 
-            # NDR = % of unknown samples with max_score < threshold
-            if len(unknown_max_scores) > 0:
-                ndr = (unknown_max_scores < threshold).sum() / len(unknown_max_scores)
-            else:
-                ndr = 0.0
+            # NDR = macro-averaged across unknown individuals
+            # For each individual: compute % of their samples detected as novel
+            # Then average across individuals
+            per_ind_ndr = []
+            n_unknown_individuals = 0
+
+            if len(unknown_query_labels) > 0 and u_mask.sum() > 0:
+                unknown_indices = np.where(u_mask)[0]
+                unique_unknown_labels = np.unique(unknown_query_labels[unknown_indices])
+
+                for ind_id in unique_unknown_labels:
+                    # Get indices for this individual within quality-filtered set
+                    ind_mask = (unknown_query_labels == ind_id) & u_mask
+                    ind_indices = np.where(ind_mask)[0]
+
+                    if len(ind_indices) == 0:
+                        continue
+
+                    # Count samples detected as novel (max_score < threshold)
+                    detected_novel = 0
+                    for i in ind_indices:
+                        max_score = unknown_scores[i].max().item()
+                        if max_score < threshold:
+                            detected_novel += 1
+
+                    per_ind_ndr.append(detected_novel / len(ind_indices))
+
+                n_unknown_individuals = len(per_ind_ndr)
+
+            ndr = np.mean(per_ind_ndr) if per_ind_ndr else 0.0
 
             results[q_key][f'NoveltyDetectionRate@FalseNovelty={fnr_pct}%'] = float(ndr)
             results[q_key][f'Threshold_FN={fnr_pct}%'] = float(threshold)
@@ -602,6 +621,7 @@ def compute_open_set_metrics_ndr(
         # Also store sample counts for reference
         results[q_key]['n_known_samples'] = int(k_mask.sum())
         results[q_key]['n_unknown_samples'] = int(u_mask.sum()) if len(unknown_query_labels) > 0 else 0
+        results[q_key]['n_unknown_individuals'] = n_unknown_individuals
 
     return results
 
