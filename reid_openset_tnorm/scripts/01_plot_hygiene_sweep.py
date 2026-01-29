@@ -1424,8 +1424,8 @@ def plot_tnorm_threshold(results: ResultsCollection, output_path: str):
                 for h in history:
                     if h['epoch'] == best_epoch and 'open_set' in h:
                         thresh_cal = h['open_set'].get('threshold_calibration', {})
-                        if 'threshold_mean' in thresh_cal:
-                            thresh_values.append(thresh_cal['threshold_mean'])
+                        if 'threshold' in thresh_cal:
+                            thresh_values.append(thresh_cal['threshold'])
                         break
 
             if thresh_values:
