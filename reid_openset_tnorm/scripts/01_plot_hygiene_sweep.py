@@ -1114,6 +1114,246 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
     print(f"Saved: {output_path}")
 
 
+def create_combined_figure(results: ResultsCollection, output_dir: str):
+    """
+    Create 3-panel figure:
+    A) R@1 by quality filtering strategy (baseline vs optimal)
+    B) Optimal quality thresholds for R@1 (grouped bars: gallery + query)
+    C) BA for same models/filters as panel A (not independently optimized)
+
+    Key principle: Model selection is based on R@1 only. Panel C shows
+    open-set capability of those same models with the same quality filters.
+    """
+    fig = plt.figure(figsize=(18, 6))
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
+
+    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c'}
+
+    # =========================================================================
+    # Collect metrics for both strategies
+    # =========================================================================
+    # For each gallery_size, we collect:
+    # - Baseline: threshold=0.0, eval q>=0.0, find best R@1 epoch, record R@1 and BA
+    # - Optimal: search all threshold × query combos, find best R@1, record R@1 and BA at same epoch
+
+    strategies = {
+        'baseline': {
+            'label': 'Baseline (no filter)',
+            'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
+            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': []
+        },
+        'optimal': {
+            'label': 'Optimal (R@1)',
+            'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
+            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
+            'best_gal': [], 'best_q': []
+        }
+    }
+
+    for gsize in gallery_sizes:
+        # --- Baseline: gallery_threshold=0.0, eval q>=0.0 ---
+        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
+        if len(baseline_filtered) > 0:
+            all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
+                # Find best epoch by R@1 at q>=0.0
+                best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
+
+                # Collect R@1 and BA at that epoch with q>=0.0
+                r1_values = []
+                ba_values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch:
+                            # R@1
+                            if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
+                                r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            # BA
+                            if 'open_set' in h:
+                                by_quality = h['open_set'].get('by_quality', {})
+                                if 'q>=0.0' in by_quality:
+                                    ba_values.append(by_quality['q>=0.0']['balanced_accuracy'])
+                            break
+
+                if r1_values:
+                    mean_r1 = np.mean(r1_values)
+                    ci_r1 = stats.t.ppf(0.975, len(r1_values) - 1) * stats.sem(r1_values) if len(r1_values) > 1 else 0
+                    strategies['baseline']['x'].append(gsize)
+                    strategies['baseline']['r1'].append(mean_r1)
+                    strategies['baseline']['r1_ci_lower'].append(mean_r1 - ci_r1)
+                    strategies['baseline']['r1_ci_upper'].append(mean_r1 + ci_r1)
+
+                    if ba_values:
+                        mean_ba = np.mean(ba_values)
+                        ci_ba = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
+                        strategies['baseline']['ba'].append(mean_ba)
+                        strategies['baseline']['ba_ci_lower'].append(mean_ba - ci_ba)
+                        strategies['baseline']['ba_ci_upper'].append(mean_ba + ci_ba)
+
+        # --- Optimal: find best gallery × eval quality combo for R@1 ---
+        best_mean_r1 = -1
+        best_r1_values = None
+        best_ba_values = None
+        best_gal_thresh = None
+        best_q_thresh = None
+        best_epoch_opt = None
+
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'query_quality_metrics' not in all_histories[0][0]:
+                continue
+
+            for q_thresh in query_thresholds:
+                # Find best epoch by R@1 for this combo
+                best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=q_thresh)
+
+                # Collect R@1 values at that epoch
+                r1_values = []
+                ba_values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch:
+                            if 'query_quality_metrics' in h and q_thresh in h['query_quality_metrics']:
+                                r1_values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
+                            # Also collect BA at same epoch with same quality filter
+                            if 'open_set' in h:
+                                by_quality = h['open_set'].get('by_quality', {})
+                                if q_thresh in by_quality:
+                                    ba_values.append(by_quality[q_thresh]['balanced_accuracy'])
+                            break
+
+                if r1_values:
+                    mean_r1 = np.mean(r1_values)
+                    if mean_r1 > best_mean_r1:
+                        best_mean_r1 = mean_r1
+                        best_r1_values = r1_values
+                        best_ba_values = ba_values
+                        best_gal_thresh = gal_thresh
+                        best_q_thresh = q_thresh
+                        best_epoch_opt = best_epoch
+
+        if best_r1_values:
+            mean_r1 = np.mean(best_r1_values)
+            ci_r1 = stats.t.ppf(0.975, len(best_r1_values) - 1) * stats.sem(best_r1_values) if len(best_r1_values) > 1 else 0
+            strategies['optimal']['x'].append(gsize)
+            strategies['optimal']['r1'].append(mean_r1)
+            strategies['optimal']['r1_ci_lower'].append(mean_r1 - ci_r1)
+            strategies['optimal']['r1_ci_upper'].append(mean_r1 + ci_r1)
+            strategies['optimal']['best_gal'].append(best_gal_thresh)
+            strategies['optimal']['best_q'].append(float(best_q_thresh.replace('q>=', '')))
+
+            if best_ba_values:
+                mean_ba = np.mean(best_ba_values)
+                ci_ba = stats.t.ppf(0.975, len(best_ba_values) - 1) * stats.sem(best_ba_values) if len(best_ba_values) > 1 else 0
+                strategies['optimal']['ba'].append(mean_ba)
+                strategies['optimal']['ba_ci_lower'].append(mean_ba - ci_ba)
+                strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
+
+    # =========================================================================
+    # Panel A: R@1 Strategies
+    # =========================================================================
+    ax1 = fig.add_subplot(131)
+
+    for key in ['baseline', 'optimal']:
+        s = strategies[key]
+        if s['x'] and s['r1']:
+            ax1.plot(s['x'], s['r1'], color=colors[key], linewidth=2.5,
+                     marker='o', markersize=8, label=s['label'])
+            ax1.fill_between(s['x'], s['r1_ci_lower'], s['r1_ci_upper'],
+                             color=colors[key], alpha=0.2)
+
+    ax1.set_xlabel('Examples per Individual', fontsize=12)
+    ax1.set_ylabel('Recall@1', fontsize=12)
+    ax1.set_xticks(gallery_sizes)
+
+    # Set y-axis range
+    all_ci_lower = strategies['baseline']['r1_ci_lower'] + strategies['optimal']['r1_ci_lower']
+    all_ci_upper = strategies['baseline']['r1_ci_upper'] + strategies['optimal']['r1_ci_upper']
+    if all_ci_lower and all_ci_upper:
+        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
+        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
+        ax1.set_ylim(y_min, y_max)
+        ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.legend(loc='lower right', fontsize=10)
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # =========================================================================
+    # Panel B: Optimal Thresholds (Grouped Bars)
+    # =========================================================================
+    ax2 = fig.add_subplot(132)
+
+    x = np.arange(len(strategies['optimal']['x']))
+    width = 0.35
+
+    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
+        ax2.bar(x - width/2, strategies['optimal']['best_gal'], width,
+                color='#1f77b4', label='Gallery')
+        ax2.bar(x + width/2, strategies['optimal']['best_q'], width,
+                color='#ff7f0e', label='Query')
+
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(strategies['optimal']['x'])
+
+    ax2.set_xlabel('Examples per Individual', fontsize=12)
+    ax2.set_ylabel(r'Quality Threshold ($p$ visible pelage)', fontsize=12)
+    ax2.legend(title='Threshold Type', loc='lower right', fontsize=10, title_fontsize=10)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # =========================================================================
+    # Panel C: BA for Same Models
+    # =========================================================================
+    ax3 = fig.add_subplot(133)
+
+    for key in ['baseline', 'optimal']:
+        s = strategies[key]
+        if s['x'] and s['ba']:
+            ax3.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
+                     marker='o', markersize=8, label=s['label'])
+            ax3.fill_between(s['x'], s['ba_ci_lower'], s['ba_ci_upper'],
+                             color=colors[key], alpha=0.2)
+
+    ax3.set_xlabel('Examples per Individual', fontsize=12)
+    ax3.set_ylabel('Balanced Accuracy', fontsize=12)
+    ax3.set_xticks(gallery_sizes)
+
+    # Set y-axis range
+    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal']['ba_ci_lower']
+    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal']['ba_ci_upper']
+    if all_ci_lower and all_ci_upper:
+        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
+        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
+        ax3.set_ylim(y_min, y_max)
+        ax3.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.legend(loc='lower right', fontsize=10)
+    ax3.text(0.02, 0.98, 'C', transform=ax3.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # =========================================================================
+    # Save figure
+    # =========================================================================
+    plt.suptitle('T-Norm Hygiene Sweep: Model Selection by R@1', fontsize=14, y=1.02)
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, 'combined_r1_selection.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved combined figure: {output_path}")
+
+
 def plot_tnorm_threshold(results: ResultsCollection, output_path: str):
     """
     Plot T-norm decision threshold (Z-score) by gallery size and quality threshold.
@@ -1292,27 +1532,11 @@ def main():
     # Print summary
     print_summary_table(results)
 
-    # Generate individual plots
+    # Generate figures
     print("\nGenerating figures...")
 
-    plot_balanced_accuracy_strategies(
-        results,
-        os.path.join(args.output_dir, 'panel_a_balanced_accuracy.png')
-    )
-
-    plot_optimal_thresholds_balanced(
-        results,
-        os.path.join(args.output_dir, 'panel_b_optimal_thresholds.png')
-    )
-
-    plot_recall_strategies(
-        results,
-        os.path.join(args.output_dir, 'panel_c_recall_strategies.png')
-    )
-
-    # Generate combined figures
-    create_closed_set_figure(results, args.output_dir)
-    create_open_set_figure(results, args.output_dir)
+    # Main combined figure (3 panels: R@1, optimal thresholds, BA for same models)
+    create_combined_figure(results, args.output_dir)
 
     # Faceted recall@1 curves by query quality threshold
     plot_recall_curves(results, os.path.join(args.output_dir, 'recall_curves.png'))
