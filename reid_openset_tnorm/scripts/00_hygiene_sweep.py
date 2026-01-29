@@ -724,81 +724,89 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     N = len(gallery_labels)
     scores_gal_gal.fill_diagonal_(-9999)
 
-    # LOO Threshold Calibration via Max-Score Simulation
+    # Individual-level LOO Threshold Calibration
     #
-    # For each gallery sample, simulate:
-    # 1. KNOWN query: max score to gallery (excluding self) - check if correct match
-    # 2. UNKNOWN query: max score to different-ID samples only (imposter simulation)
+    # For each held-out individual H:
+    #   1. Gallery = all samples from other individuals
+    #   2. Unknown queries = H's samples (truly unknown - no same-ID in gallery)
+    #   3. Known queries = sample-level LOO within reduced gallery
+    #   4. Grid search for optimal threshold for this fold
     #
-    # Then grid search for threshold that maximizes balanced accuracy
-    # where unknown detection is framed as the positive class.
+    # Final threshold = mean across all folds
 
-    known_individual_results = {}   # {ind_label: [(max_score, is_correct_match), ...]}
-    unknown_simulation_results = {} # {ind_label: [max_imposter_score, ...]}
-
-    for i in range(N):
-        label_i = gallery_labels[i].item()
-        row = scores_gal_gal[i]  # Already has diagonal=-9999
-
-        # --- KNOWN simulation: max score to gallery (excluding self) ---
-        max_score, max_idx = row.max(dim=0)
-        pred_label = gallery_labels[max_idx].item()
-        is_correct = (pred_label == label_i)
-        known_individual_results.setdefault(label_i, []).append((max_score.item(), is_correct))
-
-        # --- UNKNOWN simulation: max score to different-ID only ---
-        imposter_mask = (gallery_labels != gallery_labels[i])
-        if imposter_mask.sum() > 0:
-            max_imposter = row[imposter_mask].max().item()
-            unknown_simulation_results.setdefault(label_i, []).append(max_imposter)
-
-    # Grid search for optimal threshold
+    unique_individuals = gallery_labels.unique().tolist()
+    fold_results = []
     thresholds = np.linspace(0, 10, 101)
-    best_ba, best_thresh = 0.0, 4.0
-    best_known_accept, best_unknown_reject = 0.0, 0.0
 
-    # DEBUG: Check what scores look like
-    all_known_scores = [s for results in known_individual_results.values() for s, _ in results]
-    all_imposter_scores = [s for scores in unknown_simulation_results.values() for s in scores]
-    if all_known_scores and all_imposter_scores:
-        print(f"  DEBUG calibration: n_known={len(all_known_scores)}, n_imposter={len(all_imposter_scores)}")
-        print(f"  DEBUG known scores: min={min(all_known_scores):.2f}, max={max(all_known_scores):.2f}, mean={np.mean(all_known_scores):.2f}")
-        print(f"  DEBUG imposter scores: min={min(all_imposter_scores):.2f}, max={max(all_imposter_scores):.2f}, mean={np.mean(all_imposter_scores):.2f}")
+    for held_out_ind in unique_individuals:
+        # Masks for this fold
+        gallery_mask = (gallery_labels != held_out_ind)  # Other individuals
+        unknown_mask = (gallery_labels == held_out_ind)  # Held-out individual
 
-    for thresh in thresholds:
-        # Macro-averaged known accept rate (TNR in unknown-positive framing)
-        # Accept = max_score > thresh AND correct match
-        per_ind_accept = []
-        for ind_label, results in known_individual_results.items():
-            accepted = sum(1 for max_s, correct in results if max_s > thresh and correct)
-            per_ind_accept.append(accepted / len(results))
-        known_accept_rate = np.mean(per_ind_accept) if per_ind_accept else 0.0
+        # UNKNOWN: held-out individual queries the reduced gallery
+        # These are truly unknown - no same-ID exists in gallery
+        unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
 
-        # Macro-averaged unknown reject rate (TPR in unknown-positive framing)
-        # Reject = max_imposter_score < thresh
-        per_ind_reject = []
-        for ind_label, max_imposters in unknown_simulation_results.items():
-            rejected = sum(1 for max_s in max_imposters if max_s < thresh)
-            per_ind_reject.append(rejected / len(max_imposters))
-        unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 0.0
+        # KNOWN: sample-level LOO within the reduced gallery
+        known_results = []  # (max_score, is_correct)
+        gallery_indices = torch.where(gallery_mask)[0]
 
-        ba = (known_accept_rate + unknown_reject_rate) / 2
+        for idx in gallery_indices:
+            label_i = gallery_labels[idx].item()
+            row = scores_gal_gal[idx]
 
-        # DEBUG: Print BA at key thresholds
-        if thresh in [0.0, 2.0, 4.0, 6.0]:
-            print(f"  DEBUG thresh={thresh:.1f}: K_accept={known_accept_rate:.3f}, U_reject={unknown_reject_rate:.3f}, BA={ba:.3f}")
+            # Valid targets: in reduced gallery AND not self
+            valid_mask = gallery_mask.clone()
+            valid_mask[idx] = False
 
-        if ba > best_ba:
-            best_ba, best_thresh = ba, thresh
-            best_known_accept = known_accept_rate
-            best_unknown_reject = unknown_reject_rate
+            if valid_mask.sum() > 0:
+                scores_to_valid = row[valid_mask]
+                max_score, local_idx = scores_to_valid.max(dim=0)
 
-    print(f"  DEBUG best: thresh={best_thresh:.2f}, BA={best_ba:.3f}")
-    optimal_thresh = best_thresh
-    calibration_ba = best_ba
-    calibration_known_accept = best_known_accept
-    calibration_unknown_reject = best_unknown_reject
-    n_known_individuals = len(known_individual_results)
+                # Map local index back to original index
+                valid_indices = torch.where(valid_mask)[0]
+                pred_idx = valid_indices[local_idx]
+                pred_label = gallery_labels[pred_idx].item()
+                is_correct = (pred_label == label_i)
+                known_results.append((max_score.item(), is_correct))
+
+        # Grid search for this fold
+        fold_best_ba, fold_best_thresh = 0.0, 4.0
+        fold_best_known_accept, fold_best_unknown_reject = 0.0, 0.0
+
+        for thresh in thresholds:
+            # Known accept: max > thresh AND correct match
+            if known_results:
+                known_accept = sum(1 for s, c in known_results if s > thresh and c) / len(known_results)
+            else:
+                known_accept = 0.0
+
+            # Unknown reject: max < thresh
+            if len(unknown_max_scores) > 0:
+                unknown_reject = (unknown_max_scores < thresh).float().mean().item()
+            else:
+                unknown_reject = 0.0
+
+            ba = (known_accept + unknown_reject) / 2
+            if ba > fold_best_ba:
+                fold_best_ba, fold_best_thresh = ba, thresh
+                fold_best_known_accept = known_accept
+                fold_best_unknown_reject = unknown_reject
+
+        fold_results.append({
+            'individual': held_out_ind,
+            'threshold': fold_best_thresh,
+            'ba': fold_best_ba,
+            'known_accept': fold_best_known_accept,
+            'unknown_reject': fold_best_unknown_reject,
+        })
+
+    # Final threshold = mean across folds
+    optimal_thresh = np.mean([f['threshold'] for f in fold_results])
+    calibration_ba = np.mean([f['ba'] for f in fold_results])
+    calibration_known_accept = np.mean([f['known_accept'] for f in fold_results])
+    calibration_unknown_reject = np.mean([f['unknown_reject'] for f in fold_results])
+    n_folds = len(fold_results)
 
     # C. Open Set Metrics (Balanced Accuracy) - MACRO-AVERAGED
     # Uses per-individual averaging for consistency with arcface/lora
@@ -816,13 +824,14 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'max_score_loo',
+            'method': 'individual_loo',
             'threshold': optimal_thresh,
+            'threshold_std': np.std([f['threshold'] for f in fold_results]),
             'calibration_ba': calibration_ba,
             'calibration_known_accept': calibration_known_accept,
             'calibration_unknown_reject': calibration_unknown_reject,
-            'n_known_individuals': n_known_individuals,
-            'n_thresholds_searched': len(thresholds),
+            'n_folds': n_folds,
+            'per_fold': fold_results,
         },
         'by_quality': balanced_metrics_by_quality
     }
@@ -983,7 +992,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             best_balanced_accuracy = ba_q0
             best_ba_epoch = epoch + 1
 
-        thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold_mean', 0.0)
+        thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold', 0.0)
 
         # Header with loss and threshold info
         print(f"Epoch {epoch+1:3d}/{EPOCHS}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, thresh={thresh_mean:.3f}")
