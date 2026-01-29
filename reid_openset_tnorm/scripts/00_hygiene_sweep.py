@@ -724,59 +724,67 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     N = len(gallery_labels)
     scores_gal_gal.fill_diagonal_(-9999)
 
-    # Flatten for stat calculation
-    # Positives: Same ID, different sample
-    # Negatives: Different ID
-    # Note: Since T-Norm aligns negatives to N(0,1), we expect negatives to center on 0.
+    # LOO Threshold Calibration via Max-Score Simulation
+    #
+    # For each gallery sample, simulate:
+    # 1. KNOWN query: max score to gallery (excluding self) - check if correct match
+    # 2. UNKNOWN query: max score to different-ID samples only (imposter simulation)
+    #
+    # Then grid search for threshold that maximizes balanced accuracy
+    # where unknown detection is framed as the positive class.
 
-    pos_scores = []
-    neg_scores = []
+    known_individual_results = {}   # {ind_label: [(max_score, is_correct_match), ...]}
+    unknown_simulation_results = {} # {ind_label: [max_imposter_score, ...]}
 
     for i in range(N):
-        l = gallery_labels[i]
-        row = scores_gal_gal[i]
+        label_i = gallery_labels[i].item()
+        row = scores_gal_gal[i]  # Already has diagonal=-9999
 
-        # Positive mask: same label, not self (already handled by diagonal fill if careful, but mask is safer)
-        pos_mask = (gallery_labels == l)
-        pos_mask[i] = False # ensure self is out
+        # --- KNOWN simulation: max score to gallery (excluding self) ---
+        max_score, max_idx = row.max(dim=0)
+        pred_label = gallery_labels[max_idx].item()
+        is_correct = (pred_label == label_i)
+        known_individual_results.setdefault(label_i, []).append((max_score.item(), is_correct))
 
-        neg_mask = (gallery_labels != l)
+        # --- UNKNOWN simulation: max score to different-ID only ---
+        imposter_mask = (gallery_labels != gallery_labels[i])
+        if imposter_mask.sum() > 0:
+            max_imposter = row[imposter_mask].max().item()
+            unknown_simulation_results.setdefault(label_i, []).append(max_imposter)
 
-        if pos_mask.sum() > 0:
-            pos_scores.append(row[pos_mask])
-        if neg_mask.sum() > 0:
-            neg_scores.append(row[neg_mask])
+    # Grid search for optimal threshold
+    thresholds = np.linspace(0, 10, 101)
+    best_ba, best_thresh = 0.0, 4.0
+    best_known_accept, best_unknown_reject = 0.0, 0.0
 
-    if len(pos_scores) > 0:
-        pos_scores = torch.cat(pos_scores)
-        neg_scores = torch.cat(neg_scores)
+    for thresh in thresholds:
+        # Macro-averaged known accept rate (TNR in unknown-positive framing)
+        # Accept = max_score > thresh AND correct match
+        per_ind_accept = []
+        for ind_label, results in known_individual_results.items():
+            accepted = sum(1 for max_s, correct in results if max_s > thresh and correct)
+            per_ind_accept.append(accepted / len(results))
+        known_accept_rate = np.mean(per_ind_accept) if per_ind_accept else 0.0
 
-        # T-Norm threshold calibration with safety floor
-        #
-        # Key insight: Open-set test uses MAX score across gallery, not individual scores.
-        # If each imposter score ~ N(0,1), the MAX of N samples has expected value ≈ √(2 ln N).
-        # For N=64: E[max] ≈ 2.88
-        #
-        # Using mean-based calibration (pos_mean + neg_mean) / 2 ≈ 0.8 allows almost all
-        # unknowns to pass (since their max score ≈ 2.88 > 0.8).
-        #
-        # Fix: Use a safety floor of 4σ to ensure robust unknown rejection.
-        # At 4σ, P(Z > 4) ≈ 0.003% per comparison - even with large galleries,
-        # false accept rate remains very low.
+        # Macro-averaged unknown reject rate (TPR in unknown-positive framing)
+        # Reject = max_imposter_score < thresh
+        per_ind_reject = []
+        for ind_label, max_imposters in unknown_simulation_results.items():
+            rejected = sum(1 for max_s in max_imposters if max_s < thresh)
+            per_ind_reject.append(rejected / len(max_imposters))
+        unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 0.0
 
-        safe_sigma = 4.0
-        pos_mean = pos_scores.mean().item()
-        neg_mean = neg_scores.mean().item()  # Should be ~0 by T-Norm design
+        ba = (known_accept_rate + unknown_reject_rate) / 2
+        if ba > best_ba:
+            best_ba, best_thresh = ba, thresh
+            best_known_accept = known_accept_rate
+            best_unknown_reject = unknown_reject_rate
 
-        # Use safety floor unless positive scores are strong enough that midpoint exceeds it
-        midpoint = (pos_mean + neg_mean) / 2.0
-        optimal_thresh = max(safe_sigma, midpoint)
-
-        thresh_std = pos_scores.std().item() if len(pos_scores) > 1 else 0.0
-    else:
-        # Fallback if no positive pairs (e.g. 1 shot per ID)
-        optimal_thresh = 4.0  # 4 sigma
-        thresh_std = 0.0
+    optimal_thresh = best_thresh
+    calibration_ba = best_ba
+    calibration_known_accept = best_known_accept
+    calibration_unknown_reject = best_unknown_reject
+    n_known_individuals = len(known_individual_results)
 
     # C. Open Set Metrics (Balanced Accuracy) - MACRO-AVERAGED
     # Uses per-individual averaging for consistency with arcface/lora
@@ -794,9 +802,13 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'loo_tnorm',
-            'threshold_mean': optimal_thresh,
-            'threshold_std': thresh_std,
+            'method': 'max_score_loo',
+            'threshold': optimal_thresh,
+            'calibration_ba': calibration_ba,
+            'calibration_known_accept': calibration_known_accept,
+            'calibration_unknown_reject': calibration_unknown_reject,
+            'n_known_individuals': n_known_individuals,
+            'n_thresholds_searched': len(thresholds),
         },
         'by_quality': balanced_metrics_by_quality
     }
