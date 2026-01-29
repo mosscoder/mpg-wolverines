@@ -45,7 +45,7 @@ from utils.results import ResultsCollection
 #   'arithmetic_mean'- (R@1 + BA) / 2
 #   'geometric_mean' - sqrt(R@1 * BA)
 #
-DEFAULT_BEST_EPOCH_CRITERION = 'harmonic_mean'
+DEFAULT_BEST_EPOCH_CRITERION = 'recall'
 
 # Quality threshold for best epoch selection
 # 'q>=0.0' uses all queries, 'q>=0.1' filters low-quality queries, etc.
