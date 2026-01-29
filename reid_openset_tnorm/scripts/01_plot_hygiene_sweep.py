@@ -1143,12 +1143,14 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
         'baseline': {
             'label': 'Baseline (no filter)',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
-            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': []
+            'kar': [], 'kar_ci_lower': [], 'kar_ci_upper': [],
+            'urr': [], 'urr_ci_lower': [], 'urr_ci_upper': []
         },
         'optimal': {
             'label': 'Optimal (R@1)',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
-            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
+            'kar': [], 'kar_ci_lower': [], 'kar_ci_upper': [],
+            'urr': [], 'urr_ci_lower': [], 'urr_ci_upper': [],
             'best_gal': [], 'best_q': []
         }
     }
@@ -1162,20 +1164,22 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                 # Find best epoch by R@1 at q>=0.0
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
 
-                # Collect R@1 and BA at that epoch with q>=0.0
+                # Collect R@1, known_accept_rate, unknown_reject_rate at that epoch with q>=0.0
                 r1_values = []
-                ba_values = []
+                kar_values = []
+                urr_values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch:
                             # R@1
                             if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
                                 r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                            # BA
+                            # Open-set metrics
                             if 'open_set' in h:
                                 by_quality = h['open_set'].get('by_quality', {})
                                 if 'q>=0.0' in by_quality:
-                                    ba_values.append(by_quality['q>=0.0']['balanced_accuracy'])
+                                    kar_values.append(by_quality['q>=0.0']['known_accept_rate'])
+                                    urr_values.append(by_quality['q>=0.0']['unknown_reject_rate'])
                             break
 
                 if r1_values:
@@ -1186,17 +1190,25 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                     strategies['baseline']['r1_ci_lower'].append(mean_r1 - ci_r1)
                     strategies['baseline']['r1_ci_upper'].append(mean_r1 + ci_r1)
 
-                    if ba_values:
-                        mean_ba = np.mean(ba_values)
-                        ci_ba = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
-                        strategies['baseline']['ba'].append(mean_ba)
-                        strategies['baseline']['ba_ci_lower'].append(mean_ba - ci_ba)
-                        strategies['baseline']['ba_ci_upper'].append(mean_ba + ci_ba)
+                    if kar_values:
+                        mean_kar = np.mean(kar_values)
+                        ci_kar = stats.t.ppf(0.975, len(kar_values) - 1) * stats.sem(kar_values) if len(kar_values) > 1 else 0
+                        strategies['baseline']['kar'].append(mean_kar)
+                        strategies['baseline']['kar_ci_lower'].append(mean_kar - ci_kar)
+                        strategies['baseline']['kar_ci_upper'].append(mean_kar + ci_kar)
+
+                    if urr_values:
+                        mean_urr = np.mean(urr_values)
+                        ci_urr = stats.t.ppf(0.975, len(urr_values) - 1) * stats.sem(urr_values) if len(urr_values) > 1 else 0
+                        strategies['baseline']['urr'].append(mean_urr)
+                        strategies['baseline']['urr_ci_lower'].append(mean_urr - ci_urr)
+                        strategies['baseline']['urr_ci_upper'].append(mean_urr + ci_urr)
 
         # --- Optimal: find best gallery × eval quality combo for R@1 ---
         best_mean_r1 = -1
         best_r1_values = None
-        best_ba_values = None
+        best_kar_values = None
+        best_urr_values = None
         best_gal_thresh = None
         best_q_thresh = None
         best_epoch_opt = None
@@ -1217,17 +1229,19 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
 
                 # Collect R@1 values at that epoch
                 r1_values = []
-                ba_values = []
+                kar_values = []
+                urr_values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch:
                             if 'query_quality_metrics' in h and q_thresh in h['query_quality_metrics']:
                                 r1_values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
-                            # Also collect BA at same epoch with same quality filter
+                            # Also collect open-set metrics at same epoch with same quality filter
                             if 'open_set' in h:
                                 by_quality = h['open_set'].get('by_quality', {})
                                 if q_thresh in by_quality:
-                                    ba_values.append(by_quality[q_thresh]['balanced_accuracy'])
+                                    kar_values.append(by_quality[q_thresh]['known_accept_rate'])
+                                    urr_values.append(by_quality[q_thresh]['unknown_reject_rate'])
                             break
 
                 if r1_values:
@@ -1235,7 +1249,8 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                     if mean_r1 > best_mean_r1:
                         best_mean_r1 = mean_r1
                         best_r1_values = r1_values
-                        best_ba_values = ba_values
+                        best_kar_values = kar_values
+                        best_urr_values = urr_values
                         best_gal_thresh = gal_thresh
                         best_q_thresh = q_thresh
                         best_epoch_opt = best_epoch
@@ -1250,12 +1265,19 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
             strategies['optimal']['best_gal'].append(best_gal_thresh)
             strategies['optimal']['best_q'].append(float(best_q_thresh.replace('q>=', '')))
 
-            if best_ba_values:
-                mean_ba = np.mean(best_ba_values)
-                ci_ba = stats.t.ppf(0.975, len(best_ba_values) - 1) * stats.sem(best_ba_values) if len(best_ba_values) > 1 else 0
-                strategies['optimal']['ba'].append(mean_ba)
-                strategies['optimal']['ba_ci_lower'].append(mean_ba - ci_ba)
-                strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
+            if best_kar_values:
+                mean_kar = np.mean(best_kar_values)
+                ci_kar = stats.t.ppf(0.975, len(best_kar_values) - 1) * stats.sem(best_kar_values) if len(best_kar_values) > 1 else 0
+                strategies['optimal']['kar'].append(mean_kar)
+                strategies['optimal']['kar_ci_lower'].append(mean_kar - ci_kar)
+                strategies['optimal']['kar_ci_upper'].append(mean_kar + ci_kar)
+
+            if best_urr_values:
+                mean_urr = np.mean(best_urr_values)
+                ci_urr = stats.t.ppf(0.975, len(best_urr_values) - 1) * stats.sem(best_urr_values) if len(best_urr_values) > 1 else 0
+                strategies['optimal']['urr'].append(mean_urr)
+                strategies['optimal']['urr_ci_lower'].append(mean_urr - ci_urr)
+                strategies['optimal']['urr_ci_upper'].append(mean_urr + ci_urr)
 
     # =========================================================================
     # Panel A: R@1 Strategies
@@ -1271,7 +1293,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                              color=colors[key], alpha=0.2)
 
     ax1.set_xlabel('Examples per Individual', fontsize=12)
-    ax1.set_ylabel('Recall@1', fontsize=12)
+    ax1.set_ylabel('Wolverine re-identification\nperformance (Recall@1)', fontsize=12)
     ax1.set_xticks(gallery_sizes)
 
     # Set y-axis range
@@ -1306,32 +1328,44 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
         ax2.set_xticklabels(strategies['optimal']['x'])
 
     ax2.set_xlabel('Examples per Individual', fontsize=12)
-    ax2.set_ylabel(r'Quality Threshold ($p$ visible pelage)', fontsize=12)
+    ax2.set_ylabel(r'Image Quality Threshold ($p$ visible pelage)', fontsize=12)
     ax2.legend(title='Threshold Type', loc='lower right', fontsize=10, title_fontsize=10)
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
     # =========================================================================
-    # Panel C: BA for Same Models
+    # Panel C: Open-set performance (known accept rate & unknown reject rate)
     # =========================================================================
     ax3 = fig.add_subplot(133)
 
+    # Plot known_accept_rate (solid lines) and unknown_reject_rate (dashed lines)
     for key in ['baseline', 'optimal']:
         s = strategies[key]
-        if s['x'] and s['ba']:
-            ax3.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
-                     marker='o', markersize=8, label=s['label'])
-            ax3.fill_between(s['x'], s['ba_ci_lower'], s['ba_ci_upper'],
-                             color=colors[key], alpha=0.2)
+        # Known accept rate (solid)
+        if s['x'] and s['kar']:
+            ax3.plot(s['x'], s['kar'], color=colors[key], linewidth=2.5,
+                     marker='o', markersize=8, linestyle='-',
+                     label=f'{s["label"]} - Known Accept')
+            ax3.fill_between(s['x'], s['kar_ci_lower'], s['kar_ci_upper'],
+                             color=colors[key], alpha=0.15)
+        # Unknown reject rate (dashed)
+        if s['x'] and s['urr']:
+            ax3.plot(s['x'], s['urr'], color=colors[key], linewidth=2.5,
+                     marker='s', markersize=7, linestyle='--',
+                     label=f'{s["label"]} - Unknown Reject')
+            ax3.fill_between(s['x'], s['urr_ci_lower'], s['urr_ci_upper'],
+                             color=colors[key], alpha=0.15)
 
     ax3.set_xlabel('Examples per Individual', fontsize=12)
-    ax3.set_ylabel('Balanced Accuracy', fontsize=12)
+    ax3.set_ylabel('Open set performance\nwith novel individuals', fontsize=12)
     ax3.set_xticks(gallery_sizes)
 
     # Set y-axis range
-    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal']['ba_ci_lower']
-    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal']['ba_ci_upper']
+    all_ci_lower = (strategies['baseline']['kar_ci_lower'] + strategies['optimal']['kar_ci_lower'] +
+                    strategies['baseline']['urr_ci_lower'] + strategies['optimal']['urr_ci_lower'])
+    all_ci_upper = (strategies['baseline']['kar_ci_upper'] + strategies['optimal']['kar_ci_upper'] +
+                    strategies['baseline']['urr_ci_upper'] + strategies['optimal']['urr_ci_upper'])
     if all_ci_lower and all_ci_upper:
         y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
         y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
@@ -1339,7 +1373,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
         ax3.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
     ax3.grid(True, alpha=0.3, axis='y')
-    ax3.legend(loc='lower right', fontsize=10)
+    ax3.legend(loc='lower right', fontsize=9)
     ax3.text(0.02, 0.98, 'C', transform=ax3.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
