@@ -33,6 +33,26 @@ sys.path.append('.')
 from utils.results import ResultsCollection
 
 
+# =============================================================================
+# CONFIGURATION: Best Epoch Selection Criterion
+# =============================================================================
+# Change this to re-evaluate optimal epochs without re-running experiments.
+#
+# Options:
+#   'harmonic_mean'  - 2*R@1*BA / (R@1+BA) - balances both metrics (DEFAULT)
+#   'ba'             - Balanced accuracy only (open-set focus)
+#   'recall'         - Recall@1 only (closed-set focus)
+#   'arithmetic_mean'- (R@1 + BA) / 2
+#   'geometric_mean' - sqrt(R@1 * BA)
+#
+DEFAULT_BEST_EPOCH_CRITERION = 'harmonic_mean'
+
+# Quality threshold for best epoch selection
+# 'q>=0.0' uses all queries, 'q>=0.1' filters low-quality queries, etc.
+DEFAULT_QUALITY_THRESHOLD = 'q>=0.0'
+# =============================================================================
+
+
 def load_hygiene_results(results_dir: str) -> ResultsCollection:
     """Load hygiene sweep results from JSON files."""
     pattern = os.path.join(results_dir, "threshold=*_gallery=*_seed=*.json")
@@ -66,10 +86,126 @@ def load_hygiene_results(results_dir: str) -> ResultsCollection:
     return ResultsCollection(results)
 
 
+def compute_epoch_metric(h: dict, criterion: str, query_thresh: str = "q>=0.0") -> float:
+    """
+    Compute a single metric value for one epoch record.
+
+    Args:
+        h: Single epoch history record
+        criterion: One of 'harmonic_mean', 'ba', 'recall', 'recall_only', 'ba_only'
+        query_thresh: Quality threshold key (e.g., "q>=0.0")
+
+    Returns:
+        Metric value, or None if not computable
+    """
+    recall = None
+    ba = None
+
+    if 'query_quality_metrics' in h and query_thresh in h['query_quality_metrics']:
+        recall = h['query_quality_metrics'][query_thresh].get('recall_at_1')
+
+    if 'open_set' in h:
+        by_quality = h['open_set'].get('by_quality', {})
+        if query_thresh in by_quality:
+            ba = by_quality[query_thresh].get('balanced_accuracy')
+
+    if criterion == 'recall' or criterion == 'recall_only':
+        return recall
+    elif criterion == 'ba' or criterion == 'ba_only':
+        return ba
+    elif criterion == 'harmonic_mean':
+        if recall is not None and ba is not None and (recall + ba) > 0:
+            return 2 * recall * ba / (recall + ba)
+        return None
+    elif criterion == 'arithmetic_mean':
+        if recall is not None and ba is not None:
+            return (recall + ba) / 2
+        return None
+    elif criterion == 'geometric_mean':
+        if recall is not None and ba is not None and recall > 0 and ba > 0:
+            return np.sqrt(recall * ba)
+        return None
+    else:
+        raise ValueError(f"Unknown criterion: {criterion}")
+
+
+def find_best_epoch(all_histories: List[List[dict]],
+                    criterion: str = "harmonic_mean",
+                    query_thresh: str = "q>=0.0") -> Tuple[int, float, dict]:
+    """
+    Find epoch with best mean metric across seeds.
+
+    Args:
+        all_histories: List of epoch histories (one per seed)
+        criterion: Optimization criterion - one of:
+            'harmonic_mean' (default): 2*R@1*BA / (R@1+BA) - balances both metrics
+            'ba': Balanced accuracy only
+            'recall': Recall@1 only
+            'arithmetic_mean': (R@1 + BA) / 2
+            'geometric_mean': sqrt(R@1 * BA)
+        query_thresh: Quality threshold key for evaluation (e.g., "q>=0.0")
+
+    Returns:
+        Tuple of (best_epoch, best_mean_metric, details_dict)
+        details_dict contains 'recall', 'ba', and 'criterion_value' at best epoch
+    """
+    if not all_histories or not all_histories[0]:
+        return 50, 0.0, {}
+
+    # Get epochs that have metrics
+    eval_epochs = []
+    for h in all_histories[0]:
+        if 'query_quality_metrics' in h or 'open_set' in h:
+            eval_epochs.append(h['epoch'])
+
+    if not eval_epochs:
+        return 50, 0.0, {}
+
+    best_epoch = None
+    best_mean = -1
+    best_details = {}
+
+    for epoch in eval_epochs:
+        metric_values = []
+        recall_values = []
+        ba_values = []
+
+        for history in all_histories:
+            for h in history:
+                if h['epoch'] == epoch:
+                    metric = compute_epoch_metric(h, criterion, query_thresh)
+                    if metric is not None:
+                        metric_values.append(metric)
+
+                    # Also collect individual metrics for details
+                    r = compute_epoch_metric(h, 'recall', query_thresh)
+                    b = compute_epoch_metric(h, 'ba', query_thresh)
+                    if r is not None:
+                        recall_values.append(r)
+                    if b is not None:
+                        ba_values.append(b)
+                    break
+
+        if metric_values:
+            mean_metric = np.mean(metric_values)
+            if mean_metric > best_mean:
+                best_mean = mean_metric
+                best_epoch = epoch
+                best_details = {
+                    'recall': np.mean(recall_values) if recall_values else 0.0,
+                    'ba': np.mean(ba_values) if ba_values else 0.0,
+                    'criterion': criterion,
+                    'criterion_value': mean_metric
+                }
+
+    return best_epoch or 50, best_mean, best_details
+
+
 def find_best_epoch_for_balanced_accuracy(all_histories: List[List[dict]],
                                            query_thresh: str = "q>=0.0") -> Tuple[int, float]:
     """
     Find epoch with best mean balanced accuracy across seeds.
+    (Legacy wrapper for backward compatibility)
 
     Args:
         all_histories: List of epoch histories (one per seed)
@@ -78,69 +214,82 @@ def find_best_epoch_for_balanced_accuracy(all_histories: List[List[dict]],
     Returns:
         Tuple of (best_epoch, best_mean_ba)
     """
-    if not all_histories or not all_histories[0]:
-        return 50, 0.0
-
-    # Get epochs that have open_set metrics with by_quality
-    eval_epochs = []
-    for h in all_histories[0]:
-        if 'open_set' in h and 'by_quality' in h['open_set']:
-            eval_epochs.append(h['epoch'])
-
-    if not eval_epochs:
-        return 50, 0.0
-
-    best_epoch = None
-    best_mean = -1
-
-    for epoch in eval_epochs:
-        ba_values = []
-        for history in all_histories:
-            for h in history:
-                if h['epoch'] == epoch and 'open_set' in h:
-                    by_quality = h['open_set'].get('by_quality', {})
-                    if query_thresh in by_quality:
-                        ba = by_quality[query_thresh].get('balanced_accuracy', 0.0)
-                        ba_values.append(ba)
-                    break
-
-        if ba_values:
-            mean_ba = np.mean(ba_values)
-            if mean_ba > best_mean:
-                best_mean = mean_ba
-                best_epoch = epoch
-
-    return best_epoch or 50, best_mean
+    best_epoch, best_mean, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=query_thresh)
+    return best_epoch, best_mean
 
 
-def find_best_epoch_for_recall(all_histories: List[List[dict]]) -> Tuple[int, float]:
-    """Find epoch with best mean overall recall across seeds."""
-    if not all_histories or not all_histories[0]:
-        return 50, 0.0
+def find_best_epoch_for_recall(all_histories: List[List[dict]],
+                                query_thresh: str = "q>=0.0") -> Tuple[int, float]:
+    """
+    Find epoch with best mean overall recall across seeds.
+    (Legacy wrapper for backward compatibility)
 
-    eval_epochs = [h['epoch'] for h in all_histories[0] if 'query_quality_metrics' in h]
+    Args:
+        all_histories: List of epoch histories (one per seed)
+        query_thresh: Quality threshold key for evaluation (e.g., "q>=0.0")
 
-    if not eval_epochs:
-        return 50, 0.0
+    Returns:
+        Tuple of (best_epoch, best_mean_recall)
+    """
+    best_epoch, best_mean, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=query_thresh)
+    return best_epoch, best_mean
 
-    best_epoch = None
-    best_mean = -1
 
-    for epoch in eval_epochs:
-        recalls = []
-        for history in all_histories:
-            for h in history:
-                if h['epoch'] == epoch and 'query_quality_metrics' in h:
-                    recalls.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                    break
+def find_optimal_epoch(all_histories: List[List[dict]],
+                       query_thresh: str = None) -> Tuple[int, float, dict]:
+    """
+    Find optimal epoch using the configured default criterion.
 
-        if recalls:
-            mean_recall = np.mean(recalls)
-            if mean_recall > best_mean:
-                best_mean = mean_recall
-                best_epoch = epoch
+    This is the primary function for determining the "best" epoch,
+    using the criterion defined in DEFAULT_BEST_EPOCH_CRITERION.
 
-    return best_epoch or 50, best_mean
+    Args:
+        all_histories: List of epoch histories (one per seed)
+        query_thresh: Quality threshold key (defaults to DEFAULT_QUALITY_THRESHOLD)
+
+    Returns:
+        Tuple of (best_epoch, criterion_value, details_dict)
+        details_dict contains 'recall', 'ba', 'criterion', and 'criterion_value'
+    """
+    if query_thresh is None:
+        query_thresh = DEFAULT_QUALITY_THRESHOLD
+    return find_best_epoch(all_histories, criterion=DEFAULT_BEST_EPOCH_CRITERION, query_thresh=query_thresh)
+
+
+def get_epoch_metrics_summary(all_histories: List[List[dict]],
+                              query_thresh: str = None) -> dict:
+    """
+    Get comprehensive summary of best epochs under different criteria.
+
+    Useful for reporting and comparing different optimization objectives.
+
+    Args:
+        all_histories: List of epoch histories (one per seed)
+        query_thresh: Quality threshold key (defaults to DEFAULT_QUALITY_THRESHOLD)
+
+    Returns:
+        Dict with best epoch info for each criterion
+    """
+    if query_thresh is None:
+        query_thresh = DEFAULT_QUALITY_THRESHOLD
+
+    criteria = ['harmonic_mean', 'ba', 'recall', 'arithmetic_mean', 'geometric_mean']
+    summary = {}
+
+    for criterion in criteria:
+        epoch, value, details = find_best_epoch(all_histories, criterion=criterion, query_thresh=query_thresh)
+        summary[criterion] = {
+            'best_epoch': epoch,
+            'value': value,
+            'recall': details.get('recall', 0.0),
+            'ba': details.get('ba', 0.0)
+        }
+
+    # Mark the default criterion
+    summary['default_criterion'] = DEFAULT_BEST_EPOCH_CRITERION
+    summary['optimal'] = summary[DEFAULT_BEST_EPOCH_CRITERION]
+
+    return summary
 
 
 def plot_balanced_accuracy_strategies(results: ResultsCollection, output_path: str):
@@ -173,7 +322,7 @@ def plot_balanced_accuracy_strategies(results: ResultsCollection, output_path: s
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.0')
+                best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.0')
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -195,7 +344,7 @@ def plot_balanced_accuracy_strategies(results: ResultsCollection, output_path: s
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.1')
+                best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.1')
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -226,7 +375,7 @@ def plot_balanced_accuracy_strategies(results: ResultsCollection, output_path: s
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, q_thresh)
+                best_epoch, _, _ = find_optimal_epoch(all_histories, q_thresh)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -314,7 +463,7 @@ def plot_optimal_thresholds_balanced(results: ResultsCollection, output_path: st
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, q_thresh)
+                best_epoch, _, _ = find_optimal_epoch(all_histories, q_thresh)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -378,7 +527,7 @@ def plot_recall_strategies(results: ResultsCollection, output_path: str):
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                best_epoch, _, _ = find_optimal_epoch(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -398,7 +547,7 @@ def plot_recall_strategies(results: ResultsCollection, output_path: str):
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                best_epoch, _, _ = find_optimal_epoch(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -426,7 +575,7 @@ def plot_recall_strategies(results: ResultsCollection, output_path: str):
                 continue
             if 'query_quality_metrics' not in all_histories[0][0]:
                 continue
-            best_epoch, _ = find_best_epoch_for_recall(all_histories)
+            best_epoch, _, _ = find_optimal_epoch(all_histories)
             for q_thresh in query_thresholds:
                 values = []
                 for history in all_histories:
@@ -500,7 +649,7 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                best_epoch, _, _ = find_optimal_epoch(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -520,7 +669,7 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                best_epoch, _ = find_best_epoch_for_recall(all_histories)
+                best_epoch, _, _ = find_optimal_epoch(all_histories)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -550,7 +699,7 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
                 continue
             if 'query_quality_metrics' not in all_histories[0][0]:
                 continue
-            best_epoch, _ = find_best_epoch_for_recall(all_histories)
+            best_epoch, _, _ = find_optimal_epoch(all_histories)
             for q_thresh in query_thresholds:
                 values = []
                 for history in all_histories:
@@ -620,7 +769,7 @@ def create_closed_set_figure(results: ResultsCollection, output_dir: str):
             if 'query_quality_metrics' not in all_histories[0][0]:
                 continue
 
-            best_epoch, _ = find_best_epoch_for_recall(all_histories)
+            best_epoch, _, _ = find_optimal_epoch(all_histories)
 
             for q_thresh in query_thresholds:
                 values = []
@@ -687,7 +836,7 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.0')
+                best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.0')
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -709,7 +858,7 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
         if len(minimal_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in minimal_filtered]
             if all_histories and all_histories[0]:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.1')
+                best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.1')
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -738,7 +887,7 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, q_thresh)
+                best_epoch, _, _ = find_optimal_epoch(all_histories, q_thresh)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -803,7 +952,7 @@ def create_open_set_figure(results: ResultsCollection, output_dir: str):
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, q_thresh)
+                best_epoch, _, _ = find_optimal_epoch(all_histories, q_thresh)
                 values = []
                 for history in all_histories:
                     for h in history:
@@ -994,7 +1143,7 @@ def plot_tnorm_threshold(results: ResultsCollection, output_path: str):
 
             # Get threshold at best epoch for each seed
             all_histories = [r.get('epoch_history', []) for r in filtered]
-            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.0')
+            best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.0')
 
             thresh_values = []
             for history in all_histories:
@@ -1034,16 +1183,17 @@ def plot_tnorm_threshold(results: ResultsCollection, output_path: str):
 
 
 def print_summary_table(results: ResultsCollection):
-    """Print summary statistics for open-set evaluation."""
-    print("\n" + "=" * 80)
-    print("SUMMARY TABLE: Open-Set Balanced Accuracy by Configuration (Best Epoch Selection)")
-    print("=" * 80)
+    """Print summary statistics for open-set evaluation using configurable best epoch criterion."""
+    print("\n" + "=" * 100)
+    print(f"SUMMARY TABLE: Best Epoch by {DEFAULT_BEST_EPOCH_CRITERION.upper()} (R@1 & BA)")
+    print(f"Quality threshold: {DEFAULT_QUALITY_THRESHOLD}")
+    print("=" * 100)
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
 
-    print(f"{'Thresh':<8} {'Gallery':<10} {'Best Ep':<10} {'BA Mean':<12} {'BA Std':<12} {'N Seeds':<8}")
-    print("-" * 80)
+    print(f"{'Thresh':<8} {'Gallery':<8} {'Epoch':<6} {'R@1':<8} {'BA':<8} {'H-Mean':<8} {'Seeds':<6}")
+    print("-" * 100)
 
     metrics = {}
     for threshold in gallery_thresholds:
@@ -1056,31 +1206,63 @@ def print_summary_table(results: ResultsCollection):
             if not all_histories or not all_histories[0]:
                 continue
 
-            best_epoch, _ = find_best_epoch_for_balanced_accuracy(all_histories, 'q>=0.0')
+            # Use configurable criterion for best epoch selection
+            best_epoch, criterion_value, details = find_optimal_epoch(all_histories)
 
-            values = []
+            # Collect per-seed metrics at the best epoch
+            recall_values = []
+            ba_values = []
             for history in all_histories:
                 for h in history:
-                    if h['epoch'] == best_epoch and 'open_set' in h:
-                        by_quality = h['open_set'].get('by_quality', {})
-                        if 'q>=0.0' in by_quality:
-                            values.append(by_quality['q>=0.0']['balanced_accuracy'])
+                    if h['epoch'] == best_epoch:
+                        r = compute_epoch_metric(h, 'recall', DEFAULT_QUALITY_THRESHOLD)
+                        b = compute_epoch_metric(h, 'ba', DEFAULT_QUALITY_THRESHOLD)
+                        if r is not None:
+                            recall_values.append(r)
+                        if b is not None:
+                            ba_values.append(b)
                         break
 
-            if values:
-                mean_ba = np.mean(values)
-                std_ba = np.std(values, ddof=1) if len(values) > 1 else 0
-                print(f"{threshold:<8.2f} {gallery_size:<10} {best_epoch:<10} {mean_ba:.4f}{'':>6} "
-                      f"{std_ba:.4f}{'':>6} {len(values):<8}")
-                metrics[(threshold, gallery_size)] = {'mean': mean_ba, 'std': std_ba, 'epoch': best_epoch}
+            if recall_values and ba_values:
+                mean_recall = np.mean(recall_values)
+                mean_ba = np.mean(ba_values)
+                # Compute harmonic mean of means
+                if (mean_recall + mean_ba) > 0:
+                    h_mean = 2 * mean_recall * mean_ba / (mean_recall + mean_ba)
+                else:
+                    h_mean = 0.0
 
-    # Find best configuration
+                print(f"{threshold:<8.2f} {gallery_size:<8} {best_epoch:<6} "
+                      f"{mean_recall:<8.4f} {mean_ba:<8.4f} {h_mean:<8.4f} {len(recall_values):<6}")
+                metrics[(threshold, gallery_size)] = {
+                    'recall': mean_recall,
+                    'ba': mean_ba,
+                    'h_mean': h_mean,
+                    'epoch': best_epoch,
+                    'n_seeds': len(recall_values)
+                }
+
+    # Find best configuration by harmonic mean
     if metrics:
-        best_key = max(metrics.keys(), key=lambda k: metrics[k]['mean'])
+        best_key = max(metrics.keys(), key=lambda k: metrics[k]['h_mean'])
         best_data = metrics[best_key]
-        print("-" * 80)
-        print(f"Best: threshold={best_key[0]}, gallery_size={best_key[1]}, epoch={best_data['epoch']} -> "
-              f"BA={best_data['mean']:.4f}")
+        print("-" * 100)
+        print(f"Best config: threshold={best_key[0]}, gallery={best_key[1]}, epoch={best_data['epoch']}")
+        print(f"  R@1={best_data['recall']:.4f}, BA={best_data['ba']:.4f}, H-Mean={best_data['h_mean']:.4f}")
+
+        # Also show what other criteria would select
+        print("\nAlternative criteria comparison:")
+        best_by_recall = max(metrics.keys(), key=lambda k: metrics[k]['recall'])
+        best_by_ba = max(metrics.keys(), key=lambda k: metrics[k]['ba'])
+
+        if best_by_recall != best_key:
+            d = metrics[best_by_recall]
+            print(f"  Best by R@1: thresh={best_by_recall[0]}, gallery={best_by_recall[1]} "
+                  f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
+        if best_by_ba != best_key:
+            d = metrics[best_by_ba]
+            print(f"  Best by BA:  thresh={best_by_ba[0]}, gallery={best_by_ba[1]} "
+                  f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
 
 
 def main():

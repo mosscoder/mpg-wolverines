@@ -964,9 +964,11 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
     start_time = time.time()
     epoch_history = []
     best_recall = 0.0
-    best_epoch = 0
+    best_recall_epoch = 0
     best_balanced_accuracy = 0.0
     best_ba_epoch = 0
+    best_harmonic_mean = 0.0
+    best_hm_epoch = 0
 
     for epoch in range(EPOCHS):
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
@@ -985,7 +987,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
         if recall_1 > best_recall:
             best_recall = recall_1
-            best_epoch = epoch + 1
+            best_recall_epoch = epoch + 1
 
         # Track best balanced accuracy for open-set (at q>=0.0 for overall metric)
         by_quality = open_set_metrics.get('by_quality', {})
@@ -993,6 +995,15 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         if ba_q0 > best_balanced_accuracy:
             best_balanced_accuracy = ba_q0
             best_ba_epoch = epoch + 1
+
+        # Track best harmonic mean of R@1 and BA (balances closed-set and open-set)
+        if (recall_1 + ba_q0) > 0:
+            hm = 2 * recall_1 * ba_q0 / (recall_1 + ba_q0)
+        else:
+            hm = 0.0
+        if hm > best_harmonic_mean:
+            best_harmonic_mean = hm
+            best_hm_epoch = epoch + 1
 
         thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold', 0.0)
 
@@ -1056,10 +1067,16 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'training_time_seconds': training_time,
             'job_idx': args.idx,
             'transform': 'resize_224_imagenet_norm',
-            'best_epoch': best_epoch,
+            # Individual metric bests (for reference)
+            'best_recall_epoch': best_recall_epoch,
             'best_recall_at_1': best_recall,
             'best_ba_epoch': best_ba_epoch,
-            'best_balanced_accuracy': best_balanced_accuracy
+            'best_balanced_accuracy': best_balanced_accuracy,
+            # Harmonic mean best (recommended for epoch selection)
+            'best_hm_epoch': best_hm_epoch,
+            'best_harmonic_mean': best_harmonic_mean,
+            # Note: Final epoch selection should be done at analysis time
+            # using 01_plot_hygiene_sweep.py which supports multiple criteria
         }
     }
 
@@ -1069,8 +1086,9 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Best R@1 epoch: {best_epoch}, R@1={best_recall:.4f}")
-    print(f"Best BA epoch: {best_ba_epoch}, BA={best_balanced_accuracy:.4f}")
+    print(f"Best R@1 epoch: {best_recall_epoch}, R@1={best_recall:.4f}")
+    print(f"Best BA epoch:  {best_ba_epoch}, BA={best_balanced_accuracy:.4f}")
+    print(f"Best H-Mean epoch: {best_hm_epoch}, H-Mean={best_harmonic_mean:.4f} (recommended)")
 
     return filename
 
