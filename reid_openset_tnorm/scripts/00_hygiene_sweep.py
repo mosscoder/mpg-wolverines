@@ -748,7 +748,8 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
 
         # KNOWN: sample-level LOO within the reduced gallery
-        known_results = []  # (max_score, is_correct)
+        # Group by individual for macro-averaging
+        known_results_by_ind = {}  # {ind_label: [(max_score, is_correct), ...]}
         gallery_indices = torch.where(gallery_mask)[0]
 
         for idx in gallery_indices:
@@ -768,20 +769,21 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
                 pred_idx = valid_indices[local_idx]
                 pred_label = gallery_labels[pred_idx].item()
                 is_correct = (pred_label == label_i)
-                known_results.append((max_score.item(), is_correct))
+                known_results_by_ind.setdefault(label_i, []).append((max_score.item(), is_correct))
 
         # Grid search for this fold
         fold_best_ba, fold_best_thresh = 0.0, 4.0
         fold_best_known_accept, fold_best_unknown_reject = 0.0, 0.0
 
         for thresh in thresholds:
-            # Known accept: max > thresh AND correct match
-            if known_results:
-                known_accept = sum(1 for s, c in known_results if s > thresh and c) / len(known_results)
-            else:
-                known_accept = 0.0
+            # Known accept: macro-averaged across individuals in reduced gallery
+            per_ind_accept = []
+            for ind_label, results in known_results_by_ind.items():
+                accepted = sum(1 for s, c in results if s > thresh and c)
+                per_ind_accept.append(accepted / len(results))
+            known_accept = np.mean(per_ind_accept) if per_ind_accept else 0.0
 
-            # Unknown reject: max < thresh
+            # Unknown reject: all samples from held-out individual (single group)
             if len(unknown_max_scores) > 0:
                 unknown_reject = (unknown_max_scores < thresh).float().mean().item()
             else:
