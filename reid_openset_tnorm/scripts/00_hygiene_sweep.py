@@ -757,6 +757,14 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     best_ba, best_thresh = 0.0, 4.0
     best_known_accept, best_unknown_reject = 0.0, 0.0
 
+    # DEBUG: Check what scores look like
+    all_known_scores = [s for results in known_individual_results.values() for s, _ in results]
+    all_imposter_scores = [s for scores in unknown_simulation_results.values() for s in scores]
+    if all_known_scores and all_imposter_scores:
+        print(f"  DEBUG calibration: n_known={len(all_known_scores)}, n_imposter={len(all_imposter_scores)}")
+        print(f"  DEBUG known scores: min={min(all_known_scores):.2f}, max={max(all_known_scores):.2f}, mean={np.mean(all_known_scores):.2f}")
+        print(f"  DEBUG imposter scores: min={min(all_imposter_scores):.2f}, max={max(all_imposter_scores):.2f}, mean={np.mean(all_imposter_scores):.2f}")
+
     for thresh in thresholds:
         # Macro-averaged known accept rate (TNR in unknown-positive framing)
         # Accept = max_score > thresh AND correct match
@@ -775,11 +783,17 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 0.0
 
         ba = (known_accept_rate + unknown_reject_rate) / 2
+
+        # DEBUG: Print BA at key thresholds
+        if thresh in [0.0, 2.0, 4.0, 6.0]:
+            print(f"  DEBUG thresh={thresh:.1f}: K_accept={known_accept_rate:.3f}, U_reject={unknown_reject_rate:.3f}, BA={ba:.3f}")
+
         if ba > best_ba:
             best_ba, best_thresh = ba, thresh
             best_known_accept = known_accept_rate
             best_unknown_reject = unknown_reject_rate
 
+    print(f"  DEBUG best: thresh={best_thresh:.2f}, BA={best_ba:.3f}")
     optimal_thresh = best_thresh
     calibration_ba = best_ba
     calibration_known_accept = best_known_accept
