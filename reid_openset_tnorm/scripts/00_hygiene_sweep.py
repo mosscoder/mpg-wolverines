@@ -45,7 +45,6 @@ sys.path.append('.')
 from utils.triplet import (
     ArcFaceLoss,
     PKBatchSampler,
-    compute_recall_at_k,
     evaluate_open_set_balanced,
 )
 from utils.training import check_result_exists
@@ -696,9 +695,11 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     # --- 3. Compute Metrics ---
 
-    # A. Recall@1 (Closed Set) - macro-averaged, same as arcface/lora
-    # Uses compute_recall_at_k which normalizes embeddings and uses cosine-based ranking
+    # A. Recall@1 (Closed Set) - macro-averaged, using T-normed scores for consistency
+    # Uses the same T-normed ranking as open-set evaluation
     query_quality_metrics = {}
+    query_labels_np = query_labels.cpu().numpy()
+
     for thresh in QUERY_QUALITY_THRESHOLDS:
         mask = query_quality >= thresh
         count = int(mask.sum())
@@ -706,14 +707,29 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
             query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
             continue
 
-        # Use macro-averaged recall (same as arcface/lora)
-        recall = compute_recall_at_k(
-            query_embeddings[mask],
-            gallery_embeddings,
-            query_labels[torch.tensor(mask)],
-            gallery_labels,
-            k=1
-        )
+        # Compute macro-averaged Recall@1 using T-normed scores
+        # Group by individual, compute per-individual accuracy, then average
+        mask_indices = np.where(mask)[0]
+        individual_correct = {}
+        individual_total = {}
+
+        for idx in mask_indices:
+            true_label = query_labels_np[idx]
+            # Find argmax of T-normed scores (highest = best match)
+            pred_idx = scores_known[idx].argmax().item()
+            pred_label = gallery_labels[pred_idx].item()
+
+            individual_total[true_label] = individual_total.get(true_label, 0) + 1
+            if pred_label == true_label:
+                individual_correct[true_label] = individual_correct.get(true_label, 0) + 1
+
+        # Per-individual Recall@1, then mean (macro-averaging)
+        per_ind_recall = [
+            individual_correct.get(label, 0) / individual_total[label]
+            for label in individual_total
+        ]
+        recall = np.mean(per_ind_recall) if per_ind_recall else 0.0
+
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
     # B. Threshold Calibration (LOO on T-Normed Gallery Scores)
