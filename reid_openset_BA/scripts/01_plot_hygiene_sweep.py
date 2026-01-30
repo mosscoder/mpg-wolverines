@@ -219,7 +219,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     gallery_thresholds = sorted(results.get_unique('threshold'))
     query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#d62728'}
+    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#2ca02c'}
 
     # =========================================================================
     # Collect metrics for both strategies
@@ -408,7 +408,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                              color=colors[key], alpha=0.2)
 
     ax1.set_xlabel('Examples per Individual', fontsize=12)
-    ax1.set_ylabel('Wolverine re-identification\nperformance (Recall@1)', fontsize=12)
+    ax1.set_ylabel('Wolverine re-identification performance (Recall at rank 1)', fontsize=12)
     ax1.set_xticks(gallery_sizes)
 
     # Set y-axis range
@@ -454,7 +454,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     # =========================================================================
     ax3 = fig.add_subplot(133)
 
-    for key in ['baseline', 'optimal', 'optimal_ba']:
+    for key in ['baseline', 'optimal_ba']:
         s = strategies[key]
         if s['x'] and s['ba']:
             ax3.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
@@ -463,12 +463,12 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                              color=colors[key], alpha=0.2)
 
     ax3.set_xlabel('Examples per Individual', fontsize=12)
-    ax3.set_ylabel('Open-Set Performance\n(Balanced Accuracy)', fontsize=12)
+    ax3.set_ylabel('Novel wolverine detection performance (Balanced accuracy)', fontsize=12)
     ax3.set_xticks(gallery_sizes)
 
     # Set y-axis range
-    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
-    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal']['ba_ci_upper'] + strategies['optimal_ba']['ba_ci_upper']
+    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
+    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal_ba']['ba_ci_upper']
     if all_ci_lower and all_ci_upper:
         y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
         y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
