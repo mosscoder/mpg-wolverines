@@ -55,6 +55,33 @@ def filter_robust_samples(db):
     return robust_db
 
 
+def get_inventory_statistics(db):
+    """Compute inventory statistics excluding unreviewed events"""
+    # Exclude unsorted (unreviewed) events from statistics
+    reviewed_db = db[db['marks'] != 'Unsorted'].copy()
+
+    total_events = len(db)
+    reviewed_events = len(reviewed_db)
+    unreviewed_events = total_events - reviewed_events
+
+    # Counts by category (reviewed only)
+    marks_counts = reviewed_db['marks'].value_counts().to_dict()
+
+    # Calculate percentages
+    marks_percentages = {
+        mark: round(count / reviewed_events * 100, 1)
+        for mark, count in marks_counts.items()
+    }
+
+    return {
+        'total_events': total_events,
+        'reviewed_events': reviewed_events,
+        'unreviewed_events': unreviewed_events,
+        'counts_by_category': marks_counts,
+        'percentages_by_category': marks_percentages
+    }
+
+
 def get_basic_statistics(robust_db):
     """Get basic statistics for console output"""
     print("\nGetting basic statistics...")
@@ -120,10 +147,10 @@ def scan_directories_simple(robust_db, output_dir):
     return existing_dirs, missing_dirs
 
 
-def save_outputs(existing_dirs, basic_stats, output_dir):
+def save_outputs(existing_dirs, basic_stats, inventory_stats, output_dir):
     """Save essential output files"""
     print(f"\nSaving outputs to: {output_dir}")
-    
+
     # Only essential file: Directories to process with MegaDetector
     megadetector_data = {
         'directories_to_process': existing_dirs,
@@ -134,7 +161,21 @@ def save_outputs(existing_dirs, basic_stats, output_dir):
     with open(os.path.join(output_dir, 'robust_directories.json'), 'w') as f:
         json.dump(megadetector_data, f, indent=2)
     print("Saved: robust_directories.json")
-    
+
+    # Save inventory statistics
+    inventory_data = {
+        'counts_by_category': inventory_stats['counts_by_category'],
+        'generated_by': '00_summarize_robust.py',
+        'note': 'Percentages computed from reviewed events only (excludes Unsorted)',
+        'percentages_by_category': inventory_stats['percentages_by_category'],
+        'reviewed_events': inventory_stats['reviewed_events'],
+        'total_capture_events': inventory_stats['total_events'],
+        'unreviewed_events': inventory_stats['unreviewed_events']
+    }
+    with open(os.path.join(output_dir, 'inventory_summary.json'), 'w') as f:
+        json.dump(inventory_data, f, indent=2, sort_keys=True)
+    print("Saved: inventory_summary.json")
+
     print(f"\nSummary:")
     print(f"  Unique individuals: {basic_stats['unique_individuals']}")
     print(f"  Year range: {basic_stats['year_range']}")
@@ -143,31 +184,31 @@ def save_outputs(existing_dirs, basic_stats, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description='Summarize robust pelage images for MegaDetector processing')
-    parser.add_argument('--drive_path', type=str, 
-                       default='/Volumes/Seagate Portable Drive',
-                       help='Path to external drive')
     parser.add_argument('--output_dir', type=str,
                        default='hugging_face_dataset/v2/data',
                        help='Output directory for results')
-    
+
     args = parser.parse_args()
-    
+
     # Setup paths
-    db_path = os.path.join(args.drive_path, 'KYLE_AI_DATABASE/Detections_inventory/Detections inventory_2023.08.29.xlsx')
+    db_path = 'data/Detections inventory_2023.08.29.xlsx'
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # Drive path for folder path replacement
+    drive_path = '/Volumes/Seagate Portable Drive'
+
     print("="*80)
     print("Robust Pelage Image Analysis")
     print("="*80)
-    print(f"Drive path: {args.drive_path}")
     print(f"Database path: {db_path}")
     print(f"Output directory: {args.output_dir}")
-    
+
     try:
         # Load and filter data
-        db = load_inventory_data(db_path, args.drive_path)
+        db = load_inventory_data(db_path, drive_path)
+        inventory_stats = get_inventory_statistics(db)
         robust_db = filter_robust_samples(db)
         
         # Get basic statistics
@@ -177,7 +218,7 @@ def main():
         existing_dirs, missing_dirs = scan_directories_simple(robust_db, args.output_dir)
         
         # Save outputs
-        save_outputs(existing_dirs, basic_stats, args.output_dir)
+        save_outputs(existing_dirs, basic_stats, inventory_stats, args.output_dir)
         
         print("\n" + "="*80)
         print("Analysis complete!")
