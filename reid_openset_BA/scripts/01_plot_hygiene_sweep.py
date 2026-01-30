@@ -219,7 +219,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     gallery_thresholds = sorted(results.get_unique('threshold'))
     query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c'}
+    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#d62728'}
 
     # =========================================================================
     # Collect metrics for both strategies
@@ -234,6 +234,11 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
             'label': 'Optimal (R@1)',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
             'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
+            'best_gal': [], 'best_q': []
+        },
+        'optimal_ba': {
+            'label': 'Optimal (BA)',
+            'x': [], 'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
             'best_gal': [], 'best_q': []
         }
     }
@@ -340,6 +345,55 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                 strategies['optimal']['ba_ci_lower'].append(mean_ba - ci_ba)
                 strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
 
+        # --- Optimal BA: find best gallery × eval quality combo for BA ---
+        best_mean_ba = -1
+        best_ba_values_ba = None
+        best_gal_thresh_ba = None
+        best_q_thresh_ba = None
+
+        for gal_thresh in gallery_thresholds:
+            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+            if len(filtered) == 0:
+                continue
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+            if 'open_set' not in all_histories[0][0]:
+                continue
+
+            for q_thresh in query_thresholds:
+                # Find best epoch by BA for this combo
+                best_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=q_thresh)
+
+                # Collect BA values at that epoch
+                ba_values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_epoch:
+                            if 'open_set' in h:
+                                by_quality = h['open_set'].get('by_quality', {})
+                                if q_thresh in by_quality:
+                                    ba_values.append(by_quality[q_thresh]['balanced_accuracy'])
+                            break
+
+                if ba_values:
+                    mean_ba = np.mean(ba_values)
+                    if mean_ba > best_mean_ba:
+                        best_mean_ba = mean_ba
+                        best_ba_values_ba = ba_values
+                        best_gal_thresh_ba = gal_thresh
+                        best_q_thresh_ba = q_thresh
+
+        if best_ba_values_ba:
+            mean_ba = np.mean(best_ba_values_ba)
+            ci_ba = stats.t.ppf(0.975, len(best_ba_values_ba) - 1) * stats.sem(best_ba_values_ba) if len(best_ba_values_ba) > 1 else 0
+            strategies['optimal_ba']['x'].append(gsize)
+            strategies['optimal_ba']['ba'].append(mean_ba)
+            strategies['optimal_ba']['ba_ci_lower'].append(mean_ba - ci_ba)
+            strategies['optimal_ba']['ba_ci_upper'].append(mean_ba + ci_ba)
+            strategies['optimal_ba']['best_gal'].append(best_gal_thresh_ba)
+            strategies['optimal_ba']['best_q'].append(float(best_q_thresh_ba.replace('q>=', '')))
+
     # =========================================================================
     # Panel A: R@1 Strategies
     # =========================================================================
@@ -400,7 +454,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     # =========================================================================
     ax3 = fig.add_subplot(133)
 
-    for key in ['baseline', 'optimal']:
+    for key in ['baseline', 'optimal', 'optimal_ba']:
         s = strategies[key]
         if s['x'] and s['ba']:
             ax3.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
@@ -413,8 +467,8 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     ax3.set_xticks(gallery_sizes)
 
     # Set y-axis range
-    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal']['ba_ci_lower']
-    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal']['ba_ci_upper']
+    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
+    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal']['ba_ci_upper'] + strategies['optimal_ba']['ba_ci_upper']
     if all_ci_lower and all_ci_upper:
         y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
         y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
