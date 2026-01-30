@@ -24,7 +24,23 @@ Camera trap network with elevated bait stations designed to capture wolverine un
 
 **Data source:** HuggingFace dataset `kdoherty/wolverines`
 
-### 2. Automated Detection (MegaDetector)
+### 2. Field Pre-Screening
+
+**Script:** `hugging_face_dataset/v2/scripts/00_summarize_robust.py`
+
+**Source:** Detection inventory database (`Detections inventory_2023.08.29.xlsx`)
+
+Before automated processing, field biologists reviewed camera trap capture events and categorized pelage visibility at the event level:
+- **Robust**: At least some images in the capture event show clear, identifiable pelage markings
+- **Not Robust**: No images in the event show sufficient pelage markings for identification
+
+**Important:** The "Robust" designation applies at the capture event level, not individual images. Events flagged as Robust contain a mixture of high and low quality pelage images. This heterogeneity is intentional — non-robust images from Robust events still enter the pipeline and are used to train the pelage quality classifier (Stage 1).
+
+**Filtering:** Only capture events designated as "Robust" proceed to the automated pipeline. Events marked "Not Robust" are excluded entirely.
+
+**Output:** `hugging_face_dataset/v2/data/robust_directories.json` — directories from Robust-flagged events ready for MegaDetector processing.
+
+### 3. Automated Detection (MegaDetector)
 
 **Script:** `hugging_face_dataset/v2/scripts/01_run_megadetector.py`
 
@@ -33,9 +49,9 @@ MegaDetector v6 (PytorchWildlife) detects wolverines in raw camera trap images a
 - Saves crops with trackable filenames
 - Records bounding box coordinates (x, y, width, height) and confidence scores
 
-### 3. Pelage Quality Annotation
+### 4. Pelage Quality Annotation
 
-#### 3.1 Image Selection for Annotation
+#### 4.1 Image Selection for Annotation
 
 **Script:** `hugging_face_dataset/v2/scripts/02_prepare_labeling_data.py`
 
@@ -50,7 +66,7 @@ Images selected for human annotation are filtered to the **earliest capture date
 - K-means clustering (K=2 to 64) precomputed to group visually similar images
 - SQLite database stores embeddings, cluster assignments, and labels
 
-#### 3.2 Human Annotation Interface
+#### 4.2 Human Annotation Interface
 
 **Script:** `hugging_face_dataset/v2/scripts/03_streamlit_labeling_app.py`
 
@@ -64,7 +80,7 @@ Images selected for human annotation are filtered to the **earliest capture date
 - Labels assigned at ID x color x date group level for temporal consistency
 - Review mode allows relabeling of previously annotated images
 
-#### 3.3 Pelage Score Prediction
+#### 4.3 Pelage Score Prediction
 
 **Script:** `hugging_face_dataset/v2/scripts/05_infer_pelage.py`
 
@@ -79,7 +95,7 @@ Images selected for human annotation are filtered to the **earliest capture date
 - Output: `pelage_score` in [0,1] — probability that image shows clear pelage markings
 - Final dataset includes both human-annotated samples (with original labels) and model-scored samples
 
-### 4. Dataset Creation
+### 5. Dataset Creation
 
 **Scripts:**
 - `hugging_face_dataset/v2/scripts/04_create_pelage_dataset.py` - Binary classification config
@@ -98,7 +114,7 @@ Images selected for human annotation are filtered to the **earliest capture date
 | `ymdh` | Temporal identifier (year-month-day-hour) |
 | `station` | Camera trap location |
 
-### 5. Pelage Quality Classification (Stage 1)
+### 6. Pelage Quality Classification (Stage 1)
 
 **Location:** `pelage_sorting/`
 
@@ -114,7 +130,7 @@ Binary classification to filter images suitable for re-identification.
 - 5-fold stratified cross-validation
 - Optimal epochs determined by validation F1
 
-### 6. Individual Re-identification (Stage 2)
+### 7. Individual Re-identification (Stage 2)
 
 **Location:** `reid_openset_BA/`
 
@@ -133,7 +149,7 @@ Open-set metric learning for individual identification.
 - Seeds: 8 replicates per configuration
 - Total: 288 configurations
 
-### 7. Open-Set Evaluation Framework
+### 8. Open-Set Evaluation Framework
 
 **Task Separation:**
 The system performs two distinct tasks measured separately:
@@ -176,7 +192,7 @@ Balanced Accuracy cleanly separates populations:
 4. Find threshold maximizing BA
 5. Final threshold = mean across all folds
 
-### 8. Temporal Validation
+### 9. Temporal Validation
 
 Validation splits use most recent captures per individual to:
 - Prevent temporal data leakage (same-day images in train/val)
