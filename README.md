@@ -49,6 +49,8 @@ MegaDetector v6 (PytorchWildlife) detects wolverines in raw camera trap images a
 - Saves crops with trackable filenames
 - Records bounding box coordinates (x, y, width, height) and confidence scores
 
+**Methodological note:** Cropping to bounding boxes removes site-specific background context (vegetation, bait station structure, camera angle). This forces downstream models to learn discriminative features from the wolverines themselves rather than exploiting spurious correlations with camera trap locations.
+
 ### 4. Pelage Quality Annotation
 
 #### 4.1 Image Selection for Annotation
