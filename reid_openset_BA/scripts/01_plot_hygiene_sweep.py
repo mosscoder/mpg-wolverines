@@ -9,9 +9,13 @@ All metrics are computed and stored during training (in epoch_history),
 so no GPU inference is needed for plotting.
 
 Figures:
-A) Line plot: Recall@1 for known wolverines - baseline vs optimal filtration
-B) Bar chart: Optimal quality thresholds for maximizing R@1
-C) Open-set performance (Balanced Accuracy) - baseline vs optimal
+1) scores.png - Performance metrics
+   A) Line plot: Recall@1 for known wolverines - baseline vs optimal filtration
+   B) Line plot: Balanced Accuracy for novel detection - baseline vs optimal
+
+2) best_thresholds.png - Optimal quality thresholds
+   A) Bar chart: Best thresholds for R@1 optimization (gallery + query)
+   B) Bar chart: Best thresholds for BA optimization (gallery + query)
 """
 
 import os
@@ -203,27 +207,16 @@ def find_optimal_epoch(all_histories: List[List[dict]],
     return find_best_epoch(all_histories, criterion=DEFAULT_BEST_EPOCH_CRITERION, query_thresh=query_thresh)
 
 
-def create_combined_figure(results: ResultsCollection, output_dir: str):
+def collect_strategies_data(results: ResultsCollection) -> dict:
     """
-    Create 3-panel figure:
-    A) R@1 by quality filtering strategy (baseline vs optimal)
-    B) Optimal quality thresholds for R@1 (grouped bars: gallery + query)
-    C) Balanced Accuracy (baseline vs optimal R@1-optimized model)
+    Collect metrics for all strategies (baseline, optimal R@1, optimal BA).
 
-    Key principle: Model selection is based on R@1 only. Panel C shows
-    open-set capability of those same models with the same quality filters.
+    Returns a dict with strategy data that can be used by multiple plotting functions.
     """
-    fig = plt.figure(figsize=(18, 6))
-
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
     query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
 
-    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#2ca02c'}
-
-    # =========================================================================
-    # Collect metrics for both strategies
-    # =========================================================================
     strategies = {
         'baseline': {
             'label': 'None',
@@ -394,10 +387,26 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
             strategies['optimal_ba']['best_gal'].append(best_gal_thresh_ba)
             strategies['optimal_ba']['best_q'].append(float(best_q_thresh_ba.replace('q>=', '')))
 
+    return strategies
+
+
+def create_scores_figure(results: ResultsCollection, output_dir: str):
+    """
+    Create 2-panel figure with performance scores:
+    A) R@1 by quality filtering strategy (baseline vs optimal)
+    B) Balanced Accuracy (baseline vs optimal BA-optimized model)
+    """
+    fig = plt.figure(figsize=(12, 6))
+
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#2ca02c'}
+
+    strategies = collect_strategies_data(results)
+
     # =========================================================================
     # Panel A: R@1 Strategies
     # =========================================================================
-    ax1 = fig.add_subplot(131)
+    ax1 = fig.add_subplot(121)
 
     for key in ['baseline', 'optimal']:
         s = strategies[key]
@@ -407,7 +416,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
             ax1.fill_between(s['x'], s['r1_ci_lower'], s['r1_ci_upper'],
                              color=colors[key], alpha=0.2)
 
-    ax1.set_xlabel('Examples per Individual', fontsize=12)
+    ax1.set_xlabel('Training examples per individual', fontsize=12)
     ax1.set_ylabel('Wolverine re-identification score (Recall at rank 1)', fontsize=12)
     ax1.set_xticks(gallery_sizes)
 
@@ -426,45 +435,21 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
              va='top', ha='left')
 
     # =========================================================================
-    # Panel B: Optimal Thresholds (Grouped Bars)
+    # Panel B: Balanced Accuracy (Open Set)
     # =========================================================================
-    ax2 = fig.add_subplot(132)
-
-    x = np.arange(len(strategies['optimal']['x']))
-    width = 0.35
-
-    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
-        ax2.bar(x - width/2, strategies['optimal']['best_gal'], width,
-                color='#1f77b4', label='Training Gallery')
-        ax2.bar(x + width/2, strategies['optimal']['best_q'], width,
-                color='#ff7f0e', label='Validation Queries')
-
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(strategies['optimal']['x'])
-
-    ax2.set_xlabel('Examples per Individual', fontsize=12)
-    ax2.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
-    ax2.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax2.grid(True, alpha=0.3, axis='y')
-    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
-             va='top', ha='left')
-
-    # =========================================================================
-    # Panel C: Balanced Accuracy (Open Set)
-    # =========================================================================
-    ax3 = fig.add_subplot(133)
+    ax2 = fig.add_subplot(122)
 
     for key in ['baseline', 'optimal_ba']:
         s = strategies[key]
         if s['x'] and s['ba']:
-            ax3.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
+            ax2.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
                      marker='o', markersize=8, label=s['label'])
-            ax3.fill_between(s['x'], s['ba_ci_lower'], s['ba_ci_upper'],
+            ax2.fill_between(s['x'], s['ba_ci_lower'], s['ba_ci_upper'],
                              color=colors[key], alpha=0.2)
 
-    ax3.set_xlabel('Examples per Individual', fontsize=12)
-    ax3.set_ylabel('Novel wolverine detection score (Balanced accuracy)', fontsize=12)
-    ax3.set_xticks(gallery_sizes)
+    ax2.set_xlabel('Training examples per individual', fontsize=12)
+    ax2.set_ylabel('Novel wolverine detection score (Balanced accuracy)', fontsize=12)
+    ax2.set_xticks(gallery_sizes)
 
     # Set y-axis range
     all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
@@ -472,23 +457,90 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     if all_ci_lower and all_ci_upper:
         y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
         y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
-        ax3.set_ylim(y_min, y_max)
-        ax3.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+        ax2.set_ylim(y_min, y_max)
+        ax2.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
-    ax3.grid(True, alpha=0.3, axis='y')
-    ax3.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax3.text(0.02, 0.98, 'C', transform=ax3.transAxes, fontsize=16, fontweight='bold',
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
     # =========================================================================
     # Save figure
     # =========================================================================
-    plt.suptitle('Raw Cosine Hygiene Sweep: Model Selection by R@1', fontsize=14, y=1.02)
     plt.tight_layout()
-    output_path = os.path.join(output_dir, 'combined_r1_selection.png')
+    output_path = os.path.join(output_dir, 'scores.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved combined figure: {output_path}")
+    print(f"Saved scores figure: {output_path}")
+
+
+def create_thresholds_figure(results: ResultsCollection, output_dir: str):
+    """
+    Create 2-panel figure with optimal quality thresholds:
+    A) Best thresholds for R@1 optimization (grouped bars: gallery + query)
+    B) Best thresholds for BA optimization (grouped bars: gallery + query)
+    """
+    fig = plt.figure(figsize=(12, 6))
+
+    strategies = collect_strategies_data(results)
+
+    # =========================================================================
+    # Panel A: Optimal Thresholds for R@1 (Grouped Bars)
+    # =========================================================================
+    ax1 = fig.add_subplot(121)
+
+    x = np.arange(len(strategies['optimal']['x']))
+    width = 0.35
+
+    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
+        ax1.bar(x - width/2, strategies['optimal']['best_gal'], width,
+                color='#1f77b4', label='Training Gallery')
+        ax1.bar(x + width/2, strategies['optimal']['best_q'], width,
+                color='#ff7f0e', label='Validation Queries')
+
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(strategies['optimal']['x'])
+
+    ax1.set_xlabel('Training examples per individual', fontsize=12)
+    ax1.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
+    ax1.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # =========================================================================
+    # Panel B: Optimal Thresholds for BA (Grouped Bars)
+    # =========================================================================
+    ax2 = fig.add_subplot(122)
+
+    x = np.arange(len(strategies['optimal_ba']['x']))
+    width = 0.35
+
+    if strategies['optimal_ba']['best_gal'] and strategies['optimal_ba']['best_q']:
+        ax2.bar(x - width/2, strategies['optimal_ba']['best_gal'], width,
+                color='#1f77b4', label='Training Gallery')
+        ax2.bar(x + width/2, strategies['optimal_ba']['best_q'], width,
+                color='#ff7f0e', label='Validation Queries')
+
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(strategies['optimal_ba']['x'])
+
+    ax2.set_xlabel('Training examples per individual', fontsize=12)
+    ax2.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
+    ax2.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
+             va='top', ha='left')
+
+    # =========================================================================
+    # Save figure
+    # =========================================================================
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, 'best_thresholds.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved thresholds figure: {output_path}")
 
 
 def plot_recall_curves(results: ResultsCollection, output_path: str):
@@ -791,8 +843,11 @@ def main():
     # Generate figures
     print("\nGenerating figures...")
 
-    # Main combined figure (3 panels: R@1, optimal thresholds, open-set performance)
-    create_combined_figure(results, args.output_dir)
+    # Scores figure (2 panels: R@1 and BA)
+    create_scores_figure(results, args.output_dir)
+
+    # Thresholds figure (2 panels: R@1 thresholds and BA thresholds)
+    create_thresholds_figure(results, args.output_dir)
 
     # Faceted recall@1 curves by query quality threshold
     plot_recall_curves(results, os.path.join(args.output_dir, 'recall_curves.png'))
