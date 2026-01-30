@@ -1,5 +1,38 @@
 # Open-Set Metrics: Why Balanced Accuracy over F1-Score
 
+## Definitions
+
+### System Actions
+
+| Action | Meaning | Condition |
+|--------|---------|-----------|
+| **Accept** | System declares: "This query is from someone in the gallery" | `max_score >= threshold` |
+| **Reject** | System declares: "This query is NOT from anyone in the gallery" | `max_score < threshold` |
+
+### Ground Truth
+
+| Term | Meaning |
+|------|---------|
+| **Known** | Query is from an individual who IS in the gallery |
+| **Unknown** | Query is from an individual who is NOT in the gallery |
+
+### Metrics
+
+| Metric | Definition | Ideal |
+|--------|------------|-------|
+| **Known Accept Rate (KAR)** | Proportion of **known** queries that are **accepted** | 1.0 |
+| **Unknown Reject Rate (URR)** | Proportion of **unknown** queries that are **rejected** | 1.0 |
+| **Balanced Accuracy (BA)** | (KAR + URR) / 2 | 1.0 |
+| **Recall@1** | Proportion of queries where top match is correct identity | 1.0 |
+
+### Interpretation
+
+- **High URR**: System correctly flags most unknowns as "not in gallery"
+- **High KAR**: System correctly flags most knowns as "in gallery"
+- **High Recall@1**: When system makes a match, it's usually the right person
+
+---
+
 ## The Problem with F1-Score for Open-Set Recognition
 
 In open-set recognition, we want to:
