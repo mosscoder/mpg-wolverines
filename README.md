@@ -34,6 +34,22 @@ Before automated processing, field biologists reviewed camera trap capture event
 - **Robust**: At least some images in the capture event show clear, identifiable pelage markings
 - **Not Robust**: No images in the event show sufficient pelage markings for identification
 
+**Capture Event Statistics:**
+
+| Metric | Count | Percentage |
+|--------|-------|------------|
+| Total capture events | 1,479 | — |
+| Reviewed events | 1,385 | — |
+| Unreviewed events | 94 | — |
+
+*Breakdown by category (reviewed events only):*
+
+| Category | Count | Percentage |
+|----------|-------|------------|
+| Robust | 588 | 42.5% |
+| Partial | 489 | 35.3% |
+| No | 308 | 22.2% |
+
 **Important:** The "Robust" designation applies at the capture event level, not individual images. Events flagged as Robust contain a mixture of high and low quality pelage images. This heterogeneity is intentional — non-robust images from Robust events still enter the pipeline and are used to train the pelage quality classifier (Stage 1).
 
 **Filtering:** Only capture events designated as "Robust" proceed to the automated pipeline. Events marked "Not Robust" are excluded entirely.

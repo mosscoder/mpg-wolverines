@@ -226,18 +226,18 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     # =========================================================================
     strategies = {
         'baseline': {
-            'label': 'Baseline (no filter)',
+            'label': 'Random image quality',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
             'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': []
         },
         'optimal': {
-            'label': 'Optimal (R@1)',
+            'label': 'Optimal image quality',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
             'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
             'best_gal': [], 'best_q': []
         },
         'optimal_ba': {
-            'label': 'Optimal (BA)',
+            'label': 'Optimal image quality',
             'x': [], 'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
             'best_gal': [], 'best_q': []
         }
@@ -408,7 +408,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                              color=colors[key], alpha=0.2)
 
     ax1.set_xlabel('Examples per Individual', fontsize=12)
-    ax1.set_ylabel('Wolverine re-identification performance (Recall at rank 1)', fontsize=12)
+    ax1.set_ylabel('Wolverine re-identification score (Recall at rank 1)', fontsize=12)
     ax1.set_xticks(gallery_sizes)
 
     # Set y-axis range
@@ -435,16 +435,16 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
 
     if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
         ax2.bar(x - width/2, strategies['optimal']['best_gal'], width,
-                color='#1f77b4', label='Gallery')
+                color='#1f77b4', label='Training Gallery')
         ax2.bar(x + width/2, strategies['optimal']['best_q'], width,
-                color='#ff7f0e', label='Query')
+                color='#ff7f0e', label='Validation Queries')
 
         ax2.set_xticks(x)
         ax2.set_xticklabels(strategies['optimal']['x'])
 
     ax2.set_xlabel('Examples per Individual', fontsize=12)
-    ax2.set_ylabel(r'Image Quality Threshold ($p$ visible pelage)', fontsize=12)
-    ax2.legend(title='Threshold Type', loc='lower right', fontsize=10, title_fontsize=10)
+    ax2.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
+    ax2.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
@@ -463,7 +463,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
                              color=colors[key], alpha=0.2)
 
     ax3.set_xlabel('Examples per Individual', fontsize=12)
-    ax3.set_ylabel('Novel wolverine detection performance (Balanced accuracy)', fontsize=12)
+    ax3.set_ylabel('Novel wolverine detection score (Balanced accuracy)', fontsize=12)
     ax3.set_xticks(gallery_sizes)
 
     # Set y-axis range
