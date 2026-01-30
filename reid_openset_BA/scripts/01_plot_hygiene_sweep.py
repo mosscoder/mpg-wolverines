@@ -226,18 +226,18 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
     # =========================================================================
     strategies = {
         'baseline': {
-            'label': 'Random image quality',
+            'label': 'Random',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
             'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': []
         },
         'optimal': {
-            'label': 'Optimal image quality',
+            'label': 'Optimal',
             'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
             'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
             'best_gal': [], 'best_q': []
         },
         'optimal_ba': {
-            'label': 'Optimal image quality',
+            'label': 'Optimal',
             'x': [], 'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
             'best_gal': [], 'best_q': []
         }
@@ -421,7 +421,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
         ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
     ax1.grid(True, alpha=0.3, axis='y')
-    ax1.legend(loc='lower right', fontsize=10)
+    ax1.legend(title='Image quality:', loc='lower right', fontsize=10, title_fontsize=10)
     ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
@@ -476,7 +476,7 @@ def create_combined_figure(results: ResultsCollection, output_dir: str):
         ax3.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
     ax3.grid(True, alpha=0.3, axis='y')
-    ax3.legend(loc='lower right', fontsize=10)
+    ax3.legend(title='Image quality:', loc='lower right', fontsize=10, title_fontsize=10)
     ax3.text(0.02, 0.98, 'C', transform=ax3.transAxes, fontsize=16, fontweight='bold',
              va='top', ha='left')
 
