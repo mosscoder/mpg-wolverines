@@ -56,7 +56,7 @@ Macro = mean across all U's
 
 ### Known Accept Rate (macro-averaged)
 For each known individual K:
-- K_accept_rate = (K's samples accepted with correct match) / (K's total samples)
+- K_accept_rate = (K's samples with max_score >= threshold) / (K's total samples)
 
 Macro = mean across all K's
 
@@ -64,6 +64,38 @@ Macro = mean across all K's
 - Each individual contributes equally regardless of sample count
 - No mixing of populations in either component
 - Natural decomposition into two interpretable rates
+
+## Separation of Detection from Identification
+
+**Design Principle: Balanced Accuracy measures detection, not identification.**
+
+The system performs two distinct tasks:
+1. **Detection**: Is this query from a known or unknown individual?
+2. **Identification**: Given it's known, which individual is it?
+
+These should be measured separately:
+
+| Metric | Task | Condition |
+|--------|------|-----------|
+| **Known Accept Rate** | Detection | `max_score >= threshold` |
+| **Unknown Reject Rate** | Detection | `max_score < threshold` |
+| **Recall@1** | Identification | `argmax == true_label` |
+
+### Why Separate?
+
+If Known Accept Rate required both `score >= threshold` AND `correct match`, misidentification would be double-penalized:
+
+1. Recall@1 penalizes misidentification (correct)
+2. Known Accept Rate ALSO penalizes misidentification (redundant)
+
+This conflation makes metrics harder to interpret. A low BA could mean:
+- Poor threshold calibration (detection problem), OR
+- Poor embedding quality (identification problem)
+
+With separation, the metrics have clear interpretations:
+- **Low BA, high Recall@1**: Threshold too aggressive (rejecting known individuals)
+- **High BA, low Recall@1**: Good detection but poor discrimination between individuals
+- **Low BA, low Recall@1**: Both systems need improvement
 
 ## Implementation
 

@@ -503,15 +503,15 @@ def compute_open_set_metrics_cosine(
                 if len(ind_indices) == 0:
                     continue
 
-                # For each sample: accept if score >= threshold AND correct match
-                accepted_correct = 0
+                # Detection only: accept if score >= threshold
+                # Correct identification is measured separately by Recall@1
+                accepted = 0
                 for i in ind_indices:
-                    max_score, max_idx = known_scores[i].max(dim=0)
-                    pred_label = gallery_labels[max_idx].item()
-                    if max_score.item() >= score_threshold and pred_label == ind_label:
-                        accepted_correct += 1
+                    max_score = known_scores[i].max().item()
+                    if max_score >= score_threshold:  # Detection only
+                        accepted += 1
 
-                per_ind_accept.append(accepted_correct / len(ind_indices))
+                per_ind_accept.append(accepted / len(ind_indices))  # Per-individual rate
 
             n_known_individuals = len(per_ind_accept)
 
@@ -737,11 +737,12 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         for thresh in thresholds:
             # Known accept: macro-averaged across individuals in reduced gallery
+            # Detection only - correct identification measured separately by Recall@1
             per_ind_accept = []
             for ind_label, results in known_results_by_ind.items():
-                accepted = sum(1 for s, c in results if s >= thresh and c)
-                per_ind_accept.append(accepted / len(results))
-            known_accept = np.mean(per_ind_accept) if per_ind_accept else 0.0
+                accepted = sum(1 for s, c in results if s >= thresh)  # Detection only
+                per_ind_accept.append(accepted / len(results))  # Per-individual rate
+            known_accept = np.mean(per_ind_accept) if per_ind_accept else 0.0  # Macro-average
 
             # Unknown reject: all samples from held-out individual (single group)
             if len(unknown_max_scores) > 0:
