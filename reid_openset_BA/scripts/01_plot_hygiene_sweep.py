@@ -419,6 +419,11 @@ def save_scores_table(strategies: dict, output_dir: str):
                 match['optimal_query_thresh'] = strategies['optimal']['best_q'][i]
 
     r1_df = pd.DataFrame(r1_data).sort_values('gallery_size')
+
+    # Compute gain (optimal - baseline)
+    if 'baseline_r1' in r1_df.columns and 'optimal_r1' in r1_df.columns:
+        r1_df['delta_r1'] = r1_df['optimal_r1'] - r1_df['baseline_r1']
+
     r1_path = os.path.join(output_dir, 'scores_r1.csv')
     r1_df.to_csv(r1_path, index=False, float_format='%.4f')
     print(f"Saved R@1 scores table: {r1_path}")
@@ -448,6 +453,11 @@ def save_scores_table(strategies: dict, output_dir: str):
                 match['optimal_query_thresh'] = strategies['optimal_ba']['best_q'][i]
 
     ba_df = pd.DataFrame(ba_data).sort_values('gallery_size')
+
+    # Compute gain (optimal - baseline)
+    if 'baseline_ba' in ba_df.columns and 'optimal_ba' in ba_df.columns:
+        ba_df['delta_ba'] = ba_df['optimal_ba'] - ba_df['baseline_ba']
+
     ba_path = os.path.join(output_dir, 'scores_ba.csv')
     ba_df.to_csv(ba_path, index=False, float_format='%.4f')
     print(f"Saved BA scores table: {ba_path}")
