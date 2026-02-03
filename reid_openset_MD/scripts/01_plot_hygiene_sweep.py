@@ -816,10 +816,10 @@ def print_summary_table(results: ResultsCollection):
 def main():
     parser = argparse.ArgumentParser(description='Plot Open-Set hygiene sweep results (Raw Cosine)')
     parser.add_argument('--results_dir', type=str,
-                        default='reid_openset_BA/results',
+                        default='reid_openset_MD/results',
                         help='Directory containing result JSON files')
     parser.add_argument('--output_dir', type=str,
-                        default='reid_openset_BA/figures',
+                        default='reid_openset_MD/figures',
                         help='Directory to save figures')
 
     args = parser.parse_args()

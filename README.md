@@ -219,6 +219,50 @@ Validation splits use most recent captures per individual to:
 
 ---
 
+## Results
+
+### Open-Set Re-identification Performance
+
+Quality filtering substantially improves both re-identification accuracy and novel individual detection across all gallery sizes.
+
+**Table 1. Performance comparison: baseline (no filtering) vs optimal quality thresholds**
+
+| Gallery Size | Baseline R@1 | Optimal R@1 | Δ R@1 | Baseline BA | Optimal BA | Δ BA |
+|--------------|--------------|-------------|-------|-------------|------------|------|
+| 2 | 0.420 | 0.579 | +0.159 | 0.500 | 0.606 | +0.106 |
+| 4 | 0.509 | 0.659 | +0.150 | 0.552 | 0.657 | +0.105 |
+| 8 | 0.571 | 0.743 | +0.172 | 0.561 | 0.682 | +0.121 |
+| 16 | 0.682 | 0.818 | +0.136 | 0.590 | 0.726 | +0.136 |
+| 32 | 0.747 | 0.882 | +0.135 | 0.716 | 0.784 | +0.068 |
+| 64 | 0.752 | 0.884 | +0.132 | 0.704 | 0.843 | +0.139 |
+
+*R@1 = Recall@1 (identification accuracy); BA = Balanced Accuracy (detection performance)*
+
+**Table 2. Optimal quality thresholds by metric and gallery size**
+
+| Gallery Size | R@1: Gallery | R@1: Query | BA: Gallery | BA: Query |
+|--------------|--------------|------------|-------------|-----------|
+| 2 | 0.20 | 0.50 | 0.50 | 0.00 |
+| 4 | 0.30 | 0.50 | 0.40 | 0.20 |
+| 8 | 0.50 | 0.50 | 0.10 | 0.20 |
+| 16 | 0.40 | 0.50 | 0.40 | 0.30 |
+| 32 | 0.50 | 0.50 | 0.40 | 0.40 |
+| 64 | 0.50 | 0.50 | 0.50 | 0.50 |
+
+### Key Findings
+
+1. **Quality filtering provides substantial gains**: Optimal thresholds improve R@1 by 13-17 percentage points across all gallery sizes, with the largest improvement (+17.2 pp) at gallery size 8.
+
+2. **Performance scales with training data**: Both metrics improve with more gallery examples, plateauing around 32-64 samples per individual. Best overall performance (64 examples): 88.4% R@1, 84.3% BA.
+
+3. **Stricter query filtering benefits identification**: Query threshold of 0.5 (strictest) is optimal for R@1 across all gallery sizes, indicating that high-quality query images are critical for accurate matching.
+
+4. **Detection optimization uses varied thresholds**: Balanced Accuracy benefits from more varied threshold combinations, particularly at smaller gallery sizes where the system has less reference data.
+
+5. **Open-set detection remains challenging**: Even with optimal filtering, BA at small gallery sizes (50-66% for 2-8 examples) indicates difficulty distinguishing known vs unknown individuals with limited reference data.
+
+---
+
 ## Reproducibility
 
 - All random seeds tracked and reported in results JSON
