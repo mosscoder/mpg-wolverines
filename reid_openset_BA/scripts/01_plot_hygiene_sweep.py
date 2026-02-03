@@ -24,6 +24,7 @@ import json
 import glob
 import argparse
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import stats
 from typing import List, Tuple
@@ -388,6 +389,159 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             strategies['optimal_ba']['best_q'].append(float(best_q_thresh_ba.replace('q>=', '')))
 
     return strategies
+
+
+def save_scores_table(strategies: dict, output_dir: str):
+    """Save scores data as CSV tables."""
+    # R@1 comparison table
+    r1_data = []
+    for i, x in enumerate(strategies['baseline']['x']):
+        row = {'gallery_size': x}
+        if i < len(strategies['baseline']['r1']):
+            row['baseline_r1'] = strategies['baseline']['r1'][i]
+            row['baseline_r1_ci_lower'] = strategies['baseline']['r1_ci_lower'][i]
+            row['baseline_r1_ci_upper'] = strategies['baseline']['r1_ci_upper'][i]
+        r1_data.append(row)
+
+    for i, x in enumerate(strategies['optimal']['x']):
+        # Find matching row or create new
+        match = next((r for r in r1_data if r['gallery_size'] == x), None)
+        if match is None:
+            match = {'gallery_size': x}
+            r1_data.append(match)
+        if i < len(strategies['optimal']['r1']):
+            match['optimal_r1'] = strategies['optimal']['r1'][i]
+            match['optimal_r1_ci_lower'] = strategies['optimal']['r1_ci_lower'][i]
+            match['optimal_r1_ci_upper'] = strategies['optimal']['r1_ci_upper'][i]
+            if i < len(strategies['optimal']['best_gal']):
+                match['optimal_gal_thresh'] = strategies['optimal']['best_gal'][i]
+            if i < len(strategies['optimal']['best_q']):
+                match['optimal_query_thresh'] = strategies['optimal']['best_q'][i]
+
+    r1_df = pd.DataFrame(r1_data).sort_values('gallery_size')
+    r1_path = os.path.join(output_dir, 'scores_r1.csv')
+    r1_df.to_csv(r1_path, index=False, float_format='%.4f')
+    print(f"Saved R@1 scores table: {r1_path}")
+
+    # Balanced Accuracy comparison table
+    ba_data = []
+    for i, x in enumerate(strategies['baseline']['x']):
+        row = {'gallery_size': x}
+        if i < len(strategies['baseline']['ba']):
+            row['baseline_ba'] = strategies['baseline']['ba'][i]
+            row['baseline_ba_ci_lower'] = strategies['baseline']['ba_ci_lower'][i]
+            row['baseline_ba_ci_upper'] = strategies['baseline']['ba_ci_upper'][i]
+        ba_data.append(row)
+
+    for i, x in enumerate(strategies['optimal_ba']['x']):
+        match = next((r for r in ba_data if r['gallery_size'] == x), None)
+        if match is None:
+            match = {'gallery_size': x}
+            ba_data.append(match)
+        if i < len(strategies['optimal_ba']['ba']):
+            match['optimal_ba'] = strategies['optimal_ba']['ba'][i]
+            match['optimal_ba_ci_lower'] = strategies['optimal_ba']['ba_ci_lower'][i]
+            match['optimal_ba_ci_upper'] = strategies['optimal_ba']['ba_ci_upper'][i]
+            if i < len(strategies['optimal_ba']['best_gal']):
+                match['optimal_gal_thresh'] = strategies['optimal_ba']['best_gal'][i]
+            if i < len(strategies['optimal_ba']['best_q']):
+                match['optimal_query_thresh'] = strategies['optimal_ba']['best_q'][i]
+
+    ba_df = pd.DataFrame(ba_data).sort_values('gallery_size')
+    ba_path = os.path.join(output_dir, 'scores_ba.csv')
+    ba_df.to_csv(ba_path, index=False, float_format='%.4f')
+    print(f"Saved BA scores table: {ba_path}")
+
+
+def save_thresholds_table(strategies: dict, output_dir: str):
+    """Save optimal thresholds data as CSV tables."""
+    # R@1-optimized thresholds
+    r1_thresh_data = []
+    for i, x in enumerate(strategies['optimal']['x']):
+        row = {'gallery_size': x}
+        if i < len(strategies['optimal']['best_gal']):
+            row['gallery_threshold'] = strategies['optimal']['best_gal'][i]
+        if i < len(strategies['optimal']['best_q']):
+            row['query_threshold'] = strategies['optimal']['best_q'][i]
+        r1_thresh_data.append(row)
+
+    r1_df = pd.DataFrame(r1_thresh_data).sort_values('gallery_size')
+    r1_path = os.path.join(output_dir, 'thresholds_r1_optimized.csv')
+    r1_df.to_csv(r1_path, index=False, float_format='%.2f')
+    print(f"Saved R@1-optimized thresholds table: {r1_path}")
+
+    # BA-optimized thresholds
+    ba_thresh_data = []
+    for i, x in enumerate(strategies['optimal_ba']['x']):
+        row = {'gallery_size': x}
+        if i < len(strategies['optimal_ba']['best_gal']):
+            row['gallery_threshold'] = strategies['optimal_ba']['best_gal'][i]
+        if i < len(strategies['optimal_ba']['best_q']):
+            row['query_threshold'] = strategies['optimal_ba']['best_q'][i]
+        ba_thresh_data.append(row)
+
+    ba_df = pd.DataFrame(ba_thresh_data).sort_values('gallery_size')
+    ba_path = os.path.join(output_dir, 'thresholds_ba_optimized.csv')
+    ba_df.to_csv(ba_path, index=False, float_format='%.2f')
+    print(f"Saved BA-optimized thresholds table: {ba_path}")
+
+
+def save_summary_table(results: ResultsCollection, output_dir: str):
+    """Save full summary statistics as CSV."""
+    gallery_sizes = sorted(results.get_unique('gallery_size'))
+    gallery_thresholds = sorted(results.get_unique('threshold'))
+
+    rows = []
+    for threshold in gallery_thresholds:
+        for gallery_size in gallery_sizes:
+            filtered = results.filter(threshold=threshold, gallery_size=gallery_size)
+            if len(filtered) == 0:
+                continue
+
+            all_histories = [r.get('epoch_history', []) for r in filtered]
+            if not all_histories or not all_histories[0]:
+                continue
+
+            best_epoch, criterion_value, details = find_optimal_epoch(all_histories)
+
+            recall_values = []
+            ba_values = []
+            for history in all_histories:
+                for h in history:
+                    if h['epoch'] == best_epoch:
+                        r = compute_epoch_metric(h, 'recall', DEFAULT_QUALITY_THRESHOLD)
+                        b = compute_epoch_metric(h, 'ba', DEFAULT_QUALITY_THRESHOLD)
+                        if r is not None:
+                            recall_values.append(r)
+                        if b is not None:
+                            ba_values.append(b)
+                        break
+
+            if recall_values and ba_values:
+                mean_recall = np.mean(recall_values)
+                mean_ba = np.mean(ba_values)
+                h_mean = 2 * mean_recall * mean_ba / (mean_recall + mean_ba) if (mean_recall + mean_ba) > 0 else 0.0
+
+                # Compute CIs
+                recall_ci = stats.t.ppf(0.975, len(recall_values) - 1) * stats.sem(recall_values) if len(recall_values) > 1 else 0
+                ba_ci = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
+
+                rows.append({
+                    'gallery_threshold': threshold,
+                    'gallery_size': gallery_size,
+                    'best_epoch': best_epoch,
+                    'recall_at_1': mean_recall,
+                    'recall_at_1_ci': recall_ci,
+                    'balanced_accuracy': mean_ba,
+                    'balanced_accuracy_ci': ba_ci,
+                    'harmonic_mean': h_mean,
+                    'n_seeds': len(recall_values)
+                })
+
+    df = pd.DataFrame(rows)
+    csv_path = os.path.join(output_dir, 'summary_all_configs.csv')
+    df.to_csv(csv_path, index=False, float_format='%.4f')
+    print(f"Saved full summary table: {csv_path}")
 
 
 def create_scores_figure(results: ResultsCollection, output_dir: str):
@@ -840,8 +994,16 @@ def main():
     # Print summary
     print_summary_table(results)
 
-    # Generate figures
-    print("\nGenerating figures...")
+    # Generate figures and tables
+    print("\nGenerating figures and tables...")
+
+    # Collect strategy data once for figures and tables
+    strategies = collect_strategies_data(results)
+
+    # Save tabular data
+    save_scores_table(strategies, args.output_dir)
+    save_thresholds_table(strategies, args.output_dir)
+    save_summary_table(results, args.output_dir)
 
     # Scores figure (2 panels: R@1 and BA)
     create_scores_figure(results, args.output_dir)
