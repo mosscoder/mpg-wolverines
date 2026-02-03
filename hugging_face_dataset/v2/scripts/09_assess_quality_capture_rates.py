@@ -109,7 +109,10 @@ def main():
     for season in sorted(event_stats["season"].unique()):
         season_data = event_stats[event_stats["season"] == season]
         season_hq = season_data["high_quality_count"]
+        # Get unique stations from the filtered dataframe
+        n_stations = df_filtered[df_filtered["season"] == season]["station"].nunique()
         result["by_season"][season] = {
+            "n_stations": n_stations,
             "n_individuals": season_data["id"].nunique(),
             "n_events": len(season_data),
             "n_images": int(season_data["n_images"].sum()),
