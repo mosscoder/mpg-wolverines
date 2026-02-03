@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Script 00: Open-Set Gallery Hygiene Sweep - DINOv3 + ArcFace + Raw Cosine Similarity
+Script 00: Open-Set Gallery Hygiene Sweep - MegaDescriptor + ArcFace + Raw Cosine Similarity
 
-Uses frozen DINOv3 backbone with raw cosine similarity for score calibration:
-1. Freezes DINOv3 backbone (only trainable projection head)
+Uses frozen MegaDescriptor-L-384 backbone with raw cosine similarity for score calibration:
+1. Freezes MegaDescriptor backbone (only trainable projection head)
 2. Computes L2-normalized cosine similarity scores
 3. Calibrates threshold on raw cosine scores using LOO within gallery
 4. Measures Balanced Accuracy = (Known Accept Rate + Unknown Reject Rate) / 2
@@ -31,7 +31,6 @@ from torch.utils.data import DataLoader, Dataset as TorchDataset
 from datasets import load_dataset
 import torchvision.transforms as T
 from PIL import Image
-from transformers import AutoModel
 
 # Control parallelism and set HuggingFace cache location
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -45,6 +44,7 @@ from utils.triplet import (
     ArcFaceLoss,
     PKBatchSampler,
     evaluate_open_set_balanced,
+    create_megadescriptor_arcface_model,
 )
 from utils.training import check_result_exists
 from utils.dataset import set_all_seeds
@@ -59,16 +59,6 @@ def build_metadata_cache(dataset):
     return build_metadata_cache_arrow(dataset)
 
 
-class EmbeddingHead(nn.Module):
-    """Trainable projection head for ArcFace."""
-    def __init__(self, input_dim: int = 768, embedding_dim: int = 256):
-        super().__init__()
-        self.fc = nn.Linear(input_dim, embedding_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc(x)
-
-
 # Experiment parameters
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
@@ -81,7 +71,7 @@ LEARNING_RATE = 0.0005
 EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
-EMBEDDING_DIM = 256  # Doubled from 128 for increased capacity
+EMBEDDING_DIM = 128  # Match reid_hygiene_filter for direct comparison
 
 # Query quality thresholds for evaluation
 QUERY_QUALITY_THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
@@ -280,76 +270,18 @@ class RareIndividualsDataset(TorchDataset):
         return image, quality
 
 
-def create_dinov3_transform():
-    """Create DINOv3-specific transform pipeline."""
+def create_megadescriptor_transform():
+    """Create MegaDescriptor-specific transform pipeline."""
     return T.Compose([
-        T.Resize(size=(224, 224), interpolation=Image.LANCZOS),
+        T.Resize(size=(384, 384), interpolation=Image.LANCZOS),
         T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
 
 def count_trainable_parameters(model):
     """Count trainable parameters in model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def create_dinov3_arcface_model(embedding_dim: int = 256, device="cuda"):
-    """
-    Create DINOv3 backbone with trainable projection head.
-
-    Architecture: Frozen DINOv3 -> 768-d CLS -> EmbeddingHead (768->256) -> ArcFace
-
-    The trainable projection head allows embeddings to improve during training,
-    while keeping the backbone frozen for efficiency.
-
-    Returns:
-        Tuple of (model, embedding_dim)
-    """
-    backbone = AutoModel.from_pretrained("facebook/dinov3-vitb16-pretrain-lvd1689m")
-
-    # Freeze backbone
-    for param in backbone.parameters():
-        param.requires_grad = False
-    backbone.eval()
-
-    # Trainable projection head (768 -> 256)
-    head = EmbeddingHead(input_dim=768, embedding_dim=embedding_dim)
-
-    class DINOv3WithHead(nn.Module):
-        def __init__(self, backbone, head):
-            super().__init__()
-            self.backbone = backbone
-            self.head = head
-
-        def forward(self, x):
-            with torch.no_grad():
-                outputs = self.backbone(x)
-                features = outputs.last_hidden_state[:, 0, :]
-            return self.head(features)  # Trainable transformation
-
-        def get_trainable_parameters(self):
-            return self.head.parameters()
-
-    model = DINOv3WithHead(backbone, head)
-
-    # Move to device
-    if isinstance(device, str):
-        if device == "cuda" and torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            device = torch.device("mps")
-        elif device == "gpu":
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                device = torch.device("mps")
-            else:
-                device = torch.device("cpu")
-        else:
-            device = torch.device("cpu")
-
-    return model.to(device), embedding_dim
 
 
 def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
@@ -861,11 +793,11 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
     # Create model with frozen backbone
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model, embedding_dim = create_dinov3_arcface_model(device=device)
+    model, embedding_dim = create_megadescriptor_arcface_model(embedding_dim=EMBEDDING_DIM, device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset
-    transform = create_dinov3_transform()
+    transform = create_megadescriptor_transform()
     train_torch_dataset = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
     # Create PK batch sampler
@@ -1009,7 +941,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'learning_rate': LEARNING_RATE,
             'epochs': EPOCHS,
             'batch_size_k': BATCH_K,
-            'backbone': 'Frozen DINOv3-ViT-B/16',
+            'backbone': 'Frozen MegaDescriptor-L-384',
             'score_normalization': 'Raw Cosine'
         },
         'trainable_params': trainable_params,
@@ -1026,7 +958,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
             'created_at': datetime.now().isoformat(),
             'training_time_seconds': training_time,
             'job_idx': args.idx,
-            'transform': 'resize_224_imagenet_norm',
+            'transform': 'resize_384_megadescriptor_norm',
             # Individual metric bests (for reference)
             'best_recall_epoch': best_recall_epoch,
             'best_recall_at_1': best_recall,
@@ -1054,11 +986,11 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Open-Set DINOv3 + ArcFace + Raw Cosine Gallery Hygiene Sweep')
+    parser = argparse.ArgumentParser(description='Open-Set MegaDescriptor + ArcFace + Raw Cosine Gallery Hygiene Sweep')
     parser.add_argument('--idx', type=int, required=True, help='Job index (0-23)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
-                        default='reid_openset_256/results',
+                        default='reid_openset_MD/results',
                         help='Output directory for results')
     parser.add_argument('--device', type=str, choices=['gpu', 'cpu'],
                         default='gpu', help='Device to use')
@@ -1066,7 +998,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 80)
-    print(f"Open-Set DINOv3 + ArcFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
+    print(f"Open-Set MegaDescriptor + ArcFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
     # Load dataset and config
@@ -1082,11 +1014,11 @@ def main():
     # Show experiment info
     total_combinations = len(THRESHOLDS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
-    print(f"  Model: Frozen DINOv3 + Projection Head ({EMBEDDING_DIM}-d) + ArcFace")
+    print(f"  Model: Frozen MegaDescriptor-L-384 + Projection Head ({EMBEDDING_DIM}-d) + ArcFace")
     print(f"  Loss: ArcFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE})")
     print(f"  Score Normalization: Raw Cosine Similarity (L2-normalized)")
     print(f"  Optimizer: AdamW (lr={LEARNING_RATE}, default settings)")
-    print(f"  Embedding: {EMBEDDING_DIM}-d (trainable projection from DINOv3 CLS)")
+    print(f"  Embedding: {EMBEDDING_DIM}-d (trainable projection from MegaDescriptor)")
     print(f"  Thresholds: {THRESHOLDS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")
