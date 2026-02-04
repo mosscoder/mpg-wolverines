@@ -31,6 +31,7 @@ mamba activate wolverines
 
 # Set HuggingFace cache to cluster's shared cache (private dataset)
 export HF_HOME=/data/hf_cache
+export HF_MODULES_CACHE=/data/hf_cache/kdoherty___wolverines/modules
 export HF_DATASETS_OFFLINE=1
 
 # Print job info

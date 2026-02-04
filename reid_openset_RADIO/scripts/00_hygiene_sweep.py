@@ -37,6 +37,7 @@ from transformers import AutoModel
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["HF_HOME"] = "/data/hf_cache"
+os.environ["HF_MODULES_CACHE"] = "/data/hf_cache/kdoherty___wolverines/modules"
 
 # Add project root to path
 sys.path.append('.')
