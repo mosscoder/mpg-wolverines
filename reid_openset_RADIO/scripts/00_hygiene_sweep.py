@@ -10,7 +10,7 @@ Uses frozen C-RADIOv4-H backbone with raw cosine similarity for score calibratio
 
 Key differences from reid_openset_BA:
 - Backbone: C-RADIOv4-H (nvidia/C-RADIOv4-H) instead of DINOv3
-- Hidden dimension: 1280 instead of 768
+- Hidden dimension: 2560 instead of 768
 - Returns tuple (summary, spatial_features) instead of dict with last_hidden_state
 
 Grid: 6 thresholds x 6 gallery sizes x 8 seeds = 288 configurations
@@ -62,7 +62,7 @@ def build_metadata_cache(dataset):
 
 class EmbeddingHead(nn.Module):
     """Trainable projection head for ArcFace."""
-    def __init__(self, input_dim: int = 1280, embedding_dim: int = 128):
+    def __init__(self, input_dim: int = 2560, embedding_dim: int = 128):
         super().__init__()
         self.fc = nn.Linear(input_dim, embedding_dim)
 
@@ -300,7 +300,7 @@ def create_radio_arcface_model(embedding_dim: int = 128, device="cuda"):
     """
     Create C-RADIOv4-H backbone with trainable projection head.
 
-    Architecture: Frozen C-RADIOv4-H -> 1280-d summary -> EmbeddingHead (1280->128) -> ArcFace
+    Architecture: Frozen C-RADIOv4-H -> 2560-d summary -> EmbeddingHead (2560->128) -> ArcFace
 
     The trainable projection head allows embeddings to improve during training,
     while keeping the backbone frozen for efficiency.
@@ -318,8 +318,8 @@ def create_radio_arcface_model(embedding_dim: int = 128, device="cuda"):
         param.requires_grad = False
     backbone.eval()
 
-    # Trainable projection head (1280 -> 128) - RADIO-H has 1280 hidden dim
-    head = EmbeddingHead(input_dim=1280, embedding_dim=embedding_dim)
+    # Trainable projection head (2560 -> 128) - RADIO-H has 2560 hidden dim
+    head = EmbeddingHead(input_dim=2560, embedding_dim=embedding_dim)
 
     class RADIOWithHead(nn.Module):
         def __init__(self, backbone, head):
