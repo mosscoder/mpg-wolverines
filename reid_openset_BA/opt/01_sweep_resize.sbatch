@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=opt_resize_sweep
-#SBATCH --partition=debug
+#SBATCH --partition=preempt
+#SBATCH --requeue
 #SBATCH --array=0-3
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
