@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_lr_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-3
+#SBATCH --array=0-9
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,9 +11,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/opt_lr/%A_%a.err
 
 # Learning Rate Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 4 learning rates = 4 configs, one per job
+# 10 learning rates = 10 configs, one per job
 #
-# LRs: [1e-4, 5e-4, 1e-3, 5e-3]
+# LRs: 0.0001 to 0.001, step 0.0001
 # Fixed: 224px images, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):

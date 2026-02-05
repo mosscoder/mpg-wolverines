@@ -13,7 +13,7 @@ Key design:
 - Test gets remainder: sample 32 (or all if <32)
 - Hygiene validation indices are EXCLUDED before any splitting
 
-Grid: 4 learning rates = 4 total configurations
+Grid: 10 learning rates (0.0001-0.001, step 0.0001) = 10 total configurations
 """
 
 import sys
@@ -50,7 +50,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-LEARNING_RATES = [1e-4, 5e-4, 1e-3, 5e-3]
+LEARNING_RATES = [i * 1e-4 for i in range(1, 11)]  # 0.0001 to 0.001, step 0.0001 = 10 LRs
 SEED = 0
 EPOCHS = 50
 TARGET_SAMPLES_PER_INDIVIDUAL = 32
