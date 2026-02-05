@@ -13,7 +13,7 @@ Key design:
 - Test gets remainder: sample 32 (or all if <32)
 - Hygiene validation indices are EXCLUDED before any splitting
 
-Grid: 4 image sizes = 4 total configurations
+Grid: 17 image sizes (128-384, step 16) = 17 total configurations
 """
 
 import sys
@@ -50,7 +50,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-RESIZE_SIZES = [256, 384, 512, 768]
+RESIZE_SIZES = list(range(128, 385, 16))  # 128 to 384, step 16 = 17 sizes
 LEARNING_RATE = 5e-4  # Fixed LR
 SEED = 0
 EPOCHS = 50

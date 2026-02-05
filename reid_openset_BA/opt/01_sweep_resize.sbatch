@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_resize_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-3
+#SBATCH --array=0-16
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,9 +11,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize/%A_%a.err
 
 # Image Size Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 4 image sizes = 4 configs, one per job
+# 17 image sizes = 17 configs, one per job
 #
-# Sizes: [256, 384, 512, 768]
+# Sizes: 128 to 384, step 16 (128, 144, 160, ..., 384)
 # Fixed: LR=5e-4, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):
