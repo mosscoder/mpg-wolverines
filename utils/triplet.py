@@ -458,6 +458,74 @@ def create_megadescriptor_arcface_model(
     return model.to(device), embedding_dim
 
 
+def create_bioclip2_arcface_model(
+    embedding_dim: int = 128,
+    device: str = "cuda"
+) -> Tuple[nn.Module, int]:
+    """
+    Create BioCLIP-2 backbone with trainable projection head for ArcFace training.
+
+    Architecture: Frozen BioCLIP-2 ViT-L/14 -> 768-d -> Linear -> 128-d
+
+    Args:
+        embedding_dim: Output embedding dimension (default 128)
+        device: Device to place model on
+
+    Returns:
+        Tuple of (model, embedding_dim): Model and its output dimension
+    """
+    import open_clip
+
+    backbone, _, _ = open_clip.create_model_and_transforms('hf-hub:imageomics/bioclip-2')
+
+    # Freeze backbone
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval()
+
+    # Get backbone output dimension via dummy forward pass
+    with torch.no_grad():
+        dummy = torch.zeros(1, 3, 224, 224)
+        backbone_dim = backbone.encode_image(dummy).shape[1]  # 768
+
+    # Trainable projection head
+    head = nn.Linear(backbone_dim, embedding_dim)
+
+    class BioCLIP2WithHead(nn.Module):
+        def __init__(self, backbone, head):
+            super().__init__()
+            self.backbone = backbone
+            self.head = head
+
+        def forward(self, x):
+            with torch.no_grad():
+                features = self.backbone.encode_image(x)
+            return self.head(features)
+
+        def get_trainable_parameters(self):
+            return self.head.parameters()
+
+    model = BioCLIP2WithHead(backbone, head)
+
+    # Move to device
+    if isinstance(device, str):
+        if device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif device == "mps" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "gpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
+        else:
+            device = torch.device("cpu")
+
+    return model.to(device), embedding_dim
+
+
 def mine_random_triplets(embeddings: torch.Tensor,
                          labels: torch.Tensor,
                          quality_scores: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
