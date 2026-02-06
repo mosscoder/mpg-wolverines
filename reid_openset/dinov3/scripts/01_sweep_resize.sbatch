@@ -44,7 +44,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the resize sweep script
-python -u utils/reid.py opt_resize --model dinov3 \
+python -u -m utils.reid opt_resize --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results/opt/resize \
     --device gpu \

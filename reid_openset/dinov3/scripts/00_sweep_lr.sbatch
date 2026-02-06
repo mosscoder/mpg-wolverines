@@ -44,7 +44,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the LR sweep script
-python -u utils/reid.py opt_lr --model dinov3 \
+python -u -m utils.reid opt_lr --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results/opt/lr \
     --device gpu \

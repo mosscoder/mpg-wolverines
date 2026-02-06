@@ -42,7 +42,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the open-set raw cosine hygiene sweep script
-python -u utils/reid.py hygiene --model dinov3 \
+python -u -m utils.reid hygiene --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results \
     --device gpu

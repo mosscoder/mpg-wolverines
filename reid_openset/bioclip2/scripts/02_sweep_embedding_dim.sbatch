@@ -40,7 +40,7 @@ echo "========================================"
 
 # Run the embedding dim sweep script
 # NOTE: Update --lr and --image-size from sweep 00/01 results
-python -u utils/reid.py opt_embedding_dim --model bioclip2 \
+python -u -m utils.reid opt_embedding_dim --model bioclip2 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/bioclip2/results/opt/embedding_dim \
     --device gpu \
