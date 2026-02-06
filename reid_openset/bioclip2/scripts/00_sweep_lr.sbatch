@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=opt_resize_sweep
+#SBATCH --job-name=opt_lr_sweep_bioclip2
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-16
+#SBATCH --array=0-9
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_resize/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/opt_lr_bioclip2/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/opt_lr_bioclip2/%A_%a.err
 
-# Image Size Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 17 image sizes = 17 configs, one per job
+# Learning Rate Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
+# 10 learning rates = 10 configs, one per job
 #
-# Sizes: 128 to 384, step 16 (128, 144, 160, ..., 384)
-# Fixed: LR=5e-4, seed=0, 50 epochs
+# LRs: 0.0001 to 0.001, step 0.0001
+# Fixed: 224px images, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):
 # - Earlier 50% of ymdh values -> train
@@ -22,7 +22,7 @@
 # - Hygiene validation indices excluded
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_resize
+mkdir -p /home/kdoherty/logs/wolverines/opt_lr_bioclip2
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -43,11 +43,14 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run the resize sweep script
-python -u reid_openset_BA/opt/01_sweep_resize.py \
+# Run the LR sweep script
+python -u utils/reid.py opt_lr --model bioclip2 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset_BA/opt/resize_results \
-    --device gpu
+    --output_dir reid_openset/bioclip2/results/opt/lr \
+    --device gpu \
+    --values 0.0001 0.0002 0.0003 0.0004 0.0005 0.0006 0.0007 0.0008 0.0009 0.001 \
+    --image-size 224 \
+    --embedding-dim 128 --epochs 50 --seed 0
 
 # Print completion info
 echo "========================================"

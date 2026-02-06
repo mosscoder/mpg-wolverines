@@ -1,40 +1,25 @@
-#!/usr/bin/env python3
 """
-Script 01: Plot Open-Set Hygiene Sweep Results (Raw Cosine Similarity)
+Shared plotting utilities for reid open-set hygiene sweep results.
 
-Generates publication-quality figures from open-set evaluation experiment
-using BioCLIP-2 backbone with ArcFace loss and raw cosine similarity scores.
-
-All metrics are computed and stored during training (in epoch_history),
-so no GPU inference is needed for plotting.
-
-Figures:
-1) scores.png - Performance metrics
-   A) Line plot: Recall@1 for known wolverines - baseline vs optimal filtration
-   B) Line plot: Balanced Accuracy for novel detection - baseline vs optimal
-
-2) best_thresholds.png - Optimal quality thresholds
-   A) Bar chart: Best thresholds for R@1 optimization (gallery + query)
-   B) Bar chart: Best thresholds for BA optimization (gallery + query)
+Consolidates duplicated plotting code from all 3 backbone plotting scripts
+into a single module. Each plotting script becomes a thin wrapper that calls
+run_plotting_main() with its results/output directories.
 """
 
 import os
-import sys
 import json
 import glob
-import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import stats
 from typing import List, Tuple
 
-sys.path.append('.')
 from utils.results import ResultsCollection
 
 
 # Settings for diagnostic functions (print_summary_table, plot_cosine_threshold).
-# Note: The main 3-panel figure uses hardcoded 'recall' criterion.
+# Note: The main figure uses hardcoded 'recall' criterion.
 DEFAULT_BEST_EPOCH_CRITERION = 'recall'
 DEFAULT_QUALITY_THRESHOLD = 'q>=0.0'
 
@@ -57,7 +42,6 @@ def load_hygiene_results(results_dir: str) -> ResultsCollection:
         try:
             with open(json_file, 'r') as f:
                 data = json.load(f)
-                # Extract key fields for easier access
                 data['threshold'] = data['config']['threshold']
                 data['gallery_size'] = data['config']['gallery_size']
                 data['seed'] = data['config']['seed']
@@ -121,24 +105,12 @@ def find_best_epoch(all_histories: List[List[dict]],
     """
     Find epoch with best mean metric across seeds.
 
-    Args:
-        all_histories: List of epoch histories (one per seed)
-        criterion: Optimization criterion - one of:
-            'harmonic_mean' (default): 2*R@1*BA / (R@1+BA) - balances both metrics
-            'ba': Balanced accuracy only
-            'recall': Recall@1 only
-            'arithmetic_mean': (R@1 + BA) / 2
-            'geometric_mean': sqrt(R@1 * BA)
-        query_thresh: Quality threshold key for evaluation (e.g., "q>=0.0")
-
     Returns:
         Tuple of (best_epoch, best_mean_metric, details_dict)
-        details_dict contains 'recall', 'ba', and 'criterion_value' at best epoch
     """
     if not all_histories or not all_histories[0]:
         return 50, 0.0, {}
 
-    # Get epochs that have metrics
     eval_epochs = []
     for h in all_histories[0]:
         if 'query_quality_metrics' in h or 'open_set' in h:
@@ -163,7 +135,6 @@ def find_best_epoch(all_histories: List[List[dict]],
                     if metric is not None:
                         metric_values.append(metric)
 
-                    # Also collect individual metrics for details
                     r = compute_epoch_metric(h, 'recall', query_thresh)
                     b = compute_epoch_metric(h, 'ba', query_thresh)
                     if r is not None:
@@ -189,20 +160,7 @@ def find_best_epoch(all_histories: List[List[dict]],
 
 def find_optimal_epoch(all_histories: List[List[dict]],
                        query_thresh: str = None) -> Tuple[int, float, dict]:
-    """
-    Find optimal epoch using the configured default criterion.
-
-    This is the primary function for determining the "best" epoch,
-    using the criterion defined in DEFAULT_BEST_EPOCH_CRITERION.
-
-    Args:
-        all_histories: List of epoch histories (one per seed)
-        query_thresh: Quality threshold key (defaults to DEFAULT_QUALITY_THRESHOLD)
-
-    Returns:
-        Tuple of (best_epoch, criterion_value, details_dict)
-        details_dict contains 'recall', 'ba', 'criterion', and 'criterion_value'
-    """
+    """Find optimal epoch using the configured default criterion."""
     if query_thresh is None:
         query_thresh = DEFAULT_QUALITY_THRESHOLD
     return find_best_epoch(all_histories, criterion=DEFAULT_BEST_EPOCH_CRITERION, query_thresh=query_thresh)
@@ -243,19 +201,15 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                # Find best epoch by R@1 at q>=0.0
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
 
-                # Collect R@1 and balanced_accuracy at that epoch with q>=0.0
                 r1_values = []
                 ba_values = []
                 for history in all_histories:
                     for h in history:
                         if h['epoch'] == best_epoch:
-                            # R@1
                             if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
                                 r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                            # Balanced accuracy
                             if 'open_set' in h:
                                 by_quality = h['open_set'].get('by_quality', {})
                                 if 'q>=0.0' in by_quality:
@@ -295,10 +249,8 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
                 continue
 
             for q_thresh in query_thresholds:
-                # Find best epoch by R@1 for this combo
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=q_thresh)
 
-                # Collect R@1 values at that epoch
                 r1_values = []
                 ba_values = []
                 for history in all_histories:
@@ -306,7 +258,6 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
                         if h['epoch'] == best_epoch:
                             if 'query_quality_metrics' in h and q_thresh in h['query_quality_metrics']:
                                 r1_values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
-                            # Also collect balanced accuracy at same epoch with same quality filter
                             if 'open_set' in h:
                                 by_quality = h['open_set'].get('by_quality', {})
                                 if q_thresh in by_quality:
@@ -356,10 +307,8 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
                 continue
 
             for q_thresh in query_thresholds:
-                # Find best epoch by BA for this combo
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=q_thresh)
 
-                # Collect BA values at that epoch
                 ba_values = []
                 for history in all_histories:
                     for h in history:
@@ -404,7 +353,6 @@ def save_scores_table(strategies: dict, output_dir: str):
         r1_data.append(row)
 
     for i, x in enumerate(strategies['optimal']['x']):
-        # Find matching row or create new
         match = next((r for r in r1_data if r['gallery_size'] == x), None)
         if match is None:
             match = {'gallery_size': x}
@@ -419,8 +367,6 @@ def save_scores_table(strategies: dict, output_dir: str):
                 match['optimal_query_thresh'] = strategies['optimal']['best_q'][i]
 
     r1_df = pd.DataFrame(r1_data).sort_values('gallery_size')
-
-    # Compute gain (optimal - baseline)
     if 'baseline_r1' in r1_df.columns and 'optimal_r1' in r1_df.columns:
         r1_df['delta_r1'] = r1_df['optimal_r1'] - r1_df['baseline_r1']
 
@@ -453,8 +399,6 @@ def save_scores_table(strategies: dict, output_dir: str):
                 match['optimal_query_thresh'] = strategies['optimal_ba']['best_q'][i]
 
     ba_df = pd.DataFrame(ba_data).sort_values('gallery_size')
-
-    # Compute gain (optimal - baseline)
     if 'baseline_ba' in ba_df.columns and 'optimal_ba' in ba_df.columns:
         ba_df['delta_ba'] = ba_df['optimal_ba'] - ba_df['baseline_ba']
 
@@ -465,7 +409,6 @@ def save_scores_table(strategies: dict, output_dir: str):
 
 def save_thresholds_table(strategies: dict, output_dir: str):
     """Save optimal thresholds data as CSV tables."""
-    # R@1-optimized thresholds
     r1_thresh_data = []
     for i, x in enumerate(strategies['optimal']['x']):
         row = {'gallery_size': x}
@@ -480,7 +423,6 @@ def save_thresholds_table(strategies: dict, output_dir: str):
     r1_df.to_csv(r1_path, index=False, float_format='%.2f')
     print(f"Saved R@1-optimized thresholds table: {r1_path}")
 
-    # BA-optimized thresholds
     ba_thresh_data = []
     for i, x in enumerate(strategies['optimal_ba']['x']):
         row = {'gallery_size': x}
@@ -531,8 +473,6 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
                 mean_recall = np.mean(recall_values)
                 mean_ba = np.mean(ba_values)
                 h_mean = 2 * mean_recall * mean_ba / (mean_recall + mean_ba) if (mean_recall + mean_ba) > 0 else 0.0
-
-                # Compute CIs
                 recall_ci = stats.t.ppf(0.975, len(recall_values) - 1) * stats.sem(recall_values) if len(recall_values) > 1 else 0
                 ba_ci = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
 
@@ -555,23 +495,15 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
 
 
 def create_scores_figure(results: ResultsCollection, output_dir: str):
-    """
-    Create 2-panel figure with performance scores:
-    A) R@1 by quality filtering strategy (baseline vs optimal)
-    B) Balanced Accuracy (baseline vs optimal BA-optimized model)
-    """
+    """Create 2-panel figure: A) R@1, B) Balanced Accuracy."""
     fig = plt.figure(figsize=(12, 6))
-
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#2ca02c'}
 
     strategies = collect_strategies_data(results)
 
-    # =========================================================================
-    # Panel A: R@1 Strategies
-    # =========================================================================
+    # Panel A: R@1
     ax1 = fig.add_subplot(121)
-
     for key in ['baseline', 'optimal']:
         s = strategies[key]
         if s['x'] and s['r1']:
@@ -584,7 +516,6 @@ def create_scores_figure(results: ResultsCollection, output_dir: str):
     ax1.set_ylabel('Wolverine re-identification score (Recall at rank 1)', fontsize=12)
     ax1.set_xticks(gallery_sizes)
 
-    # Set y-axis range
     all_ci_lower = strategies['baseline']['r1_ci_lower'] + strategies['optimal']['r1_ci_lower']
     all_ci_upper = strategies['baseline']['r1_ci_upper'] + strategies['optimal']['r1_ci_upper']
     if all_ci_lower and all_ci_upper:
@@ -595,14 +526,10 @@ def create_scores_figure(results: ResultsCollection, output_dir: str):
 
     ax1.grid(True, alpha=0.3, axis='y')
     ax1.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
-             va='top', ha='left')
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
 
-    # =========================================================================
-    # Panel B: Balanced Accuracy (Open Set)
-    # =========================================================================
+    # Panel B: Balanced Accuracy
     ax2 = fig.add_subplot(122)
-
     for key in ['baseline', 'optimal_ba']:
         s = strategies[key]
         if s['x'] and s['ba']:
@@ -615,7 +542,6 @@ def create_scores_figure(results: ResultsCollection, output_dir: str):
     ax2.set_ylabel('Novel wolverine detection score (Balanced accuracy)', fontsize=12)
     ax2.set_xticks(gallery_sizes)
 
-    # Set y-axis range
     all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
     all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal_ba']['ba_ci_upper']
     if all_ci_lower and all_ci_upper:
@@ -626,12 +552,8 @@ def create_scores_figure(results: ResultsCollection, output_dir: str):
 
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
-             va='top', ha='left')
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
 
-    # =========================================================================
-    # Save figure
-    # =========================================================================
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'scores.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -640,20 +562,12 @@ def create_scores_figure(results: ResultsCollection, output_dir: str):
 
 
 def create_thresholds_figure(results: ResultsCollection, output_dir: str):
-    """
-    Create 2-panel figure with optimal quality thresholds:
-    A) Best thresholds for R@1 optimization (grouped bars: gallery + query)
-    B) Best thresholds for BA optimization (grouped bars: gallery + query)
-    """
+    """Create 2-panel figure with optimal quality thresholds."""
     fig = plt.figure(figsize=(12, 6))
-
     strategies = collect_strategies_data(results)
 
-    # =========================================================================
-    # Panel A: Optimal Thresholds for R@1 (Grouped Bars)
-    # =========================================================================
+    # Panel A: R@1 thresholds
     ax1 = fig.add_subplot(121)
-
     x = np.arange(len(strategies['optimal']['x']))
     width = 0.35
 
@@ -662,7 +576,6 @@ def create_thresholds_figure(results: ResultsCollection, output_dir: str):
                 color='#1f77b4', label='Training Gallery')
         ax1.bar(x + width/2, strategies['optimal']['best_q'], width,
                 color='#ff7f0e', label='Validation Queries')
-
         ax1.set_xticks(x)
         ax1.set_xticklabels(strategies['optimal']['x'])
 
@@ -670,14 +583,10 @@ def create_thresholds_figure(results: ResultsCollection, output_dir: str):
     ax1.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
     ax1.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
     ax1.grid(True, alpha=0.3, axis='y')
-    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold',
-             va='top', ha='left')
+    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
 
-    # =========================================================================
-    # Panel B: Optimal Thresholds for BA (Grouped Bars)
-    # =========================================================================
+    # Panel B: BA thresholds
     ax2 = fig.add_subplot(122)
-
     x = np.arange(len(strategies['optimal_ba']['x']))
     width = 0.35
 
@@ -686,7 +595,6 @@ def create_thresholds_figure(results: ResultsCollection, output_dir: str):
                 color='#1f77b4', label='Training Gallery')
         ax2.bar(x + width/2, strategies['optimal_ba']['best_q'], width,
                 color='#ff7f0e', label='Validation Queries')
-
         ax2.set_xticks(x)
         ax2.set_xticklabels(strategies['optimal_ba']['x'])
 
@@ -694,12 +602,8 @@ def create_thresholds_figure(results: ResultsCollection, output_dir: str):
     ax2.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
     ax2.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
     ax2.grid(True, alpha=0.3, axis='y')
-    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold',
-             va='top', ha='left')
+    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
 
-    # =========================================================================
-    # Save figure
-    # =========================================================================
     plt.tight_layout()
     output_path = os.path.join(output_dir, 'best_thresholds.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -708,11 +612,7 @@ def create_thresholds_figure(results: ResultsCollection, output_dir: str):
 
 
 def plot_recall_curves(results: ResultsCollection, output_path: str):
-    """Create faceted figure showing recall@1 curves over epochs.
-
-    Grid: 6 rows (gallery_size) x 6 columns (hygiene threshold)
-    Each facet shows 8 lines (one per seed) for query threshold >= 0.3.
-    """
+    """Create faceted figure showing recall@1 curves over epochs."""
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -722,7 +622,6 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
     n_rows, n_cols = len(gallery_sizes), len(thresholds)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
 
-    # 8 distinct colors for seeds
     seed_colors = plt.cm.tab10(np.linspace(0, 0.8, 8))
 
     for i, gallery_size in enumerate(gallery_sizes):
@@ -734,31 +633,21 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
                 seed = r['seed']
                 history = r.get('epoch_history', [])
                 epochs = [h['epoch'] for h in history]
+                recall_values = [h['query_quality_metrics'][q_key]['recall_at_1'] for h in history]
+                ax.plot(epochs, recall_values, color=seed_colors[seed], alpha=0.8, linewidth=1)
 
-                recall_values = [
-                    h['query_quality_metrics'][q_key]['recall_at_1']
-                    for h in history
-                ]
-                ax.plot(epochs, recall_values, color=seed_colors[seed],
-                        alpha=0.8, linewidth=1)
-
-            # Facet labels
             if i == 0:
                 ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
             if j == 0:
                 ax.set_ylabel(f'gallery={gallery_size}', fontsize=9)
-
             ax.grid(True, alpha=0.3)
             ax.set_ylim(0, 1)
 
-    # Legend for seeds
     legend_elements = [
         Line2D([0], [0], color=seed_colors[s], label=f'seed {s}', linewidth=2)
         for s in range(8)
     ]
-    fig.legend(handles=legend_elements, loc='upper right', fontsize=9,
-               title='Seed')
-
+    fig.legend(handles=legend_elements, loc='upper right', fontsize=9, title='Seed')
     fig.supxlabel('Epoch', fontsize=12)
     fig.supylabel('Recall@1 (val)', fontsize=12)
     fig.suptitle('Validation Recall@1 (q>=0.3) by Configuration (Raw Cosine)', fontsize=14, y=1.01)
@@ -769,11 +658,7 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
 
 
 def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
-    """Create faceted figure showing validation loss curves over epochs.
-
-    Grid: 6 rows (gallery_size) x 6 columns (hygiene threshold)
-    Each facet shows 8 lines (one per seed) for validation loss.
-    """
+    """Create faceted figure showing validation loss curves over epochs."""
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -782,7 +667,6 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
     n_rows, n_cols = len(gallery_sizes), len(thresholds)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=False)
 
-    # 8 distinct colors for seeds
     seed_colors = plt.cm.tab10(np.linspace(0, 0.8, 8))
 
     for i, gallery_size in enumerate(gallery_sizes):
@@ -793,32 +677,23 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
             for r in filtered:
                 seed = r['seed']
                 history = r.get('epoch_history', [])
-
-                # Check if val_loss exists (backward compatibility)
                 if not history or 'val_loss' not in history[0]:
                     continue
-
                 epochs = [h['epoch'] for h in history]
                 val_losses = [h['val_loss'] for h in history]
+                ax.plot(epochs, val_losses, color=seed_colors[seed], alpha=0.8, linewidth=1)
 
-                ax.plot(epochs, val_losses, color=seed_colors[seed],
-                        alpha=0.8, linewidth=1)
-
-            # Facet labels
             if i == 0:
                 ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
             if j == 0:
                 ax.set_ylabel(f'gallery={gallery_size}', fontsize=9)
-
             ax.grid(True, alpha=0.3)
 
-    # Legend for seeds
     legend_elements = [
         Line2D([0], [0], color=seed_colors[s], label=f'seed {s}', linewidth=2)
         for s in range(8)
     ]
     fig.legend(handles=legend_elements, loc='upper right', fontsize=9, title='Seed')
-
     fig.supxlabel('Epoch', fontsize=12)
     fig.supylabel('Validation Loss (ArcFace)', fontsize=12)
     fig.suptitle('Validation Loss by Configuration (Raw Cosine)', fontsize=14, y=1.01)
@@ -829,19 +704,11 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
 
 
 def plot_cosine_threshold(results: ResultsCollection, output_path: str):
-    """
-    Plot cosine similarity decision threshold by gallery size and quality threshold.
-
-    Shows mean threshold with 95% CI across 8 seeds for each configuration.
-    X-axis: Gallery size (examples per individual)
-    Lines: Different gallery quality thresholds (0.0, 0.1, ..., 0.5)
-    """
+    """Plot cosine similarity decision threshold by gallery size and quality threshold."""
     fig, ax = plt.subplots(figsize=(10, 8))
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
-
-    # Use a colormap for different gallery thresholds
     colors = plt.cm.viridis(np.linspace(0, 0.9, len(gallery_thresholds)))
 
     for idx, gal_thresh in enumerate(gallery_thresholds):
@@ -855,7 +722,6 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
             if len(filtered) == 0:
                 continue
 
-            # Get threshold at best epoch for each seed
             all_histories = [r.get('epoch_history', []) for r in filtered]
             best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.0')
 
@@ -885,7 +751,7 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
     ax.set_ylabel('Cosine Similarity Threshold', fontsize=14)
     ax.set_title('Cosine Similarity Decision Threshold by Configuration', fontsize=16)
     ax.set_xticks(gallery_sizes)
-    ax.set_ylim(0, 1)  # Cosine similarity range
+    ax.set_ylim(0, 1)
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(title='Gallery quality filter', loc='best', fontsize=10, title_fontsize=10)
 
@@ -895,7 +761,7 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
 
 
 def print_summary_table(results: ResultsCollection):
-    """Print summary statistics for open-set evaluation using configurable best epoch criterion."""
+    """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 100)
     print(f"SUMMARY TABLE: Best Epoch by {DEFAULT_BEST_EPOCH_CRITERION.upper()} (R@1 & BA)")
     print(f"Quality threshold: {DEFAULT_QUALITY_THRESHOLD}")
@@ -918,10 +784,8 @@ def print_summary_table(results: ResultsCollection):
             if not all_histories or not all_histories[0]:
                 continue
 
-            # Use configurable criterion for best epoch selection
             best_epoch, criterion_value, details = find_optimal_epoch(all_histories)
 
-            # Collect per-seed metrics at the best epoch
             recall_values = []
             ba_values = []
             for history in all_histories:
@@ -938,7 +802,6 @@ def print_summary_table(results: ResultsCollection):
             if recall_values and ba_values:
                 mean_recall = np.mean(recall_values)
                 mean_ba = np.mean(ba_values)
-                # Compute harmonic mean of means
                 if (mean_recall + mean_ba) > 0:
                     h_mean = 2 * mean_recall * mean_ba / (mean_recall + mean_ba)
                 else:
@@ -947,14 +810,10 @@ def print_summary_table(results: ResultsCollection):
                 print(f"{threshold:<8.2f} {gallery_size:<8} {best_epoch:<6} "
                       f"{mean_recall:<8.4f} {mean_ba:<8.4f} {h_mean:<8.4f} {len(recall_values):<6}")
                 metrics[(threshold, gallery_size)] = {
-                    'recall': mean_recall,
-                    'ba': mean_ba,
-                    'h_mean': h_mean,
-                    'epoch': best_epoch,
-                    'n_seeds': len(recall_values)
+                    'recall': mean_recall, 'ba': mean_ba, 'h_mean': h_mean,
+                    'epoch': best_epoch, 'n_seeds': len(recall_values)
                 }
 
-    # Find best configuration by harmonic mean
     if metrics:
         best_key = max(metrics.keys(), key=lambda k: metrics[k]['h_mean'])
         best_data = metrics[best_key]
@@ -962,7 +821,6 @@ def print_summary_table(results: ResultsCollection):
         print(f"Best config: threshold={best_key[0]}, gallery={best_key[1]}, epoch={best_data['epoch']}")
         print(f"  R@1={best_data['recall']:.4f}, BA={best_data['ba']:.4f}, H-Mean={best_data['h_mean']:.4f}")
 
-        # Also show what other criteria would select
         print("\nAlternative criteria comparison:")
         best_by_recall = max(metrics.keys(), key=lambda k: metrics[k]['recall'])
         best_by_ba = max(metrics.keys(), key=lambda k: metrics[k]['ba'])
@@ -977,67 +835,50 @@ def print_summary_table(results: ResultsCollection):
                   f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Plot Open-Set hygiene sweep results (Raw Cosine) - BioCLIP-2')
-    parser.add_argument('--results_dir', type=str,
-                        default='reid_openset_bioclip2/results',
-                        help='Directory containing result JSON files')
-    parser.add_argument('--output_dir', type=str,
-                        default='reid_openset_bioclip2/figures',
-                        help='Directory to save figures')
-
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
+def run_plotting_main(results_dir: str, output_dir: str):
+    """Shared main entry point for all 3 plotting scripts."""
+    os.makedirs(output_dir, exist_ok=True)
 
     print("=" * 60)
     print("Open-Set Evaluation: Gallery Hygiene Sweep Results Analysis (Raw Cosine)")
     print("=" * 60)
 
-    # Load results
-    results = load_hygiene_results(args.results_dir)
+    results = load_hygiene_results(results_dir)
 
     if len(results) == 0:
         print("No results found. Exiting.")
         return
 
-    # Print summary
     print_summary_table(results)
 
-    # Generate figures and tables
     print("\nGenerating figures and tables...")
 
-    # Collect strategy data once for figures and tables
     strategies = collect_strategies_data(results)
 
-    # Save tabular data
-    save_scores_table(strategies, args.output_dir)
-    save_thresholds_table(strategies, args.output_dir)
-    save_summary_table(results, args.output_dir)
+    save_scores_table(strategies, output_dir)
+    save_thresholds_table(strategies, output_dir)
+    save_summary_table(results, output_dir)
 
-    # Scores figure (2 panels: R@1 and BA)
-    create_scores_figure(results, args.output_dir)
+    create_scores_figure(results, output_dir)
+    create_thresholds_figure(results, output_dir)
+    plot_recall_curves(results, os.path.join(output_dir, 'recall_curves.png'))
+    plot_validation_loss_curves(results, os.path.join(output_dir, 'validation_loss_curves.png'))
+    plot_cosine_threshold(results, os.path.join(output_dir, 'cosine_threshold.png'))
 
-    # Thresholds figure (2 panels: R@1 thresholds and BA thresholds)
-    create_thresholds_figure(results, args.output_dir)
-
-    # Faceted recall@1 curves by query quality threshold
-    plot_recall_curves(results, os.path.join(args.output_dir, 'recall_curves.png'))
-
-    # Faceted validation loss curves
-    plot_validation_loss_curves(
-        results,
-        os.path.join(args.output_dir, 'validation_loss_curves.png')
-    )
-
-    # Cosine similarity threshold plot
-    plot_cosine_threshold(
-        results,
-        os.path.join(args.output_dir, 'cosine_threshold.png')
-    )
-
-    print(f"\nAnalysis complete! Figures saved to: {args.output_dir}")
+    print(f"\nAnalysis complete! Figures saved to: {output_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    from utils.reid import MODEL_CONFIGS
+
+    parser = argparse.ArgumentParser(description="Plot reid open-set hygiene sweep results")
+    parser.add_argument("--model", type=str, required=True, choices=list(MODEL_CONFIGS.keys()))
+    parser.add_argument("--results_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
+    args = parser.parse_args()
+
+    config = MODEL_CONFIGS[args.model]
+    results_dir = args.results_dir or f"{config['experiment_dir']}/results"
+    output_dir = args.output_dir or f"{config['experiment_dir']}/figures"
+    run_plotting_main(results_dir, output_dir)

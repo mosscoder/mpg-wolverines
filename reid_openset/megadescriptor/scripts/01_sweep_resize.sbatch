@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=opt_resize_sweep_bioclip2
+#SBATCH --job-name=opt_resize_sweep_MD
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-18
+#SBATCH --array=0-16
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_resize_bioclip2/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize_bioclip2/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/opt_resize_MD/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize_MD/%A_%a.err
 
-# Image Size Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
-# 19 image sizes = 19 configs, one per job
+# Image Size Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
+# 17 image sizes = 17 configs, one per job
 #
-# Sizes: 126 to 378, step 14 (multiples of ViT-L/14 patch size)
+# Sizes: 256 to 512, step 16 (256, 272, 288, ..., 512)
 # Fixed: LR=5e-4, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):
@@ -22,7 +22,7 @@
 # - Hygiene validation indices excluded
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_resize_bioclip2
+mkdir -p /home/kdoherty/logs/wolverines/opt_resize_MD
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -44,10 +44,13 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the resize sweep script
-python -u reid_openset_bioclip2/opt/01_sweep_resize.py \
+python -u utils/reid.py opt_resize --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset_bioclip2/opt/resize_results \
-    --device gpu
+    --output_dir reid_openset/megadescriptor/results/opt/resize \
+    --device gpu \
+    --values 384 \ #Megadescriptor only accepts 384
+    --lr 0.0005 \
+    --embedding-dim 128 --epochs 50 --seed 0
 
 # Print completion info
 echo "========================================"

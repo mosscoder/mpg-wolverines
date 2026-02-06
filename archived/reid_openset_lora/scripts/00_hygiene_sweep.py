@@ -43,7 +43,7 @@ os.environ["HF_HOME"] = "/data/hf_cache"
 sys.path.append('.')
 
 from utils.dataset import set_all_seeds
-from utils.triplet import (
+from utils.arcface import (
     ArcFaceLoss,
     PKBatchSampler,
     compute_recall_at_k,

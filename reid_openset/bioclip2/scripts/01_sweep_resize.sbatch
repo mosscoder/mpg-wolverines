@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=opt_lr_sweep_MD
+#SBATCH --job-name=opt_resize_sweep_bioclip2
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-9
+#SBATCH --array=0-18
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_lr_MD/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_lr_MD/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/opt_resize_bioclip2/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize_bioclip2/%A_%a.err
 
-# Learning Rate Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
-# 10 learning rates = 10 configs, one per job
+# Image Size Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
+# 19 image sizes = 19 configs, one per job
 #
-# LRs: 0.0001 to 0.001, step 0.0001
-# Fixed: 384px images, seed=0, 50 epochs
+# Sizes: 126 to 378, step 14 (multiples of ViT-L/14 patch size)
+# Fixed: LR=5e-4, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):
 # - Earlier 50% of ymdh values -> train
@@ -22,7 +22,7 @@
 # - Hygiene validation indices excluded
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_lr_MD
+mkdir -p /home/kdoherty/logs/wolverines/opt_resize_bioclip2
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -43,11 +43,14 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run the LR sweep script
-python -u reid_openset_MD/opt/00_sweep_lr.py \
+# Run the resize sweep script
+python -u utils/reid.py opt_resize --model bioclip2 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset_MD/opt/lr_results \
-    --device gpu
+    --output_dir reid_openset/bioclip2/results/opt/resize \
+    --device gpu \
+    --values 126 140 154 168 182 196 210 224 238 252 266 280 294 308 322 336 350 364 378 \
+    --lr 0.0005 \
+    --embedding-dim 128 --epochs 50 --seed 0
 
 # Print completion info
 echo "========================================"

@@ -42,7 +42,7 @@ os.environ["HF_HOME"] = "/data/hf_cache"
 # Add project root to path
 sys.path.append('.')
 
-from utils.triplet import (
+from utils.arcface import (
     ArcFaceLoss,
     PKBatchSampler,
     evaluate_open_set_balanced,

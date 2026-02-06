@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=openset_cosine_hygiene
+#SBATCH --job-name=openset_MD
 #SBATCH --partition=preempt
 #SBATCH --requeue
 #SBATCH --array=0-23
@@ -7,10 +7,10 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/openset_BA/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/openset_BA/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/openset_MD/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/openset_MD/%A_%a.err
 
-# Open-Set DINOv3 + ArcFace + Raw Cosine Gallery Hygiene Sweep Experiment
+# Open-Set MegaDescriptor + ArcFace + Raw Cosine Gallery Hygiene Sweep Experiment
 # 6 thresholds x 6 gallery sizes x 8 seeds = 288 configs across 24 jobs (12/job)
 #
 # Uses raw cosine similarity instead of T-Norm:
@@ -20,7 +20,7 @@
 # - Macro-averaged per-individual metrics for fair comparison across individuals
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/openset_BA
+mkdir -p /home/kdoherty/logs/wolverines/openset_MD
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -42,9 +42,9 @@ echo "Start time: $(date)"
 echo "========================================"
 
 # Run the open-set raw cosine hygiene sweep script
-python -u reid_openset_BA/scripts/00_hygiene_sweep.py \
+python -u utils/reid.py hygiene --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset_BA/results \
+    --output_dir reid_openset/megadescriptor/results \
     --device gpu
 
 # Print completion info
