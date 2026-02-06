@@ -374,7 +374,7 @@ def train_single_lr(learning_rate: float, args, dataset, config, metadata_cache)
 
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, device=device)
+    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, image_size=IMAGE_SIZE, device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset

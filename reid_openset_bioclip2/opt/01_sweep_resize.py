@@ -13,7 +13,7 @@ Key design:
 - Test gets remainder: sample 32 (or all if <32)
 - Hygiene validation indices are EXCLUDED before any splitting
 
-Grid: 17 image sizes (128-384, step 16) = 17 total configurations
+Grid: 19 image sizes (126-378, step 14) = 19 total configurations
 """
 
 import sys
@@ -49,7 +49,7 @@ datasets.config.NUM_PROC = 1
 
 
 # Experiment parameters
-RESIZE_SIZES = list(range(128, 385, 16))  # 128 to 384, step 16 = 17 sizes
+RESIZE_SIZES = list(range(126, 379, 14))  # 126 to 378, step 14 = 19 sizes (ViT-L/14 patch size)
 LEARNING_RATE = 5e-4  # Fixed LR
 SEED = 0
 EPOCHS = 50
@@ -374,7 +374,7 @@ def train_single_resize(resize_size: int, args, dataset, config, metadata_cache)
 
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, device=device)
+    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, image_size=resize_size, device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset - use the resize_size parameter
@@ -496,7 +496,7 @@ def train_single_resize(resize_size: int, args, dataset, config, metadata_cache)
 
 def main():
     parser = argparse.ArgumentParser(description='Image Size Sweep for BioCLIP-2 Re-ID with Temporal Split')
-    parser.add_argument('--idx', type=int, required=True, help='Job index (0-16 for 17 sizes)')
+    parser.add_argument('--idx', type=int, required=True, help='Job index (0-18 for 19 sizes)')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing results')
     parser.add_argument('--output_dir', type=str,
                         default='reid_openset_bioclip2/opt/resize_results',

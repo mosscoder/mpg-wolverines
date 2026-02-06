@@ -460,6 +460,7 @@ def create_megadescriptor_arcface_model(
 
 def create_bioclip2_arcface_model(
     embedding_dim: int = 128,
+    image_size: int = 224,
     device: str = "cuda"
 ) -> Tuple[nn.Module, int]:
     """
@@ -469,6 +470,8 @@ def create_bioclip2_arcface_model(
 
     Args:
         embedding_dim: Output embedding dimension (default 128)
+        image_size: Input image size (default 224, must be multiple of 14).
+                    Non-native sizes trigger positional embedding interpolation.
         device: Device to place model on
 
     Returns:
@@ -476,7 +479,9 @@ def create_bioclip2_arcface_model(
     """
     import open_clip
 
-    backbone, _, _ = open_clip.create_model_and_transforms('hf-hub:imageomics/bioclip-2')
+    # force_image_size interpolates positional embeddings for non-224 inputs
+    backbone = open_clip.create_model('hf-hub:imageomics/bioclip-2',
+                                       force_image_size=image_size)
 
     # Freeze backbone
     for param in backbone.parameters():
@@ -485,7 +490,7 @@ def create_bioclip2_arcface_model(
 
     # Get backbone output dimension via dummy forward pass
     with torch.no_grad():
-        dummy = torch.zeros(1, 3, 224, 224)
+        dummy = torch.zeros(1, 3, image_size, image_size)
         backbone_dim = backbone.encode_image(dummy).shape[1]  # 768
 
     # Trainable projection head

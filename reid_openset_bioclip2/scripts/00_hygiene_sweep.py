@@ -816,7 +816,7 @@ def train_single_config(threshold: float, gallery_size: int, seed: int, args, da
 
     # Create model with frozen backbone
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
-    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, device=device)
+    model, embedding_dim = create_bioclip2_arcface_model(embedding_dim=EMBEDDING_DIM, image_size=BEST_SIZE, device=device)
     print(f"Using device: {device}")
 
     # Create transforms and dataset

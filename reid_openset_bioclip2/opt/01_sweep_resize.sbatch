@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_resize_sweep_bioclip2
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-16
+#SBATCH --array=0-18
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,9 +11,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize_bioclip2/%A_%a.err
 
 # Image Size Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
-# 17 image sizes = 17 configs, one per job
+# 19 image sizes = 19 configs, one per job
 #
-# Sizes: 128 to 384, step 16 (128, 144, 160, ..., 384)
+# Sizes: 126 to 378, step 14 (multiples of ViT-L/14 patch size)
 # Fixed: LR=5e-4, seed=0, 50 epochs
 #
 # Temporal split by capture event (ymdh):
