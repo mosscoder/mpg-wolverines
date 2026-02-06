@@ -4,4 +4,4 @@
 
 cd /home/kdoherty/wolverines
 
-python -u utils/reid_plotting.py --model megadescriptor
+python -u -m utils.reid_plotting --model megadescriptor

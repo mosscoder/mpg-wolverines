@@ -4,4 +4,4 @@
 
 cd /home/kdoherty/wolverines
 
-python -u utils/reid_plotting.py --model dinov3
+python -u -m utils.reid_plotting --model dinov3
