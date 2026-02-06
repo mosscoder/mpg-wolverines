@@ -53,11 +53,52 @@ import datasets
 datasets.config.NUM_PROC = 1
 
 
+def load_best_hyperparams():
+    """Load best LR and image size from optimization sweep results."""
+    import glob
+    best_lr = 0.0005  # default
+    best_size = 384    # default (MegaDescriptor native)
+
+    lr_results_dir = 'reid_openset_MD/opt/lr_results'
+    lr_files = glob.glob(os.path.join(lr_results_dir, 'lr=*.json'))
+    if lr_files:
+        best_lr_recall = 0.0
+        for f in lr_files:
+            with open(f, 'r') as fp:
+                result = json.load(fp)
+            recall = result['results']['best_test_recall_at_1']
+            if recall > best_lr_recall:
+                best_lr_recall = recall
+                best_lr = result['config']['learning_rate']
+        print(f"Loaded best LR from sweep: {best_lr} (R@1={best_lr_recall:.4f})")
+    else:
+        print(f"No LR sweep results found, using default: {best_lr}")
+
+    resize_results_dir = 'reid_openset_MD/opt/resize_results'
+    resize_files = glob.glob(os.path.join(resize_results_dir, 'resize=*.json'))
+    if resize_files:
+        best_size_recall = 0.0
+        for f in resize_files:
+            with open(f, 'r') as fp:
+                result = json.load(fp)
+            recall = result['results']['best_test_recall_at_1']
+            if recall > best_size_recall:
+                best_size_recall = recall
+                best_size = result['config']['resize_size']
+        print(f"Loaded best size from sweep: {best_size} (R@1={best_size_recall:.4f})")
+    else:
+        print(f"No resize sweep results found, using default: {best_size}")
+
+    return best_lr, best_size
+
+
 def build_metadata_cache(dataset):
     """Build metadata cache using Arrow columnar access (optimized)."""
     from utils.arrow_cache import build_metadata_cache_arrow
     return build_metadata_cache_arrow(dataset)
 
+
+BEST_LR, BEST_SIZE = load_best_hyperparams()
 
 # Experiment parameters
 THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]  # 0.0 = no filtering (baseline)
@@ -67,7 +108,7 @@ SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 # ArcFace hyperparameters
 ARCFACE_MARGIN = 0.5
 ARCFACE_SCALE = 64
-LEARNING_RATE = 0.0005
+LEARNING_RATE = BEST_LR
 EPOCHS = 50
 BATCH_K = 8  # Samples per identity in PK batch
 MIN_P = 5  # Minimum identities per batch
@@ -273,7 +314,7 @@ class RareIndividualsDataset(TorchDataset):
 def create_megadescriptor_transform():
     """Create MegaDescriptor-specific transform pipeline."""
     return T.Compose([
-        T.Resize(size=(384, 384), interpolation=Image.LANCZOS),
+        T.Resize(size=(BEST_SIZE, BEST_SIZE), interpolation=Image.LANCZOS),
         T.ToTensor(),
         T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
