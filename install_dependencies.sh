@@ -41,5 +41,6 @@ mamba run -n wolverines python -c "import torch; print(f'PyTorch version: {torch
 
 mamba run -n wolverines python -c "import transformers; print(f'Transformers version: {transformers.__version__}')"
 mamba run -n wolverines python -c "import datasets; print(f'Datasets version: {datasets.__version__}')"
+mamba run -n wolverines python -c "import timm; print(f'timm version: {timm.__version__}')"
 
 echo "=== Installation completed successfully! ==="
