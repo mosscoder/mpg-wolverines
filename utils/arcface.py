@@ -466,7 +466,7 @@ def create_bioclip2_arcface_model(
     """
     Create BioCLIP-2 backbone with trainable projection head for ArcFace training.
 
-    Architecture: Frozen BioCLIP-2 ViT-L/14 -> 768-d -> Linear -> 128-d
+    Architecture: Frozen BioCLIP-2 ViT-L/14 -> 1024-d (raw ViT features) -> Linear -> 128-d
 
     Args:
         embedding_dim: Output embedding dimension (default 128)
@@ -483,6 +483,10 @@ def create_bioclip2_arcface_model(
     backbone = open_clip.create_model('hf-hub:imageomics/bioclip-2',
                                        force_image_size=image_size)
 
+    # Disable CLIP text-alignment projection to get raw ViT-L CLS features (1024-d)
+    # instead of projected features (768-d) that discard fine-grained visual info
+    backbone.visual.proj = None
+
     # Freeze backbone
     for param in backbone.parameters():
         param.requires_grad = False
@@ -491,7 +495,7 @@ def create_bioclip2_arcface_model(
     # Get backbone output dimension via dummy forward pass
     with torch.no_grad():
         dummy = torch.zeros(1, 3, image_size, image_size)
-        backbone_dim = backbone.encode_image(dummy).shape[1]  # 768
+        backbone_dim = backbone.encode_image(dummy).shape[1]  # 1024 (raw ViT-L features)
 
     # Trainable projection head
     head = nn.Linear(backbone_dim, embedding_dim)
