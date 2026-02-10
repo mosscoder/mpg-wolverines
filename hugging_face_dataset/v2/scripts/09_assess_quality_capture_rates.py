@@ -3,11 +3,11 @@
 09_assess_quality_capture_rates.py
 
 Analyze how many high-quality images (pelage_probability >= 0.5) are accumulated
-per individual per camera trap event and per fall/winter season.
+per individual per camera trap event and per season.
 
 Key Definitions:
 - Camera trap event: Unique ymdh timestamp per individual
-- Season: Year-specific, September to May (e.g., "2021_2022" = Sept 2021 through May 2022)
+- Season: Year-specific, September to August (e.g., "2021_2022" = Sept 2021 through Aug 2022)
 - High quality: pelage_probability >= 0.5
 """
 
@@ -21,28 +21,25 @@ from pathlib import Path
 QUALITY_THRESHOLD = 0.5
 
 
-def get_season(ymdh: int) -> str | None:
+def get_season(ymdh: int) -> str:
     """
-    Assign Sept-May season year label.
+    Assign season year label.
 
-    Sept 2021 - May 2022 → '2021_2022'
-    June-August → None (excluded)
+    Sept 2021 - Aug 2022 → '2021_2022'
 
     Args:
         ymdh: Timestamp in YYYYMMDDHHMM format
 
     Returns:
-        Season string like '2021_2022' or None for summer months
+        Season string like '2021_2022'
     """
     month = (ymdh // 1000000) % 100
     year = ymdh // 100000000
 
     if month >= 9:  # Sept-Dec
         return f"{year}_{year + 1}"
-    elif month <= 5:  # Jan-May
+    else:  # Jan-Aug
         return f"{year - 1}_{year}"
-    else:  # June-Aug
-        return None
 
 
 def main():
@@ -60,15 +57,11 @@ def main():
     # Add season column
     df["season"] = df["ymdh"].apply(get_season)
 
-    # Filter to Sept-May (exclude summer months)
-    df_filtered = df[df["season"].notna()].copy()
-    print(f"After filtering to Sept-May: {len(df_filtered)} records")
-
     # Flag high quality images
-    df_filtered["is_high_quality"] = df_filtered["pelage_probability"] >= QUALITY_THRESHOLD
+    df["is_high_quality"] = df["pelage_probability"] >= QUALITY_THRESHOLD
 
     # Group by (id, ymdh) to get per-event statistics
-    event_stats = df_filtered.groupby(["id", "ymdh", "season"]).agg(
+    event_stats = df.groupby(["id", "ymdh", "season"]).agg(
         n_images=("crop_filename", "count"),
         high_quality_count=("is_high_quality", "sum")
     ).reset_index()
@@ -91,7 +84,7 @@ def main():
         },
         "metadata": {
             "quality_threshold": QUALITY_THRESHOLD,
-            "season_months": "September-May",
+            "season_months": "all months included",
             "generated_at": datetime.now().isoformat(),
             "source_file": "pelage_inference_results.csv"
         },
@@ -110,7 +103,7 @@ def main():
         season_data = event_stats[event_stats["season"] == season]
         season_hq = season_data["high_quality_count"]
         # Get unique stations from the filtered dataframe
-        n_stations = df_filtered[df_filtered["season"] == season]["station"].nunique()
+        n_stations = df[df["season"] == season]["station"].nunique()
         result["by_season"][season] = {
             "n_stations": n_stations,
             "n_individuals": season_data["id"].nunique(),

@@ -132,6 +132,86 @@ Images selected for human annotation are filtered to the **earliest capture date
 | `ymdh` | Temporal identifier (year-month-day-hour) |
 | `station` | Camera trap location |
 
+### Event Accounting
+
+The pipeline processes only "Robust" capture events. Not all 588 robust events reach the final re-identification dataset:
+
+| Pipeline Stage | Events | Images | Loss |
+|----------------|--------|--------|------|
+| Field pre-screening (Robust) | 588 | — | — |
+| MegaDetector crops | 578 | 52,013 | -10 (missing directories or no detections) |
+| Pelage classifier training | 20 | 2,701 | held out for training |
+| Pelage inference / re-identification | 558 | 49,312 | — |
+
+**Non-overlap guarantee:** The 20 capture events used to train the pelage quality classifier share zero overlap with the 558 events in the re-identification dataset. Script `05_infer_pelage.py` enforces this by excluding all crops from labeled events before inference. The 20 training events (2 per individual, selected from earliest capture dates) are:
+
+| Individual | Event 1 | Event 2 |
+|------------|---------|---------|
+| BDF10-M6 | 201602051910 | 201602091445 |
+| HFW12-F7 | 201601301538 | 201602110139 |
+| HLC20-H3 | 202003282359 | 202003291734 |
+| HLC21-H1 | 202101141026 | — |
+| Turk | 202201200551 | 202201210934 |
+| Tex | 202301041114 | 202301132101 |
+| LH23-M1 | 202302152037 | 202302160805 |
+| PA23-M1 | 202302182132 | — |
+| PA23-M2 | 202302251120 | 202302260158 |
+| PA23-F1 | 202303072120 | 202303081456 |
+| Powder Paws | 202303081238 | 202303172209 |
+
+#### Re-identification Role Assignment
+
+The 558 inference events (49,312 images) partition across experimental roles based on individual identity and sample sufficiency. Gallery-eligible individuals have enough events to populate gallery and validation sets; simulated unknowns serve as novel individuals during open-set evaluation; excluded individuals have too few events for either role.
+
+Source: `hugging_face_dataset/v2/data/feasible_individuals.json`, `hugging_face_dataset/v2/data/quality_capture_rates.json`
+
+| Role | Individual | Events | Images |
+|------|-----------|--------|--------|
+| Gallery-eligible | Turk | 164 | 12,454 |
+| Gallery-eligible | HLC20-H3 | 148 | 13,515 |
+| Gallery-eligible | BDF10-M6 | 82 | 5,157 |
+| Gallery-eligible | LH23-M1 | 52 | 2,475 |
+| Gallery-eligible | HFW12-F7 | 48 | 12,815 |
+| **Subtotal known** | **5 individuals** | **494** | **46,416** |
+| Simulated unknown | Tex (promoted) | 11 | 343 |
+| Simulated unknown | PA23-F1 | 40 | 1,497 |
+| Simulated unknown | PA23-M2 | 4 | 556 |
+| Simulated unknown | Powder Paws | 6 | 418 |
+| **Subtotal unknown** | **4 individuals** | **61** | **2,814** |
+| Excluded | PA23-M1 | 2 | 71 |
+| Excluded | HLC21-H1 | 1 | 11 |
+| **Subtotal excluded** | **2 individuals** | **3** | **82** |
+
+*Check: 494 + 61 + 3 = 558 events; 46,416 + 2,814 + 82 = 49,312 images.*
+
+#### Validation Queries
+
+Fixed set of most-recent events from gallery-eligible individuals, used as known queries across all configurations:
+
+| Individual | Validation Events | Validation Images |
+|-----------|------------------|-------------------|
+| Turk | 4 | 114 |
+| HLC20-H3 | 2 | 95 |
+| BDF10-M6 | 1 | 31 |
+| LH23-M1 | 6 | 72 |
+| HFW12-F7 | 2 | 426 |
+| **Total** | **15** | **738** |
+
+#### Gallery Training Pool
+
+Remaining gallery-eligible images after removing validation queries and HuggingFace test-split holdout:
+
+| Individual | Gallery Pool Images |
+|-----------|-------------------|
+| Turk | 12,091 |
+| HLC20-H3 | 11,112 |
+| BDF10-M6 | 4,542 |
+| LH23-M1 | 2,277 |
+| HFW12-F7 | 10,695 |
+| **Total** | **40,717** |
+
+*The remaining 4,961 images (46,416 − 738 − 40,717) belong to the HuggingFace test split — a temporal holdout from `07_create_reidentification_dataset.py`, not used in re-id experiments.*
+
 ### 6. Pelage Quality Classification (Stage 1)
 
 **Location:** `pelage_sorting/`
