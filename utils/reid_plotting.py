@@ -1,9 +1,9 @@
 """
 Shared plotting utilities for reid open-set hygiene sweep results.
 
-Consolidates duplicated plotting code from all 3 backbone plotting scripts
-into a single module. Each plotting script becomes a thin wrapper that calls
-run_plotting_main() with its results/output directories.
+Supports two modes:
+  --model <name>    Per-backbone diagnostics (tables + diagnostic figures)
+  --aggregate       Cross-backbone comparison (1x3 faceted figures)
 """
 
 import os
@@ -494,121 +494,253 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
     print(f"Saved full summary table: {csv_path}")
 
 
-def create_scores_figure(results: ResultsCollection, output_dir: str):
-    """Create 2-panel figure: A) R@1, B) Balanced Accuracy."""
-    fig = plt.figure(figsize=(12, 6))
-    gallery_sizes = sorted(results.get_unique('gallery_size'))
-    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c', 'optimal_ba': '#2ca02c'}
+def _plot_scores_facet(ax, strategies, baseline_key, optimal_key, metric, colors, ylabel):
+    """Draw one baseline-vs-optimal panel with lines and CI ribbons.
 
-    strategies = collect_strategies_data(results)
+    Does NOT set y-limits — returns CI bounds so the caller can unify axes
+    across multiple facets.
 
-    # Panel A: R@1
-    ax1 = fig.add_subplot(121)
-    for key in ['baseline', 'optimal']:
+    Args:
+        ax: Matplotlib axes
+        strategies: Dict from collect_strategies_data()
+        baseline_key: Strategy key for baseline (e.g. 'baseline')
+        optimal_key: Strategy key for optimal (e.g. 'optimal' or 'optimal_ba')
+        metric: Metric prefix in strategies dict ('r1' or 'ba')
+        colors: Dict mapping strategy keys to colors
+        ylabel: Y-axis label string
+
+    Returns:
+        (ci_lower_list, ci_upper_list) collected from both strategies
+    """
+    gallery_sizes = sorted(set(strategies['baseline']['x'] + strategies[optimal_key]['x']))
+
+    for key in [baseline_key, optimal_key]:
         s = strategies[key]
-        if s['x'] and s['r1']:
-            ax1.plot(s['x'], s['r1'], color=colors[key], linewidth=2.5,
-                     marker='o', markersize=8, label=s['label'])
-            ax1.fill_between(s['x'], s['r1_ci_lower'], s['r1_ci_upper'],
-                             color=colors[key], alpha=0.2)
+        if s['x'] and s[metric]:
+            ax.plot(s['x'], s[metric], color=colors[key], linewidth=2.5,
+                    marker='o', markersize=8, label=s['label'])
+            ax.fill_between(s['x'], s[f'{metric}_ci_lower'], s[f'{metric}_ci_upper'],
+                            color=colors[key], alpha=0.2)
 
-    ax1.set_xlabel('Training examples per individual', fontsize=12)
-    ax1.set_ylabel('Wolverine re-identification score (Recall at rank 1)', fontsize=12)
-    ax1.set_xticks(gallery_sizes)
+    ax.set_xlabel('Training examples per individual', fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=12)
+    if gallery_sizes:
+        ax.set_xticks(gallery_sizes)
 
-    all_ci_lower = strategies['baseline']['r1_ci_lower'] + strategies['optimal']['r1_ci_lower']
-    all_ci_upper = strategies['baseline']['r1_ci_upper'] + strategies['optimal']['r1_ci_upper']
-    if all_ci_lower and all_ci_upper:
-        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
-        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
-        ax1.set_ylim(y_min, y_max)
-        ax1.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+    ax.grid(True, alpha=0.3, axis='y')
 
-    ax1.grid(True, alpha=0.3, axis='y')
-    ax1.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
+    all_ci_lower = strategies[baseline_key].get(f'{metric}_ci_lower', []) + strategies[optimal_key].get(f'{metric}_ci_lower', [])
+    all_ci_upper = strategies[baseline_key].get(f'{metric}_ci_upper', []) + strategies[optimal_key].get(f'{metric}_ci_upper', [])
+    return all_ci_lower, all_ci_upper
 
-    # Panel B: Balanced Accuracy
-    ax2 = fig.add_subplot(122)
-    for key in ['baseline', 'optimal_ba']:
-        s = strategies[key]
-        if s['x'] and s['ba']:
-            ax2.plot(s['x'], s['ba'], color=colors[key], linewidth=2.5,
-                     marker='o', markersize=8, label=s['label'])
-            ax2.fill_between(s['x'], s['ba_ci_lower'], s['ba_ci_upper'],
-                             color=colors[key], alpha=0.2)
 
-    ax2.set_xlabel('Training examples per individual', fontsize=12)
-    ax2.set_ylabel('Novel wolverine detection score (Balanced accuracy)', fontsize=12)
-    ax2.set_xticks(gallery_sizes)
+def _apply_shared_ylim(axes, all_ci_lower, all_ci_upper):
+    """Apply a unified y-axis scale across all axes based on global CI bounds.
 
-    all_ci_lower = strategies['baseline']['ba_ci_lower'] + strategies['optimal_ba']['ba_ci_lower']
-    all_ci_upper = strategies['baseline']['ba_ci_upper'] + strategies['optimal_ba']['ba_ci_upper']
-    if all_ci_lower and all_ci_upper:
-        y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
-        y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
-        ax2.set_ylim(y_min, y_max)
-        ax2.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
+    Args:
+        axes: List of Matplotlib axes to unify
+        all_ci_lower: Flat list of all CI lower bounds across every facet
+        all_ci_upper: Flat list of all CI upper bounds across every facet
+    """
+    if not all_ci_lower or not all_ci_upper:
+        return
+    y_min = max(0, np.floor((min(all_ci_lower) - 0.05) / 0.05) * 0.05)
+    y_max = min(1, np.ceil((max(all_ci_upper) + 0.05) / 0.05) * 0.05)
+    for ax in axes:
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
-    ax2.grid(True, alpha=0.3, axis='y')
-    ax2.legend(title='Image quality filters:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
+
+def _plot_thresholds_facet(ax, strategies, strategy_key):
+    """Draw one bar-chart panel showing gallery vs query thresholds.
+
+    Does NOT set y-limits — returns the max bar value so the caller can
+    unify axes across multiple facets.
+
+    Args:
+        ax: Matplotlib axes
+        strategies: Dict from collect_strategies_data()
+        strategy_key: 'optimal' (R@1-optimized) or 'optimal_ba' (BA-optimized)
+
+    Returns:
+        Maximum bar value across both series, or 0.0 if no data
+    """
+    s = strategies[strategy_key]
+    x = np.arange(len(s['x']))
+    width = 0.35
+    max_val = 0.0
+
+    if s['best_gal'] and s['best_q']:
+        ax.bar(x - width/2, s['best_gal'], width,
+               color='#1f77b4', label='Training Gallery')
+        ax.bar(x + width/2, s['best_q'], width,
+               color='#ff7f0e', label='Validation Queries')
+        ax.set_xticks(x)
+        ax.set_xticklabels(s['x'])
+        max_val = max(max(s['best_gal']), max(s['best_q']))
+
+    ax.set_xlabel('Training examples per individual', fontsize=12)
+    ax.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
+    ax.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    return max_val
+
+
+def create_rank1_figure(model_data: dict, output_dir: str):
+    """Create 1x3 cross-backbone figure for Recall@1.
+
+    Args:
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        output_dir: Directory to save figure
+    """
+    panel_labels = ['A', 'B', 'C']
+    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c'}
+    models = list(model_data.keys())
+
+    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
+
+    global_ci_lower = []
+    global_ci_upper = []
+
+    for i, model_name in enumerate(models):
+        ax = axes[0, i]
+        md = model_data[model_name]
+        strategies = md['strategies']
+
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, 'baseline', 'optimal', 'r1', colors,
+                                          'Wolverine re-identification score (Recall at rank 1)')
+        global_ci_lower.extend(ci_lo)
+        global_ci_upper.extend(ci_hi)
+        ax.legend(title=f"Model:\n{md['label']}\nImage quality filters",
+                  loc='lower right', fontsize=10, title_fontsize=10)
+        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
+                fontsize=16, fontweight='bold', va='top', ha='left')
+
+    _apply_shared_ylim([axes[0, i] for i in range(len(models))], global_ci_lower, global_ci_upper)
 
     plt.tight_layout()
-    output_path = os.path.join(output_dir, 'scores.png')
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, 'rank@1.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved scores figure: {output_path}")
+    print(f"Saved cross-backbone R@1 figure: {output_path}")
 
 
-def create_thresholds_figure(results: ResultsCollection, output_dir: str):
-    """Create 2-panel figure with optimal quality thresholds."""
-    fig = plt.figure(figsize=(12, 6))
-    strategies = collect_strategies_data(results)
+def create_novelty_detection_figure(model_data: dict, output_dir: str):
+    """Create 1x3 cross-backbone figure for Balanced Accuracy (novelty detection).
 
-    # Panel A: R@1 thresholds
-    ax1 = fig.add_subplot(121)
-    x = np.arange(len(strategies['optimal']['x']))
-    width = 0.35
+    Args:
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        output_dir: Directory to save figure
+    """
+    panel_labels = ['A', 'B', 'C']
+    colors = {'baseline': '#1f77b4', 'optimal_ba': '#2ca02c'}
+    models = list(model_data.keys())
 
-    if strategies['optimal']['best_gal'] and strategies['optimal']['best_q']:
-        ax1.bar(x - width/2, strategies['optimal']['best_gal'], width,
-                color='#1f77b4', label='Training Gallery')
-        ax1.bar(x + width/2, strategies['optimal']['best_q'], width,
-                color='#ff7f0e', label='Validation Queries')
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(strategies['optimal']['x'])
+    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
 
-    ax1.set_xlabel('Training examples per individual', fontsize=12)
-    ax1.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
-    ax1.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax1.grid(True, alpha=0.3, axis='y')
-    ax1.text(0.02, 0.98, 'A', transform=ax1.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
+    global_ci_lower = []
+    global_ci_upper = []
 
-    # Panel B: BA thresholds
-    ax2 = fig.add_subplot(122)
-    x = np.arange(len(strategies['optimal_ba']['x']))
-    width = 0.35
+    for i, model_name in enumerate(models):
+        ax = axes[0, i]
+        md = model_data[model_name]
+        strategies = md['strategies']
 
-    if strategies['optimal_ba']['best_gal'] and strategies['optimal_ba']['best_q']:
-        ax2.bar(x - width/2, strategies['optimal_ba']['best_gal'], width,
-                color='#1f77b4', label='Training Gallery')
-        ax2.bar(x + width/2, strategies['optimal_ba']['best_q'], width,
-                color='#ff7f0e', label='Validation Queries')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(strategies['optimal_ba']['x'])
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, 'baseline', 'optimal_ba', 'ba', colors,
+                                          'Novel wolverine detection score (Balanced accuracy)')
+        global_ci_lower.extend(ci_lo)
+        global_ci_upper.extend(ci_hi)
+        ax.legend(title=f"Model:\n{md['label']}\nImage quality filters",
+                  loc='lower right', fontsize=10, title_fontsize=10)
+        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
+                fontsize=16, fontweight='bold', va='top', ha='left')
 
-    ax2.set_xlabel('Training examples per individual', fontsize=12)
-    ax2.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
-    ax2.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax2.grid(True, alpha=0.3, axis='y')
-    ax2.text(0.02, 0.98, 'B', transform=ax2.transAxes, fontsize=16, fontweight='bold', va='top', ha='left')
+    _apply_shared_ylim([axes[0, i] for i in range(len(models))], global_ci_lower, global_ci_upper)
 
     plt.tight_layout()
-    output_path = os.path.join(output_dir, 'best_thresholds.png')
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, 'novelty_detection.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved thresholds figure: {output_path}")
+    print(f"Saved cross-backbone novelty detection figure: {output_path}")
+
+
+def create_rank1_thresholds_figure(model_data: dict, output_dir: str):
+    """Create 1x3 cross-backbone figure for R@1-optimized thresholds.
+
+    Args:
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        output_dir: Directory to save figure
+    """
+    panel_labels = ['A', 'B', 'C']
+    models = list(model_data.keys())
+
+    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
+
+    global_max = 0.0
+    for i, model_name in enumerate(models):
+        ax = axes[0, i]
+        md = model_data[model_name]
+        strategies = md['strategies']
+
+        facet_max = _plot_thresholds_facet(ax, strategies, 'optimal')
+        global_max = max(global_max, facet_max)
+        ax.set_title(md['label'], fontsize=12)
+        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
+                fontsize=16, fontweight='bold', va='top', ha='left')
+
+    # Shared y-axis: 0 to next 0.1 step above the tallest bar
+    if global_max > 0:
+        shared_ymax = np.ceil(global_max * 10) / 10 + 0.05
+        for i in range(len(models)):
+            axes[0, i].set_ylim(0, shared_ymax)
+
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, 'best_threshold_rank.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved cross-backbone R@1 thresholds figure: {output_path}")
+
+
+def create_novelty_thresholds_figure(model_data: dict, output_dir: str):
+    """Create 1x3 cross-backbone figure for BA-optimized thresholds.
+
+    Args:
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        output_dir: Directory to save figure
+    """
+    panel_labels = ['A', 'B', 'C']
+    models = list(model_data.keys())
+
+    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
+
+    global_max = 0.0
+    for i, model_name in enumerate(models):
+        ax = axes[0, i]
+        md = model_data[model_name]
+        strategies = md['strategies']
+
+        facet_max = _plot_thresholds_facet(ax, strategies, 'optimal_ba')
+        global_max = max(global_max, facet_max)
+        ax.set_title(md['label'], fontsize=12)
+        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
+                fontsize=16, fontweight='bold', va='top', ha='left')
+
+    # Shared y-axis: 0 to next 0.1 step above the tallest bar
+    if global_max > 0:
+        shared_ymax = np.ceil(global_max * 10) / 10 + 0.05
+        for i in range(len(models)):
+            axes[0, i].set_ylim(0, shared_ymax)
+
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, 'best_threshold_novelty.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved cross-backbone BA thresholds figure: {output_path}")
 
 
 def plot_recall_curves(results: ResultsCollection, output_path: str):
@@ -835,37 +967,96 @@ def print_summary_table(results: ResultsCollection):
                   f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
 
 
-def run_plotting_main(results_dir: str, output_dir: str):
-    """Shared main entry point for all 3 plotting scripts."""
-    os.makedirs(output_dir, exist_ok=True)
+def run_single_model(model_name: str, results_dir: str, output_dir: str):
+    """Per-backbone diagnostics: tables and diagnostic figures.
 
+    Args:
+        model_name: Key in MODEL_CONFIGS (e.g. 'dinov3')
+        results_dir: Path to results JSON files
+        output_dir: Base output dir (figures go to output_dir, tables to sibling tables dir)
+    """
     print("=" * 60)
-    print("Open-Set Evaluation: Gallery Hygiene Sweep Results Analysis (Raw Cosine)")
+    print(f"Open-Set Evaluation: {model_name} Results Analysis (Raw Cosine)")
     print("=" * 60)
 
     results = load_hygiene_results(results_dir)
 
     if len(results) == 0:
-        print("No results found. Exiting.")
-        return
+        print(f"No results found for {model_name}. Skipping.")
+        return None
 
     print_summary_table(results)
 
-    print("\nGenerating figures and tables...")
+    # Tables -> reid_openset/tables/{model_name}/
+    tables_dir = os.path.join('reid_openset', 'tables', model_name)
+    os.makedirs(tables_dir, exist_ok=True)
 
     strategies = collect_strategies_data(results)
 
-    save_scores_table(strategies, output_dir)
-    save_thresholds_table(strategies, output_dir)
-    save_summary_table(results, output_dir)
+    save_scores_table(strategies, tables_dir)
+    save_thresholds_table(strategies, tables_dir)
+    save_summary_table(results, tables_dir)
 
-    create_scores_figure(results, output_dir)
-    create_thresholds_figure(results, output_dir)
-    plot_recall_curves(results, os.path.join(output_dir, 'recall_curves.png'))
-    plot_validation_loss_curves(results, os.path.join(output_dir, 'validation_loss_curves.png'))
-    plot_cosine_threshold(results, os.path.join(output_dir, 'cosine_threshold.png'))
+    # Diagnostic figures -> reid_openset/figures/{model_name}/
+    figures_dir = os.path.join('reid_openset', 'figures', model_name)
+    os.makedirs(figures_dir, exist_ok=True)
 
-    print(f"\nAnalysis complete! Figures saved to: {output_dir}")
+    plot_recall_curves(results, os.path.join(figures_dir, 'recall_curves.png'))
+    plot_validation_loss_curves(results, os.path.join(figures_dir, 'validation_loss_curves.png'))
+    plot_cosine_threshold(results, os.path.join(figures_dir, 'cosine_threshold.png'))
+
+    print(f"\nDiagnostics complete for {model_name}!")
+    print(f"  Tables: {tables_dir}")
+    print(f"  Figures: {figures_dir}")
+
+    return {'strategies': strategies, 'results': results}
+
+
+def run_aggregate(base_dir: str = "reid_openset"):
+    """Cross-backbone aggregate analysis.
+
+    Iterates MODEL_CONFIGS, loads each backbone's results, produces per-backbone
+    diagnostics and cross-backbone comparison figures.
+    """
+    from utils.reid import MODEL_CONFIGS
+
+    print("=" * 60)
+    print("Cross-Backbone Aggregate Analysis")
+    print("=" * 60)
+
+    model_data = {}
+
+    for model_name, config in MODEL_CONFIGS.items():
+        results_dir = f"{config['experiment_dir']}/results"
+        print(f"\n--- Loading {model_name} from {results_dir} ---")
+
+        result = run_single_model(model_name, results_dir, base_dir)
+        if result is None:
+            print(f"Skipping {model_name} (no results)")
+            continue
+
+        model_data[model_name] = {
+            'strategies': result['strategies'],
+            'results': result['results'],
+            'label': config['backbone_label'],
+        }
+
+    if not model_data:
+        print("No backbone results found. Exiting.")
+        return
+
+    # Cross-backbone figures -> reid_openset/figures/
+    cross_figures_dir = os.path.join(base_dir, 'figures')
+    os.makedirs(cross_figures_dir, exist_ok=True)
+
+    print(f"\nGenerating cross-backbone figures ({len(model_data)} backbones)...")
+    create_rank1_figure(model_data, cross_figures_dir)
+    create_novelty_detection_figure(model_data, cross_figures_dir)
+    create_rank1_thresholds_figure(model_data, cross_figures_dir)
+    create_novelty_thresholds_figure(model_data, cross_figures_dir)
+
+    print(f"\nAggregate analysis complete!")
+    print(f"  Cross-backbone figures: {cross_figures_dir}")
 
 
 if __name__ == "__main__":
@@ -873,12 +1064,20 @@ if __name__ == "__main__":
     from utils.reid import MODEL_CONFIGS
 
     parser = argparse.ArgumentParser(description="Plot reid open-set hygiene sweep results")
-    parser.add_argument("--model", type=str, required=True, choices=list(MODEL_CONFIGS.keys()))
+    parser.add_argument("--model", type=str, choices=list(MODEL_CONFIGS.keys()),
+                        help="Single backbone mode")
+    parser.add_argument("--aggregate", action="store_true",
+                        help="Run cross-backbone aggregate analysis")
     parser.add_argument("--results_dir", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
 
-    config = MODEL_CONFIGS[args.model]
-    results_dir = args.results_dir or f"{config['experiment_dir']}/results"
-    output_dir = args.output_dir or f"{config['experiment_dir']}/figures"
-    run_plotting_main(results_dir, output_dir)
+    if args.aggregate:
+        run_aggregate()
+    elif args.model:
+        config = MODEL_CONFIGS[args.model]
+        results_dir = args.results_dir or f"{config['experiment_dir']}/results"
+        output_dir = args.output_dir or "reid_openset"
+        run_single_model(args.model, results_dir, output_dir)
+    else:
+        parser.error("Either --model or --aggregate is required")
