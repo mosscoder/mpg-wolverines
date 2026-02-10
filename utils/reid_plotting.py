@@ -12,6 +12,8 @@ import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 from scipy import stats
 from typing import List, Tuple
 
@@ -552,8 +554,8 @@ def _apply_shared_ylim(axes, all_ci_lower, all_ci_upper):
 
 
 def create_thresholds_table(model_data: dict, strategy_key: str,
-                            output_dir: str, filename: str, title: str):
-    """Render optimal thresholds as a publication-quality table figure.
+                            output_dir: str, filename: str):
+    """Write optimal thresholds as an arXiv-style formatted .xlsx spreadsheet.
 
     Layout (example with 3 backbones):
 
@@ -566,9 +568,8 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
     Args:
         model_data: Dict mapping model name -> {"strategies", "results", "label"}
         strategy_key: 'optimal' (R@1-optimized) or 'optimal_ba' (BA-optimized)
-        output_dir: Directory to save figure
-        filename: Output filename (e.g. 'best_threshold_rank.png')
-        title: Table title
+        output_dir: Directory to save xlsx
+        filename: Output filename (e.g. 'best_threshold_rank.xlsx')
     """
     models = list(model_data.keys())
     labels = [model_data[m]['label'].replace('Frozen ', '') for m in models]
@@ -589,109 +590,103 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
             q = s['best_q'][i] if i < len(s['best_q']) else None
             lookup[m][sz] = (gal, q)
 
-    # Build full grid including headers as explicit rows
-    # Row 0: backbone names (merged spans)
-    # Row 1: Training/Validation sub-headers
-    # Rows 2+: data
-    n_data_cols = len(models) * 2
-    total_cols = 1 + n_data_cols  # row-label column + data columns
-
-    # Backbone header row: row-label cell + backbone names spanning 2 cols each
-    header_row = ['Examples per\nindividual']
+    # Build multi-level column index
+    col_tuples = []
     for label in labels:
-        header_row.append(label)
-        header_row.append('')  # merged with previous
+        col_tuples.append((label, 'Training'))
+        col_tuples.append((label, 'Validation'))
+    columns = pd.MultiIndex.from_tuples(col_tuples, names=['Backbone', 'Split'])
 
-    # Sub-header row
-    sub_row = ['']
-    for _ in models:
-        sub_row.extend(['Training', 'Validation'])
-
-    # Data rows
-    data_rows = []
+    # Build data
+    data = []
     for sz in all_sizes:
-        row = [str(sz)]
+        row = []
         for m in models:
             if sz in lookup[m] and lookup[m][sz][0] is not None:
                 gal, q = lookup[m][sz]
-                row.append(f'{gal:.2f}')
-                row.append(f'{q:.2f}')
+                row.extend([gal, q])
             else:
-                row.append('-')
-                row.append('-')
-        data_rows.append(row)
+                row.extend([None, None])
+        data.append(row)
 
-    all_rows = [header_row, sub_row] + data_rows
-    n_total_rows = len(all_rows)
+    df = pd.DataFrame(data, index=all_sizes, columns=columns)
+    df.index.name = 'Examples per individual'
 
-    # Create figure
-    fig_width = max(8, 1.3 * total_cols)
-    fig_height = 0.5 + 0.45 * n_total_rows
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    ax.axis('off')
-    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
-
-    table = ax.table(
-        cellText=all_rows,
-        cellLoc='center',
-        loc='center',
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(11)
-    table.scale(1.0, 1.6)
-
-    # --- Style backbone header row (row 0) ---
-    for j in range(total_cols):
-        cell = table[0, j]
-        cell.set_facecolor('#d9d9d9')
-        cell.set_text_props(fontweight='bold', fontsize=11)
-        cell.set_edgecolor('#999999')
-
-    # Visually merge backbone name cells: hide the empty right cell of each pair
-    for k in range(len(models)):
-        right_col = 1 + k * 2 + 1  # the empty cell
-        table[0, right_col].set_edgecolor('#d9d9d9')
-        table[0, right_col].get_text().set_text('')
-        # Remove the border between the two cells of the span
-        table[0, 1 + k * 2].set_edgecolor('#999999')
-
-    # --- Style sub-header row (row 1) ---
-    for j in range(total_cols):
-        cell = table[1, j]
-        cell.set_facecolor('#e8e8e8')
-        cell.set_text_props(fontweight='bold', fontsize=10)
-        cell.set_edgecolor('#999999')
-
-    # --- Style row-label column (col 0) ---
-    for i in range(n_total_rows):
-        cell = table[i, 0]
-        cell.set_facecolor('#f0f0f0' if i >= 2 else cell.get_facecolor())
-        cell.set_text_props(fontweight='bold')
-
-    # --- Alternate row shading for data rows ---
-    for i in range(2, n_total_rows):
-        bg = '#ffffff' if (i - 2) % 2 == 0 else '#f7f7f7'
-        for j in range(1, total_cols):
-            table[i, j].set_facecolor(bg)
-            table[i, j].set_edgecolor('#cccccc')
-        table[i, 0].set_facecolor(bg)
-        table[i, 0].set_edgecolor('#cccccc')
-
-    # --- Darker vertical separators between backbone groups ---
-    for k in range(1, len(models)):
-        sep_col = 1 + k * 2  # first col of next backbone group
-        for i in range(n_total_rows):
-            cell = table[i, sep_col]
-            vis = cell.get_edgecolor()  # preserve other edges
-            cell.visible_edges = 'open'
-            cell.set_edgecolor('#999999')
-            cell.visible_edges = 'BRTL'
-
-    plt.tight_layout()
+    # Write to xlsx with openpyxl formatting
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Thresholds', float_format='%.2f')
+        ws = writer.sheets['Thresholds']
+
+        # Style definitions
+        serif_font = Font(name='Times New Roman', size=11)
+        serif_bold = Font(name='Times New Roman', size=11, bold=True)
+        header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+        thin_side = Side(style='thin')
+        thick_side = Side(style='medium')
+        thin_border = Border(left=thin_side, right=thin_side,
+                             top=thin_side, bottom=thin_side)
+        header_border = Border(left=thin_side, right=thin_side,
+                               top=thin_side, bottom=thick_side)
+        center_align = Alignment(horizontal='center', vertical='center')
+        left_align = Alignment(horizontal='left', vertical='center')
+
+        # Row 1: backbone names (pandas writes level-0 header here)
+        # Row 2: Training/Validation (pandas writes level-1 header here)
+        # Row 3+: data rows
+        # Column A: index label / row labels
+
+        n_data_cols = len(models) * 2
+        total_cols = 1 + n_data_cols  # col A (index) + data cols
+
+        # Merge backbone name cells across their Training+Validation columns
+        for k, label in enumerate(labels):
+            start_col = 2 + k * 2  # B=2 for first backbone
+            end_col = start_col + 1
+            ws.merge_cells(start_row=1, start_column=start_col,
+                           end_row=1, end_column=end_col)
+
+        # Style header rows (rows 1–2)
+        for row_idx in [1, 2]:
+            for col_idx in range(1, total_cols + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.font = serif_bold
+                cell.fill = header_fill
+                cell.alignment = center_align
+                cell.border = header_border if row_idx == 2 else thin_border
+
+        # Style row-label column (column A) header cells
+        ws.cell(row=1, column=1).alignment = left_align
+        ws.cell(row=2, column=1).alignment = left_align
+
+        # Style data rows (row 3 onward)
+        for row_idx in range(3, 3 + len(all_sizes)):
+            for col_idx in range(1, total_cols + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.font = serif_font
+                cell.border = thin_border
+                if col_idx == 1:
+                    cell.alignment = left_align
+                    cell.font = serif_bold
+                else:
+                    cell.alignment = center_align
+                    # Format numeric values to 2 decimal places
+                    if cell.value is not None and isinstance(cell.value, (int, float)):
+                        cell.number_format = '0.00'
+
+        # Auto-fit column widths
+        for col_idx in range(1, total_cols + 1):
+            max_len = 0
+            col_letter = get_column_letter(col_idx)
+            for row in ws.iter_rows(min_col=col_idx, max_col=col_idx,
+                                    min_row=1, max_row=2 + len(all_sizes)):
+                for cell in row:
+                    if cell.value:
+                        max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
     print(f"Saved thresholds table: {output_path}")
 
 
@@ -781,8 +776,7 @@ def create_rank1_thresholds_table(model_data: dict, output_dir: str):
     """Create cross-backbone table of R@1-optimized quality thresholds."""
     create_thresholds_table(
         model_data, 'optimal', output_dir,
-        'best_threshold_rank.png',
-        'Optimal image quality thresholds (R@1-optimized)',
+        'best_threshold_rank.xlsx',
     )
 
 
@@ -790,8 +784,7 @@ def create_novelty_thresholds_table(model_data: dict, output_dir: str):
     """Create cross-backbone table of BA-optimized quality thresholds."""
     create_thresholds_table(
         model_data, 'optimal_ba', output_dir,
-        'best_threshold_novelty.png',
-        'Optimal image quality thresholds (novelty detection-optimized)',
+        'best_threshold_novelty.xlsx',
     )
 
 
@@ -1101,14 +1094,19 @@ def run_aggregate(base_dir: str = "reid_openset"):
     cross_figures_dir = os.path.join(base_dir, 'figures')
     os.makedirs(cross_figures_dir, exist_ok=True)
 
+    # Cross-backbone tables -> reid_openset/tables/
+    cross_tables_dir = os.path.join(base_dir, 'tables')
+    os.makedirs(cross_tables_dir, exist_ok=True)
+
     print(f"\nGenerating cross-backbone figures ({len(model_data)} backbones)...")
     create_rank1_figure(model_data, cross_figures_dir)
     create_novelty_detection_figure(model_data, cross_figures_dir)
-    create_rank1_thresholds_table(model_data, cross_figures_dir)
-    create_novelty_thresholds_table(model_data, cross_figures_dir)
+    create_rank1_thresholds_table(model_data, cross_tables_dir)
+    create_novelty_thresholds_table(model_data, cross_tables_dir)
 
     print(f"\nAggregate analysis complete!")
     print(f"  Cross-backbone figures: {cross_figures_dir}")
+    print(f"  Cross-backbone tables: {cross_tables_dir}")
 
 
 if __name__ == "__main__":
