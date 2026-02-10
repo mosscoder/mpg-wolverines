@@ -613,7 +613,7 @@ def create_rank1_figure(model_data: dict, output_dir: str):
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n\n" + "$\\bf{Image\\ quality\\ filters:}$",
                   loc='lower right', fontsize=10, title_fontsize=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
@@ -654,7 +654,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n\n" + "$\\bf{Image\\ quality\\ filters:}$",
                   loc='lower right', fontsize=10, title_fontsize=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
