@@ -612,7 +612,8 @@ def create_rank1_figure(model_data: dict, output_dir: str):
                                           'Wolverine re-identification score (Recall at rank 1)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
-        ax.legend(title=f"Model:\n{md['label']}\nImage quality filters",
+        label = md['label'].replace('Frozen ', '')
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
                   loc='lower right', fontsize=10, title_fontsize=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
@@ -652,7 +653,8 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
                                           'Novel wolverine detection score (Balanced accuracy)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
-        ax.legend(title=f"Model:\n{md['label']}\nImage quality filters",
+        label = md['label'].replace('Frozen ', '')
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
                   loc='lower right', fontsize=10, title_fontsize=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
@@ -687,7 +689,7 @@ def create_rank1_thresholds_figure(model_data: dict, output_dir: str):
 
         facet_max = _plot_thresholds_facet(ax, strategies, 'optimal')
         global_max = max(global_max, facet_max)
-        ax.set_title(md['label'], fontsize=12)
+        ax.set_title(md['label'].replace('Frozen ', ''), fontsize=12)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
 
@@ -725,7 +727,7 @@ def create_novelty_thresholds_figure(model_data: dict, output_dir: str):
 
         facet_max = _plot_thresholds_facet(ax, strategies, 'optimal_ba')
         global_max = max(global_max, facet_max)
-        ax.set_title(md['label'], fontsize=12)
+        ax.set_title(md['label'].replace('Frozen ', ''), fontsize=12)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
 
