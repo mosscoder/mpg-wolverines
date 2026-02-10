@@ -551,40 +551,148 @@ def _apply_shared_ylim(axes, all_ci_lower, all_ci_upper):
         ax.set_yticks(np.arange(y_min, y_max + 0.01, 0.05))
 
 
-def _plot_thresholds_facet(ax, strategies, strategy_key):
-    """Draw one bar-chart panel showing gallery vs query thresholds.
+def create_thresholds_table(model_data: dict, strategy_key: str,
+                            output_dir: str, filename: str, title: str):
+    """Render optimal thresholds as a publication-quality table figure.
 
-    Does NOT set y-limits — returns the max bar value so the caller can
-    unify axes across multiple facets.
+    Layout (example with 3 backbones):
+
+        Examples per   DINOv3-ViT-B/16    MegaDescriptor-L-384   BioCLIP-2 ViT-L/14
+        individual    Training Validation  Training Validation    Training Validation
+        2             0.20     0.50        ...      ...           ...      ...
+        4             0.30     0.50        ...      ...           ...      ...
+        ...
 
     Args:
-        ax: Matplotlib axes
-        strategies: Dict from collect_strategies_data()
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
         strategy_key: 'optimal' (R@1-optimized) or 'optimal_ba' (BA-optimized)
-
-    Returns:
-        Maximum bar value across both series, or 0.0 if no data
+        output_dir: Directory to save figure
+        filename: Output filename (e.g. 'best_threshold_rank.png')
+        title: Table title
     """
-    s = strategies[strategy_key]
-    x = np.arange(len(s['x']))
-    width = 0.35
-    max_val = 0.0
+    models = list(model_data.keys())
+    labels = [model_data[m]['label'].replace('Frozen ', '') for m in models]
 
-    if s['best_gal'] and s['best_q']:
-        ax.bar(x - width/2, s['best_gal'], width,
-               color='#1f77b4', label='Training Gallery')
-        ax.bar(x + width/2, s['best_q'], width,
-               color='#ff7f0e', label='Validation Queries')
-        ax.set_xticks(x)
-        ax.set_xticklabels(s['x'])
-        max_val = max(max(s['best_gal']), max(s['best_q']))
+    # Collect all gallery sizes across backbones
+    all_sizes = sorted(set(
+        sz for m in models
+        for sz in model_data[m]['strategies'][strategy_key]['x']
+    ))
 
-    ax.set_xlabel('Training examples per individual', fontsize=12)
-    ax.set_ylabel(r'Best image quality threshold ($p$ visible pelage)', fontsize=12)
-    ax.legend(title='Threshold applied to:', loc='lower right', fontsize=10, title_fontsize=10)
-    ax.grid(True, alpha=0.3, axis='y')
+    # Build lookup: model -> gallery_size -> (gal_thresh, q_thresh)
+    lookup = {}
+    for m in models:
+        s = model_data[m]['strategies'][strategy_key]
+        lookup[m] = {}
+        for i, sz in enumerate(s['x']):
+            gal = s['best_gal'][i] if i < len(s['best_gal']) else None
+            q = s['best_q'][i] if i < len(s['best_q']) else None
+            lookup[m][sz] = (gal, q)
 
-    return max_val
+    # Build full grid including headers as explicit rows
+    # Row 0: backbone names (merged spans)
+    # Row 1: Training/Validation sub-headers
+    # Rows 2+: data
+    n_data_cols = len(models) * 2
+    total_cols = 1 + n_data_cols  # row-label column + data columns
+
+    # Backbone header row: row-label cell + backbone names spanning 2 cols each
+    header_row = ['Examples per\nindividual']
+    for label in labels:
+        header_row.append(label)
+        header_row.append('')  # merged with previous
+
+    # Sub-header row
+    sub_row = ['']
+    for _ in models:
+        sub_row.extend(['Training', 'Validation'])
+
+    # Data rows
+    data_rows = []
+    for sz in all_sizes:
+        row = [str(sz)]
+        for m in models:
+            if sz in lookup[m] and lookup[m][sz][0] is not None:
+                gal, q = lookup[m][sz]
+                row.append(f'{gal:.2f}')
+                row.append(f'{q:.2f}')
+            else:
+                row.append('-')
+                row.append('-')
+        data_rows.append(row)
+
+    all_rows = [header_row, sub_row] + data_rows
+    n_total_rows = len(all_rows)
+
+    # Create figure
+    fig_width = max(8, 1.3 * total_cols)
+    fig_height = 0.5 + 0.45 * n_total_rows
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    ax.axis('off')
+    ax.set_title(title, fontsize=13, fontweight='bold', pad=12)
+
+    table = ax.table(
+        cellText=all_rows,
+        cellLoc='center',
+        loc='center',
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1.0, 1.6)
+
+    # --- Style backbone header row (row 0) ---
+    for j in range(total_cols):
+        cell = table[0, j]
+        cell.set_facecolor('#d9d9d9')
+        cell.set_text_props(fontweight='bold', fontsize=11)
+        cell.set_edgecolor('#999999')
+
+    # Visually merge backbone name cells: hide the empty right cell of each pair
+    for k in range(len(models)):
+        right_col = 1 + k * 2 + 1  # the empty cell
+        table[0, right_col].set_edgecolor('#d9d9d9')
+        table[0, right_col].get_text().set_text('')
+        # Remove the border between the two cells of the span
+        table[0, 1 + k * 2].set_edgecolor('#999999')
+
+    # --- Style sub-header row (row 1) ---
+    for j in range(total_cols):
+        cell = table[1, j]
+        cell.set_facecolor('#e8e8e8')
+        cell.set_text_props(fontweight='bold', fontsize=10)
+        cell.set_edgecolor('#999999')
+
+    # --- Style row-label column (col 0) ---
+    for i in range(n_total_rows):
+        cell = table[i, 0]
+        cell.set_facecolor('#f0f0f0' if i >= 2 else cell.get_facecolor())
+        cell.set_text_props(fontweight='bold')
+
+    # --- Alternate row shading for data rows ---
+    for i in range(2, n_total_rows):
+        bg = '#ffffff' if (i - 2) % 2 == 0 else '#f7f7f7'
+        for j in range(1, total_cols):
+            table[i, j].set_facecolor(bg)
+            table[i, j].set_edgecolor('#cccccc')
+        table[i, 0].set_facecolor(bg)
+        table[i, 0].set_edgecolor('#cccccc')
+
+    # --- Darker vertical separators between backbone groups ---
+    for k in range(1, len(models)):
+        sep_col = 1 + k * 2  # first col of next backbone group
+        for i in range(n_total_rows):
+            cell = table[i, sep_col]
+            vis = cell.get_edgecolor()  # preserve other edges
+            cell.visible_edges = 'open'
+            cell.set_edgecolor('#999999')
+            cell.visible_edges = 'BRTL'
+
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, filename)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved thresholds table: {output_path}")
 
 
 def create_rank1_figure(model_data: dict, output_dir: str):
@@ -669,80 +777,22 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
     print(f"Saved cross-backbone novelty detection figure: {output_path}")
 
 
-def create_rank1_thresholds_figure(model_data: dict, output_dir: str):
-    """Create 1x3 cross-backbone figure for R@1-optimized thresholds.
-
-    Args:
-        model_data: Dict mapping model name -> {"strategies", "results", "label"}
-        output_dir: Directory to save figure
-    """
-    panel_labels = ['A', 'B', 'C']
-    models = list(model_data.keys())
-
-    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
-
-    global_max = 0.0
-    for i, model_name in enumerate(models):
-        ax = axes[0, i]
-        md = model_data[model_name]
-        strategies = md['strategies']
-
-        facet_max = _plot_thresholds_facet(ax, strategies, 'optimal')
-        global_max = max(global_max, facet_max)
-        ax.set_title(md['label'].replace('Frozen ', ''), fontsize=12)
-        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
-                fontsize=16, fontweight='bold', va='top', ha='left')
-
-    # Shared y-axis: 0 to next 0.1 step above the tallest bar
-    if global_max > 0:
-        shared_ymax = np.ceil(global_max * 10) / 10 + 0.05
-        for i in range(len(models)):
-            axes[0, i].set_ylim(0, shared_ymax)
-
-    plt.tight_layout()
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, 'best_threshold_rank.png')
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved cross-backbone R@1 thresholds figure: {output_path}")
+def create_rank1_thresholds_table(model_data: dict, output_dir: str):
+    """Create cross-backbone table of R@1-optimized quality thresholds."""
+    create_thresholds_table(
+        model_data, 'optimal', output_dir,
+        'best_threshold_rank.png',
+        'Optimal image quality thresholds (R@1-optimized)',
+    )
 
 
-def create_novelty_thresholds_figure(model_data: dict, output_dir: str):
-    """Create 1x3 cross-backbone figure for BA-optimized thresholds.
-
-    Args:
-        model_data: Dict mapping model name -> {"strategies", "results", "label"}
-        output_dir: Directory to save figure
-    """
-    panel_labels = ['A', 'B', 'C']
-    models = list(model_data.keys())
-
-    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
-
-    global_max = 0.0
-    for i, model_name in enumerate(models):
-        ax = axes[0, i]
-        md = model_data[model_name]
-        strategies = md['strategies']
-
-        facet_max = _plot_thresholds_facet(ax, strategies, 'optimal_ba')
-        global_max = max(global_max, facet_max)
-        ax.set_title(md['label'].replace('Frozen ', ''), fontsize=12)
-        ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
-                fontsize=16, fontweight='bold', va='top', ha='left')
-
-    # Shared y-axis: 0 to next 0.1 step above the tallest bar
-    if global_max > 0:
-        shared_ymax = np.ceil(global_max * 10) / 10 + 0.05
-        for i in range(len(models)):
-            axes[0, i].set_ylim(0, shared_ymax)
-
-    plt.tight_layout()
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, 'best_threshold_novelty.png')
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved cross-backbone BA thresholds figure: {output_path}")
+def create_novelty_thresholds_table(model_data: dict, output_dir: str):
+    """Create cross-backbone table of BA-optimized quality thresholds."""
+    create_thresholds_table(
+        model_data, 'optimal_ba', output_dir,
+        'best_threshold_novelty.png',
+        'Optimal image quality thresholds (novelty detection-optimized)',
+    )
 
 
 def plot_recall_curves(results: ResultsCollection, output_path: str):
@@ -1054,8 +1104,8 @@ def run_aggregate(base_dir: str = "reid_openset"):
     print(f"\nGenerating cross-backbone figures ({len(model_data)} backbones)...")
     create_rank1_figure(model_data, cross_figures_dir)
     create_novelty_detection_figure(model_data, cross_figures_dir)
-    create_rank1_thresholds_figure(model_data, cross_figures_dir)
-    create_novelty_thresholds_figure(model_data, cross_figures_dir)
+    create_rank1_thresholds_table(model_data, cross_figures_dir)
+    create_novelty_thresholds_table(model_data, cross_figures_dir)
 
     print(f"\nAggregate analysis complete!")
     print(f"  Cross-backbone figures: {cross_figures_dir}")
