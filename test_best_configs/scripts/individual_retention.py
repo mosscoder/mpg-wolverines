@@ -16,9 +16,11 @@ import sys
 import json
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 
 sys.path.append('.')
 
+load_dotenv()
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 from datasets import load_dataset
