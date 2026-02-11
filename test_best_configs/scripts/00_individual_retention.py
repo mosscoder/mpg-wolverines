@@ -3,12 +3,13 @@ Pre-run diagnostic: report which individuals are retained vs excluded
 by each backbone's quality thresholds, with image counts per set.
 
 Outputs:
-  tables/individual_retention_retained.csv  — one row per (individual × backbone), train/test counts
-  tables/individual_retention_excluded.csv  — individuals dropped and why, per backbone
-  tables/individual_retention_summary.csv   — per-backbone totals + shared intersection
+  tables/individual_retention_retained.csv       — one row per (individual × backbone), train/test counts
+  tables/individual_retention_excluded.csv       — individuals dropped and why, per backbone
+  tables/individual_retention_summary.csv        — per-backbone totals + shared intersection
+  tables/individual_retention_epoch_search.csv   — epoch search temporal split viability per backbone
 
 Usage:
-    python test_best_configs/scripts/individual_retention.py
+    python test_best_configs/scripts/00_individual_retention.py
 """
 
 import os
@@ -101,6 +102,27 @@ def extract_best_hygiene_config(model_name):
     if best_config is None:
         raise ValueError(f"Could not find any valid hygiene config for {model_name}")
     return best_config
+
+
+def create_temporal_val_split(train_metadata, val_fraction=0.1):
+    """Split re-id pool into train/val by reserving last 10% of events per individual."""
+    ymdh_arr = train_metadata['ymdh']
+    train_indices_per_id = {}
+    val_indices_per_id = {}
+
+    for ind_id, indices in train_metadata['id_to_indices'].items():
+        # Get unique ymdh values, sorted chronologically
+        ymdh_values = sorted(set(ymdh_arr[i] for i in indices))
+        n_val_events = max(1, int(len(ymdh_values) * val_fraction))
+        val_ymdh = set(ymdh_values[-n_val_events:])
+
+        train_idx = [i for i in indices if ymdh_arr[i] not in val_ymdh]
+        val_idx = [i for i in indices if ymdh_arr[i] in val_ymdh]
+
+        train_indices_per_id[ind_id] = train_idx
+        val_indices_per_id[ind_id] = val_idx
+
+    return train_indices_per_id, val_indices_per_id
 
 
 def main():
@@ -328,6 +350,84 @@ def main():
         path = os.path.join(TABLES_DIR, f'individual_retention_{name}.csv')
         df.to_csv(path, index=False)
         print(f"\nSaved: {path}")
+
+    # --- Epoch search retention ---
+    print("\n" + "=" * 70)
+    print("Epoch Search Retention (temporal val split)")
+    print("=" * 70)
+
+    train_indices_per_id, val_indices_per_id = create_temporal_val_split(train_meta)
+
+    # All individuals in re-id pool (excluding excluded_entirely)
+    reid_candidate_ids = sorted(set(train_meta['id_to_indices'].keys()) - set(excluded_entirely))
+
+    epoch_search_rows = []
+    for mn in MODELS:
+        cfg = backbone_configs[mn]
+        gal_thresh = cfg['gallery_threshold']
+        q_thresh = cfg['query_threshold']
+        backbone_label = MODEL_CONFIGS[mn]['backbone_label'].replace('Frozen ', '')
+
+        print(f"\n  {mn} (gallery>={gal_thresh}, query>={q_thresh}):")
+
+        for ind_id in reid_candidate_ids:
+            all_indices = train_meta['id_to_indices'].get(ind_id, [])
+            total_images = len(all_indices)
+
+            # Count unique events
+            ymdh_arr = train_meta['ymdh']
+            all_ymdh = sorted(set(ymdh_arr[i] for i in all_indices))
+            n_events = len(all_ymdh)
+
+            # Temporal split counts
+            train_after_split = len(train_indices_per_id.get(ind_id, []))
+            val_after_split = len(val_indices_per_id.get(ind_id, []))
+
+            # Val events count
+            n_val_events = max(1, int(n_events * 0.1))
+
+            # Quality-filtered counts
+            train_filtered = filter_training_pool_by_quality(
+                train_meta, train_indices_per_id.get(ind_id, []), gal_thresh
+            ) if train_indices_per_id.get(ind_id, []) else []
+            val_filtered = filter_training_pool_by_quality(
+                train_meta, val_indices_per_id.get(ind_id, []), q_thresh
+            ) if val_indices_per_id.get(ind_id, []) else []
+
+            viable = len(train_filtered) >= BATCH_K and len(val_filtered) >= 1
+
+            epoch_search_rows.append({
+                'model': mn,
+                'backbone': backbone_label,
+                'gallery_threshold': gal_thresh,
+                'query_threshold': q_thresh,
+                'individual': ind_id,
+                'total_images': total_images,
+                'n_events': n_events,
+                'val_events': n_val_events,
+                'train_after_split': train_after_split,
+                'val_after_split': val_after_split,
+                'train_after_filter': len(train_filtered),
+                'val_after_filter': len(val_filtered),
+                'viable': viable,
+            })
+
+            status = "viable" if viable else "excluded"
+            print(f"    {ind_id}: events={n_events}, train_filt={len(train_filtered)}, "
+                  f"val_filt={len(val_filtered)} [{status}]")
+
+    df_epoch_search = pd.DataFrame(epoch_search_rows)
+
+    # Print epoch search summary per backbone
+    print(f"\nEpoch search viability summary:")
+    for mn in MODELS:
+        sub = df_epoch_search[df_epoch_search['model'] == mn]
+        n_viable = sub['viable'].sum()
+        print(f"  {mn}: {n_viable}/{len(sub)} viable")
+
+    path = os.path.join(TABLES_DIR, 'individual_retention_epoch_search.csv')
+    df_epoch_search.to_csv(path, index=False)
+    print(f"\nSaved: {path}")
 
 
 if __name__ == '__main__':

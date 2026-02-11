@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=test_best
+#SBATCH --job-name=epoch_search
 #SBATCH --partition=general
 #SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:A6000:1
 #SBATCH --time=48:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/test_best/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/test_best/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/test_best_epoch/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/test_best_epoch/%A_%a.err
 
-# Final test evaluation with best configs per backbone (dinov3, megadescriptor, bioclip2)
+# Epoch search via temporal validation split (dinov3, megadescriptor, bioclip2)
 # 3 jobs, one per backbone
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/test_best
+mkdir -p /home/kdoherty/logs/wolverines/test_best_epoch
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -35,8 +35,8 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run the final test evaluation
-python -u test_best_configs/scripts/sweep_best.py \
+# Run the epoch search
+python -u test_best_configs/scripts/01_best_epoch_search.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --device gpu
 

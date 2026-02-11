@@ -1,5 +1,5 @@
 """
-Generate figures and tables from final test evaluation results.
+Generate figures and tables from final test evaluation results (02_test_best.py).
 
 Outputs:
   - figures/test_R@1.png: Barplot of R@1 per backbone
@@ -7,7 +7,7 @@ Outputs:
   - tables/test_R@1.json: Numerical R@1 per backbone
 
 Usage:
-    python test_best_configs/scripts/plot_results.py
+    python test_best_configs/scripts/03_plot_results.py
 """
 
 import os
@@ -138,7 +138,7 @@ def main():
     results = load_results()
 
     if not results:
-        print("No results found. Run sweep_best.py first.")
+        print("No results found. Run 02_test_best.py first.")
         return
 
     create_barplot(results)
