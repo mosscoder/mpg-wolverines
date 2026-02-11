@@ -1,20 +1,19 @@
 #!/bin/bash
 #SBATCH --job-name=test_best
-#SBATCH --partition=preempt
-#SBATCH --requeue
+#SBATCH --partition=general
 #SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/test_best_configs/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/test_best_configs/%A_%a.err
+#SBATCH --gres=gpu:A6000:1
+#SBATCH --time=48:00:00
+#SBATCH --output=/home/kdoherty/logs/wolverines/test_best/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/test_best/%A_%a.err
 
-# Final test evaluation: one job per backbone (dinov3, megadescriptor, bioclip2)
-# Trains on full quality-filtered training split, evaluates R@1 on held-out test split
+# Final test evaluation with best configs per backbone (dinov3, megadescriptor, bioclip2)
+# 3 jobs, one per backbone
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/test_best_configs
+mkdir -p /home/kdoherty/logs/wolverines/test_best
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -35,7 +34,7 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run final test evaluation
+# Run the final test evaluation
 python -u test_best_configs/scripts/sweep_best.py \
     --idx $SLURM_ARRAY_TASK_ID \
     --device gpu
