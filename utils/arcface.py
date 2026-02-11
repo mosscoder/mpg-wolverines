@@ -3,6 +3,7 @@ Triplet loss utilities for wolverine re-identification experiments.
 Includes quality-weighted triplet loss, PK batch sampling, and embedding model.
 """
 
+import os
 import math
 import torch
 import torch.nn as nn
@@ -551,7 +552,10 @@ def create_dinov3_arcface_model(
     Returns:
         Tuple of (model, embedding_dim): Model and its output dimension
     """
-    backbone = AutoModel.from_pretrained("facebook/dinov3-vitb16-pretrain-lvd1689m")
+    backbone = AutoModel.from_pretrained(
+        "facebook/dinov3-vitb16-pretrain-lvd1689m",
+        token=os.environ.get("HF_TOKEN"),
+    )
 
     # Freeze backbone
     for param in backbone.parameters():

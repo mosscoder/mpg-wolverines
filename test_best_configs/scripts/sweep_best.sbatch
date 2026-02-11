@@ -25,7 +25,7 @@ mamba activate wolverines
 # Set HuggingFace cache and auth token (DINOv3 is a gated model)
 export HF_HOME=/data/hf_cache
 export HF_DATASETS_OFFLINE=1
-source .env
+set -a; source .env; set +a
 
 # Print job info
 echo "========================================"
