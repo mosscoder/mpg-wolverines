@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['HF_DATASETS_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ.setdefault('HF_HOME', '/data/hf_cache')
 
 sys.path.append('.')
