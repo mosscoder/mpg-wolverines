@@ -571,6 +571,8 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
         output_dir: Directory to save xlsx
         filename: Output filename (e.g. 'best_threshold_rank.xlsx')
     """
+    from openpyxl import Workbook
+
     models = list(model_data.keys())
     labels = [model_data[m]['label'].replace('Frozen ', '') for m in models]
 
@@ -590,103 +592,105 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
             q = s['best_q'][i] if i < len(s['best_q']) else None
             lookup[m][sz] = (gal, q)
 
-    # Build multi-level column index
-    col_tuples = []
-    for label in labels:
-        col_tuples.append((label, 'Training'))
-        col_tuples.append((label, 'Validation'))
-    columns = pd.MultiIndex.from_tuples(col_tuples, names=['Backbone', 'Split'])
+    # Style definitions
+    serif_font = Font(name='Times New Roman', size=11)
+    serif_bold = Font(name='Times New Roman', size=11, bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    thin_side = Side(style='thin')
+    thick_side = Side(style='medium')
+    thin_border = Border(left=thin_side, right=thin_side,
+                         top=thin_side, bottom=thin_side)
+    header_border = Border(left=thin_side, right=thin_side,
+                           top=thin_side, bottom=thick_side)
+    center_align = Alignment(horizontal='center', vertical='center')
+    left_align = Alignment(horizontal='left', vertical='center')
 
-    # Build data
-    data = []
-    for sz in all_sizes:
-        row = []
-        for m in models:
+    n_data_cols = len(models) * 2
+    total_cols = 1 + n_data_cols
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Thresholds'
+
+    # Row 1: backbone names (merged across Training+Validation pairs)
+    ws.cell(row=1, column=1)  # empty corner cell
+    for k, label in enumerate(labels):
+        col = 2 + k * 2
+        ws.cell(row=1, column=col, value=label)
+        # Write to both cells BEFORE merging so formatting sticks
+        ws.cell(row=1, column=col + 1, value='')
+
+    # Row 2: "Examples per individual" + Training/Validation sub-headers
+    ws.cell(row=2, column=1, value='Examples per individual')
+    for k in range(len(models)):
+        ws.cell(row=2, column=2 + k * 2, value='Training')
+        ws.cell(row=2, column=2 + k * 2 + 1, value='Validation')
+
+    # Data rows (row 3+)
+    for r_idx, sz in enumerate(all_sizes):
+        row = 3 + r_idx
+        ws.cell(row=row, column=1, value=sz)
+        for k, m in enumerate(models):
+            col = 2 + k * 2
             if sz in lookup[m] and lookup[m][sz][0] is not None:
                 gal, q = lookup[m][sz]
-                row.extend([gal, q])
+                ws.cell(row=row, column=col, value=gal)
+                ws.cell(row=row, column=col + 1, value=q)
+
+    # Apply formatting BEFORE merging (merged cells lose right-cell styles)
+    # Header row 1
+    for col_idx in range(1, total_cols + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = serif_bold
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+    ws.cell(row=1, column=1).alignment = left_align
+
+    # Sub-header row 2
+    for col_idx in range(1, total_cols + 1):
+        cell = ws.cell(row=2, column=col_idx)
+        cell.font = serif_bold
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = header_border
+    ws.cell(row=2, column=1).alignment = left_align
+
+    # Data rows
+    last_data_row = 2 + len(all_sizes)
+    for row_idx in range(3, last_data_row + 1):
+        for col_idx in range(1, total_cols + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = serif_font
+            cell.border = thin_border
+            if col_idx == 1:
+                cell.alignment = left_align
+                cell.font = serif_bold
             else:
-                row.extend([None, None])
-        data.append(row)
+                cell.alignment = center_align
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '0.00'
 
-    df = pd.DataFrame(data, index=all_sizes, columns=columns)
-    df.index.name = 'Examples per individual'
+    # Now merge backbone name cells (after formatting is applied)
+    for k in range(len(labels)):
+        start_col = 2 + k * 2
+        ws.merge_cells(start_row=1, start_column=start_col,
+                       end_row=1, end_column=start_col + 1)
 
-    # Write to xlsx with openpyxl formatting
+    # Auto-fit column widths
+    for col_idx in range(1, total_cols + 1):
+        max_len = 0
+        col_letter = get_column_letter(col_idx)
+        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx,
+                                min_row=1, max_row=last_data_row):
+            for cell in row:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
-
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Thresholds', float_format='%.2f')
-        ws = writer.sheets['Thresholds']
-
-        # Style definitions
-        serif_font = Font(name='Times New Roman', size=11)
-        serif_bold = Font(name='Times New Roman', size=11, bold=True)
-        header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
-        thin_side = Side(style='thin')
-        thick_side = Side(style='medium')
-        thin_border = Border(left=thin_side, right=thin_side,
-                             top=thin_side, bottom=thin_side)
-        header_border = Border(left=thin_side, right=thin_side,
-                               top=thin_side, bottom=thick_side)
-        center_align = Alignment(horizontal='center', vertical='center')
-        left_align = Alignment(horizontal='left', vertical='center')
-
-        # Row 1: backbone names (pandas writes level-0 header here)
-        # Row 2: Training/Validation (pandas writes level-1 header here)
-        # Row 3+: data rows
-        # Column A: index label / row labels
-
-        n_data_cols = len(models) * 2
-        total_cols = 1 + n_data_cols  # col A (index) + data cols
-
-        # Merge backbone name cells across their Training+Validation columns
-        for k, label in enumerate(labels):
-            start_col = 2 + k * 2  # B=2 for first backbone
-            end_col = start_col + 1
-            ws.merge_cells(start_row=1, start_column=start_col,
-                           end_row=1, end_column=end_col)
-
-        # Style header rows (rows 1–2)
-        for row_idx in [1, 2]:
-            for col_idx in range(1, total_cols + 1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.font = serif_bold
-                cell.fill = header_fill
-                cell.alignment = center_align
-                cell.border = header_border if row_idx == 2 else thin_border
-
-        # Style row-label column (column A) header cells
-        ws.cell(row=1, column=1).alignment = left_align
-        ws.cell(row=2, column=1).alignment = left_align
-
-        # Style data rows (row 3 onward)
-        for row_idx in range(3, 3 + len(all_sizes)):
-            for col_idx in range(1, total_cols + 1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.font = serif_font
-                cell.border = thin_border
-                if col_idx == 1:
-                    cell.alignment = left_align
-                    cell.font = serif_bold
-                else:
-                    cell.alignment = center_align
-                    # Format numeric values to 2 decimal places
-                    if cell.value is not None and isinstance(cell.value, (int, float)):
-                        cell.number_format = '0.00'
-
-        # Auto-fit column widths
-        for col_idx in range(1, total_cols + 1):
-            max_len = 0
-            col_letter = get_column_letter(col_idx)
-            for row in ws.iter_rows(min_col=col_idx, max_col=col_idx,
-                                    min_row=1, max_row=2 + len(all_sizes)):
-                for cell in row:
-                    if cell.value:
-                        max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
-
+    wb.save(output_path)
     print(f"Saved thresholds table: {output_path}")
 
 
