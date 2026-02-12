@@ -1,28 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=opt_resize_sweep_MD
+#SBATCH --job-name=opt_emb_dim_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0
+#SBATCH --array=0-6
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_resize_MD/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_resize_MD/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/opt_emb_dim/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/opt_emb_dim/%A_%a.err
 
-# Image Size Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
-# 17 image sizes = 17 configs, one per job
+# Embedding Dimension Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
+# 7 embedding dims = 7 configs, one per job
 #
-# Sizes: 256 to 512, step 16 (256, 272, 288, ..., 512)
-# Fixed: LR=5e-4, seed=0, 50 epochs
-#
-# Temporal split by capture event (ymdh):
-# - Earlier 50% of ymdh values -> train
-# - Later 50% of ymdh values -> test
-# - Hygiene validation indices excluded
+# Dims: 64, 128, 256, 512, 1024, 2048, 4096
+# Fixed: Best LR from prior sweep, native image size, seed=0, 50 epochs
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_resize_MD
+mkdir -p /home/kdoherty/logs/wolverines/opt_emb_dim
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -43,14 +38,15 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run the resize sweep script
-python -u -m utils.reid opt_resize --model megadescriptor \
+# Run the embedding dim sweep script
+# NOTE: Update --lr and --image-size from sweep 00/01 results
+python -u -m utils.reid opt_embedding_dim --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/megadescriptor/results/opt/resize \
+    --output_dir reid_openset/dinov3/results/opt/embedding_dim \
     --device gpu \
-    --values 384 \ #Megadescriptor only accepts 384
-    --lr 0.0005 \
-    --embedding-dim 128 --epochs 50 --seed 0
+    --values 64 128 256 512 1024 2048 4096 \
+    --lr 0.0005 --image-size 224 \
+    --epochs 50 --seed 0
 
 # Print completion info
 echo "========================================"

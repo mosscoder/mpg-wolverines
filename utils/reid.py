@@ -35,7 +35,7 @@ datasets.config.NUM_PROC = 1
 MODEL_CONFIGS = {
     "dinov3": {
         "factory": "create_dinov3_arcface_model",
-        "native_size": 224,
+        "native_size": 256,
         "patch_size": 16,
         "norm_mean": [0.485, 0.456, 0.406],
         "norm_std": [0.229, 0.224, 0.225],
@@ -444,21 +444,7 @@ def load_best_hyperparams(model_name):
     else:
         print(f"No LR sweep results found, using default: {best_lr}")
 
-    # Load best size from resize_results
-    resize_results_dir = os.path.join(experiment_dir, 'results/opt/resize')
-    resize_files = glob.glob(os.path.join(resize_results_dir, 'resize=*.json'))
-    if resize_files:
-        best_size_recall = 0.0
-        for f in resize_files:
-            with open(f, 'r') as fp:
-                result = json.load(fp)
-            recall = result['results']['best_test_recall_at_1']
-            if recall > best_size_recall:
-                best_size_recall = recall
-                best_size = result['config']['resize_size']
-        print(f"Loaded best size from sweep: {best_size} (R@1={best_size_recall:.4f})")
-    else:
-        print(f"No resize sweep results found, using default: {best_size}")
+    print(f"Image size (native): {best_size}")
 
     # Load best embedding dim from embedding_dim_results
     emb_results_dir = os.path.join(experiment_dir, 'results/opt/embedding_dim')
@@ -1319,8 +1305,6 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     # Output path
     if sweep_param_name == 'lr':
         filename = f"lr={sweep_param_value:.6f}.json"
-    elif sweep_param_name == 'resize':
-        filename = f"resize={sweep_param_value}.json"
     elif sweep_param_name == 'embedding_dim':
         filename = f"embedding_dim={sweep_param_value}.json"
     else:
@@ -1465,10 +1449,6 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         }
     }
 
-    # Add sweep-specific config fields
-    if sweep_param_name == 'resize':
-        result['config']['resize_size'] = sweep_param_value
-
     # Save results
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
@@ -1516,15 +1496,6 @@ if __name__ == "__main__":
     sub_lr.add_argument("--epochs", type=int, default=50)
     sub_lr.add_argument("--seed", type=int, default=0)
 
-    # opt_resize subcommand
-    sub_resize = subparsers.add_parser("opt_resize", help="Image size sweep")
-    add_common_args(sub_resize)
-    sub_resize.add_argument("--values", type=int, nargs="+", required=True, help="Image sizes to sweep")
-    sub_resize.add_argument("--lr", type=float, required=True, help="Fixed learning rate")
-    sub_resize.add_argument("--embedding-dim", type=int, default=128, help="Fixed embedding dimension")
-    sub_resize.add_argument("--epochs", type=int, default=50)
-    sub_resize.add_argument("--seed", type=int, default=0)
-
     # opt_embedding_dim subcommand
     sub_emb = subparsers.add_parser("opt_embedding_dim", help="Embedding dimension sweep")
     add_common_args(sub_emb)
@@ -1565,40 +1536,6 @@ if __name__ == "__main__":
             run_opt_training(
                 model_name, "lr", lr, args, dataset, feasibility_config, metadata_cache,
                 learning_rate=lr, image_size=args.image_size,
-                embedding_dim=args.embedding_dim,
-                epochs=args.epochs, seed=args.seed,
-            )
-        except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
-
-        print(f"\nJob {args.idx} completed!")
-
-    elif args.command == "opt_resize":
-        sizes = args.values
-
-        print("=" * 80)
-        print(f"Image Size Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
-        print("=" * 80)
-
-        if args.idx >= len(sizes):
-            print(f"Job {args.idx} has no work (only {len(sizes)} sizes)")
-            sys.exit(0)
-
-        dataset = load_reidentification_dataset()
-        metadata_cache = build_metadata_cache(dataset)
-        feasibility_config = load_feasibility_config()
-        if not feasibility_config:
-            sys.exit(1)
-
-        size = sizes[args.idx]
-        print(f"\nResize size: {size}, LR: {args.lr}, Epochs: {args.epochs}")
-
-        try:
-            run_opt_training(
-                model_name, "resize", size, args, dataset, feasibility_config, metadata_cache,
-                learning_rate=args.lr, image_size=size,
                 embedding_dim=args.embedding_dim,
                 epochs=args.epochs, seed=args.seed,
             )

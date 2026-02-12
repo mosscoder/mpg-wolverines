@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=opt_emb_dim_sweep_MD
+#SBATCH --job-name=opt_emb_dim_sweep_bioclip2
 #SBATCH --partition=preempt
 #SBATCH --requeue
 #SBATCH --array=0-6
@@ -7,17 +7,17 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_emb_dim_MD/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_emb_dim_MD/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/opt_emb_dim_bioclip2/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/opt_emb_dim_bioclip2/%A_%a.err
 
-# Embedding Dimension Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
+# Embedding Dimension Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
 # 7 embedding dims = 7 configs, one per job
 #
 # Dims: 64, 128, 256, 512, 1024, 2048, 4096
-# Fixed: Best LR and size from prior sweeps, seed=0, 50 epochs
+# Fixed: Best LR from prior sweep, native image size, seed=0, 50 epochs
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_emb_dim_MD
+mkdir -p /home/kdoherty/logs/wolverines/opt_emb_dim_bioclip2
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -40,12 +40,12 @@ echo "========================================"
 
 # Run the embedding dim sweep script
 # NOTE: Update --lr and --image-size from sweep 00/01 results
-python -u -m utils.reid opt_embedding_dim --model megadescriptor \
+python -u -m utils.reid opt_embedding_dim --model bioclip2 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/megadescriptor/results/opt/embedding_dim \
+    --output_dir reid_openset/bioclip2/results/opt/embedding_dim \
     --device gpu \
-    --values 64 128 256 512 1024 2048 4096\
-    --lr 0.0005 --image-size 384 \
+    --values 64 128 256 512 1024 2048 4096 \
+    --lr 0.0005 --image-size 224 \
     --epochs 50 --seed 0
 
 # Print completion info
