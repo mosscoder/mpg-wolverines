@@ -75,7 +75,7 @@ ARCFACE_SCALE = 64
 BATCH_K = 8
 MIN_P = 5
 TARGET_SAMPLES_PER_INDIVIDUAL = 32
-QUERY_QUALITY_THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+QUERY_QUALITY_THRESHOLDS = [0.0, 0.25, 0.5]
 
 
 # ============================================================================
@@ -918,7 +918,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 # Hygiene sweep: job distribution and training
 # ============================================================================
 
-THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+THRESHOLDS = [0.0, 0.25, 0.5]
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 
@@ -953,7 +953,7 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=50):
+                         learning_rate, image_size, embedding_dim, epochs=100):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, PKBatchSampler
     from utils.training import check_result_exists

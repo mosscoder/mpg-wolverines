@@ -11,7 +11,7 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/hygiene/%A_%a.err
 
 # Open-Set MegaDescriptor + ArcFace + Raw Cosine Gallery Hygiene Sweep Experiment
-# 6 thresholds x 6 gallery sizes x 8 seeds = 288 configs across 24 jobs (12/job)
+# 3 thresholds x 6 gallery sizes x 8 seeds = 144 configs across 24 jobs (6/job)
 #
 # Uses raw cosine similarity instead of T-Norm:
 # - L2-normalized embeddings for cosine similarity scores in [0, 1]
