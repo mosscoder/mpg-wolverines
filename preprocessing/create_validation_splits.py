@@ -43,7 +43,7 @@ def main():
     args = parser.parse_args()
 
     # Manual exclusions
-    EXCLUDED_ENTIRELY = ['PA23-M1', 'HLC21-H1']
+    EXCLUDED_ENTIRELY = []
     PROMOTED_TO_RARE = []
 
     # Load both splits
@@ -52,28 +52,33 @@ def main():
     test_dataset = load_dataset("kdoherty/wolverines", "reidentification", split="test")
     print(f"Loaded {len(train_dataset)} train samples, {len(test_dataset)} test samples")
 
-    # Build per-individual stats from train split
-    print("\nAnalyzing train split...")
-    train_stats = {}
-    for sample in train_dataset:
-        ind_id = sample['id']
-        if ind_id not in train_stats:
-            train_stats[ind_id] = {'total': 0, 'above_threshold': 0, 'pelage_scores': []}
-        train_stats[ind_id]['total'] += 1
-        train_stats[ind_id]['pelage_scores'].append(sample['pelage_score'])
-        if sample['pelage_score'] > args.gallery_quality_threshold:
-            train_stats[ind_id]['above_threshold'] += 1
+    # Build per-individual stats using Arrow columnar access
+    print("\nAnalyzing splits...")
+    train_ids = np.array(train_dataset['id'], dtype=object)
+    train_scores = np.array(train_dataset['pelage_score'], dtype=np.float32)
+    test_ids = np.array(test_dataset['id'], dtype=object)
+    test_scores = np.array(test_dataset['pelage_score'], dtype=np.float32)
 
-    # Build per-individual stats from test split
-    print("Analyzing test split...")
+    train_stats = {}
+    for ind_id in np.unique(train_ids):
+        mask = train_ids == ind_id
+        scores = train_scores[mask]
+        train_stats[ind_id] = {
+            'total': int(mask.sum()),
+            'above_025': int((scores > 0.25).sum()),
+            'above_threshold': int((scores > args.gallery_quality_threshold).sum()),
+            'pelage_scores': scores,
+        }
+
     test_stats = {}
-    for sample in test_dataset:
-        ind_id = sample['id']
-        if ind_id not in test_stats:
-            test_stats[ind_id] = {'total': 0, 'above_threshold': 0}
-        test_stats[ind_id]['total'] += 1
-        if sample['pelage_score'] > args.query_quality_threshold:
-            test_stats[ind_id]['above_threshold'] += 1
+    for ind_id in np.unique(test_ids):
+        mask = test_ids == ind_id
+        scores = test_scores[mask]
+        test_stats[ind_id] = {
+            'total': int(mask.sum()),
+            'above_025': int((scores > 0.25).sum()),
+            'above_threshold': int((scores > args.query_quality_threshold).sum()),
+        }
 
     # Determine valid individuals
     all_individuals = set(train_stats.keys()) | set(test_stats.keys())
@@ -113,13 +118,15 @@ def main():
     for ind_id in valid_individuals:
         individual_pelage_scores[ind_id] = float(np.mean(train_stats[ind_id]['pelage_scores']))
 
-    for ind_id in sorted(all_individuals - excluded_set):
+    for ind_id in sorted(all_individuals):
         t = train_stats.get(ind_id, {})
         s = test_stats.get(ind_id, {})
         individual_stats[ind_id] = {
             'train_total': t.get('total', 0),
+            'train_above_0.25': t.get('above_025', 0),
             f'train_above_{args.gallery_quality_threshold}': t.get('above_threshold', 0),
             'test_total': s.get('total', 0),
+            'test_above_0.25': s.get('above_025', 0),
             f'test_above_{args.query_quality_threshold}': s.get('above_threshold', 0),
         }
 
@@ -136,7 +143,13 @@ def main():
     if excluded_individuals:
         print(f"\nExcluded {len(excluded_individuals)} individuals:")
         for ind_id, reason in excluded_individuals:
-            print(f"  {ind_id}: {reason}")
+            t = individual_stats.get(ind_id, {})
+            train_above = t.get(f'train_above_{args.gallery_quality_threshold}', 0)
+            train_total = t.get('train_total', 0)
+            test_above = t.get(f'test_above_{args.query_quality_threshold}', 0)
+            test_total = t.get('test_total', 0)
+            print(f"  {ind_id}: train={train_above}/{train_total}, "
+                  f"test={test_above}/{test_total} -- {reason}")
 
     # Save config
     config = {
