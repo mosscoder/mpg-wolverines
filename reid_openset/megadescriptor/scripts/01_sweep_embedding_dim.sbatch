@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_emb_dim_sweep_MD
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-6
+#SBATCH --array=0-20
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,10 +11,10 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/embedding_dim/%A_%a.err
 
 # Embedding Dimension Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
-# 7 embedding dims = 7 configs, one per job
+# 7 dims x 3 seeds = 21 configs, one per job
 #
 # Dims: 64, 128, 256, 512, 1024, 2048, 4096
-# Fixed: Best LR from prior sweep, native image size, seed=0, 50 epochs
+# Fixed: Best LR from prior sweep, native image size, seeds=0,1,2, 50 epochs
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/embedding_dim
@@ -46,7 +46,7 @@ python -u -m utils.reid opt_embedding_dim --model megadescriptor \
     --device gpu \
     --values 64 128 256 512 1024 2048 4096\
     --lr 0.0005 --image-size 384 \
-    --epochs 50 --seed 0
+    --epochs 50 --seeds 0 1 2
 
 # Print completion info
 echo "========================================"

@@ -414,6 +414,42 @@ def evaluate_recall_simple(model, train_dataset, test_dataset, individual_to_cla
 # Hyperparameter loading
 # ============================================================================
 
+def _select_best_param(results_dir, glob_pattern, param_key):
+    """Select best param value using cross-seed best-epoch mean R@1.
+
+    Groups results by param value, for each group averages test_recall_at_1
+    across seeds at each epoch, picks the epoch with highest mean, and
+    returns the param value with the best cross-seed score.
+    """
+    files = glob.glob(os.path.join(results_dir, glob_pattern))
+    if not files:
+        return None, 0.0
+
+    # Group by param value
+    groups = {}
+    for f in files:
+        with open(f, 'r') as fp:
+            result = json.load(fp)
+        value = result['config'][param_key]
+        groups.setdefault(value, []).append(result)
+
+    best_value = None
+    best_score = 0.0
+    for value, results in groups.items():
+        histories = [r['results']['epoch_history'] for r in results]
+        n_epochs = len(histories[0])
+        best_mean = 0.0
+        for i in range(n_epochs):
+            mean_r1 = sum(h[i]['test_recall_at_1'] for h in histories) / len(histories)
+            if mean_r1 > best_mean:
+                best_mean = mean_r1
+        if best_mean > best_score:
+            best_score = best_mean
+            best_value = value
+
+    return best_value, best_score
+
+
 def load_best_hyperparams(model_name):
     """
     Load best LR, image size, and embedding dim from optimization sweep results.
@@ -428,37 +464,23 @@ def load_best_hyperparams(model_name):
     best_size = config["native_size"]
     best_embedding_dim = 128  # default
 
-    # Load best LR from lr_results
+    # LR selection
     lr_results_dir = os.path.join(experiment_dir, 'results/opt/lr')
-    lr_files = glob.glob(os.path.join(lr_results_dir, 'lr=*.json'))
-    if lr_files:
-        best_lr_recall = 0.0
-        for f in lr_files:
-            with open(f, 'r') as fp:
-                result = json.load(fp)
-            recall = result['results']['best_test_recall_at_1']
-            if recall > best_lr_recall:
-                best_lr_recall = recall
-                best_lr = result['config']['learning_rate']
-        print(f"Loaded best LR from sweep: {best_lr} (R@1={best_lr_recall:.4f})")
+    selected_lr, lr_score = _select_best_param(lr_results_dir, 'lr=*_seed=*.json', 'learning_rate')
+    if selected_lr is not None:
+        best_lr = selected_lr
+        print(f"Loaded best LR from sweep: {best_lr} (cross-seed R@1={lr_score:.4f})")
     else:
         print(f"No LR sweep results found, using default: {best_lr}")
 
     print(f"Image size (native): {best_size}")
 
-    # Load best embedding dim from embedding_dim_results
+    # Embedding dim selection
     emb_results_dir = os.path.join(experiment_dir, 'results/opt/embedding_dim')
-    emb_files = glob.glob(os.path.join(emb_results_dir, 'embedding_dim=*.json'))
-    if emb_files:
-        best_emb_recall = 0.0
-        for f in emb_files:
-            with open(f, 'r') as fp:
-                result = json.load(fp)
-            recall = result['results']['best_test_recall_at_1']
-            if recall > best_emb_recall:
-                best_emb_recall = recall
-                best_embedding_dim = result['config']['embedding_dim']
-        print(f"Loaded best embedding dim from sweep: {best_embedding_dim} (R@1={best_emb_recall:.4f})")
+    selected_emb, emb_score = _select_best_param(emb_results_dir, 'embedding_dim=*_seed=*.json', 'embedding_dim')
+    if selected_emb is not None:
+        best_embedding_dim = selected_emb
+        print(f"Loaded best embedding dim from sweep: {best_embedding_dim} (cross-seed R@1={emb_score:.4f})")
     else:
         print(f"No embedding dim sweep results found, using default: {best_embedding_dim}")
 
@@ -1304,11 +1326,11 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
     # Output path
     if sweep_param_name == 'lr':
-        filename = f"lr={sweep_param_value:.6f}.json"
+        filename = f"lr={sweep_param_value:.6f}_seed={seed}.json"
     elif sweep_param_name == 'embedding_dim':
-        filename = f"embedding_dim={sweep_param_value}.json"
+        filename = f"embedding_dim={sweep_param_value}_seed={seed}.json"
     else:
-        filename = f"{sweep_param_name}={sweep_param_value}.json"
+        filename = f"{sweep_param_name}={sweep_param_value}_seed={seed}.json"
 
     output_path = os.path.join(args.output_dir, filename)
 
@@ -1494,7 +1516,7 @@ if __name__ == "__main__":
     sub_lr.add_argument("--image-size", type=int, required=True, help="Fixed image size")
     sub_lr.add_argument("--embedding-dim", type=int, default=128, help="Fixed embedding dimension")
     sub_lr.add_argument("--epochs", type=int, default=50)
-    sub_lr.add_argument("--seed", type=int, default=0)
+    sub_lr.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     # opt_embedding_dim subcommand
     sub_emb = subparsers.add_parser("opt_embedding_dim", help="Embedding dimension sweep")
@@ -1503,7 +1525,7 @@ if __name__ == "__main__":
     sub_emb.add_argument("--lr", type=float, required=True, help="Fixed learning rate")
     sub_emb.add_argument("--image-size", type=int, required=True, help="Fixed image size")
     sub_emb.add_argument("--epochs", type=int, default=50)
-    sub_emb.add_argument("--seed", type=int, default=0)
+    sub_emb.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     args = parser.parse_args()
     model_name = args.model
@@ -1514,13 +1536,16 @@ if __name__ == "__main__":
 
     elif args.command == "opt_lr":
         lrs = args.values
+        seeds = args.seeds
+        total_configs = len(lrs) * len(seeds)
 
         print("=" * 80)
         print(f"LR Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print(f"  {len(lrs)} LRs x {len(seeds)} seeds = {total_configs} configs")
         print("=" * 80)
 
-        if args.idx >= len(lrs):
-            print(f"Job {args.idx} has no work (only {len(lrs)} LRs)")
+        if args.idx >= total_configs:
+            print(f"Job {args.idx} has no work (only {total_configs} configs)")
             sys.exit(0)
 
         dataset = load_reidentification_dataset()
@@ -1529,15 +1554,17 @@ if __name__ == "__main__":
         if not feasibility_config:
             sys.exit(1)
 
-        lr = lrs[args.idx]
-        print(f"\nLearning rate: {lr}, Image size: {args.image_size}, Epochs: {args.epochs}")
+        value_idx, seed_idx = divmod(args.idx, len(seeds))
+        lr = lrs[value_idx]
+        seed = seeds[seed_idx]
+        print(f"\nLR: {lr}, Seed: {seed}, Image size: {args.image_size}, Epochs: {args.epochs}")
 
         try:
             run_opt_training(
                 model_name, "lr", lr, args, dataset, feasibility_config, metadata_cache,
                 learning_rate=lr, image_size=args.image_size,
                 embedding_dim=args.embedding_dim,
-                epochs=args.epochs, seed=args.seed,
+                epochs=args.epochs, seed=seed,
             )
         except Exception as e:
             print(f"Error: {e}")
@@ -1548,13 +1575,16 @@ if __name__ == "__main__":
 
     elif args.command == "opt_embedding_dim":
         dims = args.values
+        seeds = args.seeds
+        total_configs = len(dims) * len(seeds)
 
         print("=" * 80)
         print(f"Embedding Dim Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print(f"  {len(dims)} dims x {len(seeds)} seeds = {total_configs} configs")
         print("=" * 80)
 
-        if args.idx >= len(dims):
-            print(f"Job {args.idx} has no work (only {len(dims)} dims)")
+        if args.idx >= total_configs:
+            print(f"Job {args.idx} has no work (only {total_configs} configs)")
             sys.exit(0)
 
         dataset = load_reidentification_dataset()
@@ -1563,14 +1593,16 @@ if __name__ == "__main__":
         if not feasibility_config:
             sys.exit(1)
 
-        emb_dim = dims[args.idx]
-        print(f"\nEmbedding dim: {emb_dim}, LR: {args.lr}, Size: {args.image_size}, Epochs: {args.epochs}")
+        value_idx, seed_idx = divmod(args.idx, len(seeds))
+        emb_dim = dims[value_idx]
+        seed = seeds[seed_idx]
+        print(f"\nEmbedding dim: {emb_dim}, Seed: {seed}, LR: {args.lr}, Size: {args.image_size}, Epochs: {args.epochs}")
 
         try:
             run_opt_training(
                 model_name, "embedding_dim", emb_dim, args, dataset, feasibility_config, metadata_cache,
                 learning_rate=args.lr, image_size=args.image_size, embedding_dim=emb_dim,
-                epochs=args.epochs, seed=args.seed,
+                epochs=args.epochs, seed=seed,
             )
         except Exception as e:
             print(f"Error: {e}")

@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_lr_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-9
+#SBATCH --array=0-11
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,10 +11,10 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/lr/%A_%a.err
 
 # Learning Rate Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 10 learning rates = 10 configs, one per job
+# 4 LRs x 3 seeds = 12 configs, one per job
 #
-# LRs: 0.0001 to 0.001, step 0.0001
-# Fixed: 224px images, seed=0, 50 epochs
+# LRs: 0.0001, 0.0005, 0.001, 0.005
+# Fixed: 224px images, seeds=0,1,2, 50 epochs
 #
 # Temporal split by capture event (ymdh):
 # - Earlier 50% of ymdh values -> train
@@ -48,9 +48,9 @@ python -u -m utils.reid opt_lr --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results/opt/lr \
     --device gpu \
-    --values 0.0001 0.0002 0.0003 0.0004 0.0005 0.0006 0.0007 0.0008 0.0009 0.001 \
+    --values 0.0001 0.0005 0.001 0.005 \
     --image-size 224 \
-    --embedding-dim 128 --epochs 50 --seed 0
+    --embedding-dim 128 --epochs 50 --seeds 0 1 2
 
 # Print completion info
 echo "========================================"
