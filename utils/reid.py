@@ -227,6 +227,14 @@ def load_reidentification_dataset():
     return dataset
 
 
+def load_reidentification_test_dataset():
+    """Load the wolverines test split for reidentification."""
+    print("Loading wolverines dataset (reidentification test split)...")
+    dataset = load_dataset("kdoherty/wolverines", "reidentification", split="test")
+    print(f"Loaded {len(dataset)} test samples")
+    return dataset
+
+
 def build_metadata_cache(dataset):
     """Build metadata cache including ymdh for temporal splitting."""
     ids = np.array(dataset['id'], dtype=object)
@@ -254,18 +262,17 @@ def build_metadata_cache(dataset):
     return cache
 
 
-def create_ymdh_split_dataset(dataset, individuals, metadata_cache, config, seed=0):
+def create_ymdh_split_dataset(dataset, individuals, metadata_cache, seed=0):
     """
-    Create train/test split based on capture events (ymdh) with no hygiene val leakage.
+    Create train/test split based on capture events (ymdh).
 
     For each individual:
-    1. Get all sample indices
-    2. EXCLUDE indices in config['validation_indices'][ind_id]['indices'] (hygiene val)
-    3. From remaining, get unique ymdh values and sort chronologically
-    4. Earlier 50% of ymdh -> train pool
-    5. Later 50% of ymdh -> test pool
-    6. Train gets priority: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
-    7. Test gets remainder: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
+    1. Get all sample indices from the training set
+    2. Get unique ymdh values and sort chronologically
+    3. Earlier 50% of ymdh -> train pool
+    4. Later 50% of ymdh -> test pool
+    5. Train gets priority: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
+    6. Test gets remainder: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
 
     Returns: train_dataset, test_dataset, individual_to_class, dataset_info
     """
@@ -288,14 +295,10 @@ def create_ymdh_split_dataset(dataset, individuals, metadata_cache, config, seed
     }
 
     for ind_id in individuals:
-        all_ind_indices = set(id_to_indices.get(ind_id, []))
-
-        # EXCLUDE hygiene validation indices
-        hygiene_val_indices = set(config['validation_indices'].get(ind_id, {}).get('indices', []))
-        available_indices = list(all_ind_indices - hygiene_val_indices)
+        available_indices = list(id_to_indices.get(ind_id, []))
 
         if len(available_indices) == 0:
-            print(f"  WARNING: {ind_id} has NO samples after excluding hygiene val")
+            print(f"  WARNING: {ind_id} has NO samples")
             continue
 
         available_ymdh = [ymdh_arr[i] for i in available_indices]
@@ -514,12 +517,13 @@ def get_rare_individual_indices(metadata_cache, valid_individuals, quality_thres
     )
 
 
-def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed, config, metadata_cache):
+def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed,
+                                     metadata_cache, test_dataset, test_metadata_cache):
     """
     Create gallery/query split with filtered gallery.
 
     Gallery: Training samples filtered by pelage_score >= threshold, then sampled
-    Query: ALL validation samples (unfiltered)
+    Query: ALL test split samples for valid individuals (unfiltered)
 
     Returns:
         train_dataset, val_dataset, individual_to_class, dataset_info
@@ -527,6 +531,7 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     set_all_seeds(seed)
 
     id_to_indices = metadata_cache['id_to_indices']
+    test_id_to_indices = test_metadata_cache['id_to_indices']
 
     print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
 
@@ -541,14 +546,15 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     }
 
     for ind_id in individuals:
-        val_indices = config['validation_indices'][ind_id]['indices']
-        all_val_indices.extend(val_indices)
-        dataset_info['query_samples_per_individual'][ind_id] = len(val_indices)
+        # Query: all test images for this individual (unfiltered)
+        test_indices = test_id_to_indices.get(ind_id, [])
+        all_val_indices.extend(test_indices)
+        dataset_info['query_samples_per_individual'][ind_id] = len(test_indices)
 
-        all_ind_indices = set(id_to_indices.get(ind_id, []))
-        train_candidates = list(all_ind_indices - set(val_indices))
+        # Gallery: quality-filtered train images
+        all_ind_indices = list(id_to_indices.get(ind_id, []))
 
-        eligible_pool = filter_training_pool_by_quality(metadata_cache, train_candidates, threshold)
+        eligible_pool = filter_training_pool_by_quality(metadata_cache, all_ind_indices, threshold)
         dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
 
         if len(eligible_pool) == 0:
@@ -564,14 +570,14 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
         all_train_indices.extend(train_sampled)
         dataset_info['gallery_samples_per_individual'][ind_id] = len(train_sampled)
 
-        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(val_indices)} query")
+        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(test_indices)} query")
 
-    train_dataset = dataset.select(all_train_indices) if all_train_indices else None
-    val_dataset = dataset.select(all_val_indices)
+    train_dataset_out = dataset.select(all_train_indices) if all_train_indices else None
+    val_dataset = test_dataset.select(all_val_indices)
 
     print(f"Total: {len(all_train_indices)} gallery, {len(all_val_indices)} query")
 
-    return train_dataset, val_dataset, individual_to_class, dataset_info
+    return train_dataset_out, val_dataset, individual_to_class, dataset_info
 
 
 # ============================================================================
@@ -711,9 +717,12 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, valid_individuals, metadata_cache,
                                   gallery_threshold, criterion, embedding_dim=128, batch_size=32,
-                                  promoted_individuals=None, excluded_individuals=None):
+                                  promoted_individuals=None, excluded_individuals=None,
+                                  test_dataset=None, test_metadata_cache=None):
     """
     Evaluate model computing Recall@1 and open-set metrics with raw cosine similarity.
+
+    Rare/unknown individuals are pooled from both train and test datasets.
 
     Returns:
         query_quality_metrics, open_set_metrics, val_loss
@@ -755,18 +764,46 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     # Validation loss
     val_loss = compute_validation_loss(query_embeddings, query_labels, criterion, device)
 
-    # Rare/Unknown
+    # Rare/Unknown — pool from train dataset
     rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
         metadata_cache, valid_individuals, quality_threshold=0.0,
         promoted_individuals=promoted_individuals,
         excluded_individuals=excluded_individuals
     )
+
+    all_rare_emb = []
+    all_rare_quality = []
+    all_rare_labels = []
+
     if rare_indices:
-        rare_emb, rare_quality_arr, rare_labels_arr = compute_rare_embeddings(
+        emb, qual, lab = compute_rare_embeddings(
             model, dataset, rare_indices, rare_quality, rare_labels_str,
             transform, device, embedding_dim=embedding_dim
         )
-        rare_emb = rare_emb.to(device)
+        all_rare_emb.append(emb)
+        all_rare_quality.append(qual)
+        all_rare_labels.append(lab)
+
+    # Also pool rare/unknown from test dataset
+    if test_dataset is not None and test_metadata_cache is not None:
+        test_rare_indices, test_rare_quality, test_rare_labels_str = get_rare_individual_indices(
+            test_metadata_cache, valid_individuals, quality_threshold=0.0,
+            promoted_individuals=promoted_individuals,
+            excluded_individuals=excluded_individuals
+        )
+        if test_rare_indices:
+            emb, qual, lab = compute_rare_embeddings(
+                model, test_dataset, test_rare_indices, test_rare_quality, test_rare_labels_str,
+                transform, device, embedding_dim=embedding_dim
+            )
+            all_rare_emb.append(emb)
+            all_rare_quality.append(qual)
+            all_rare_labels.append(lab)
+
+    if all_rare_emb:
+        rare_emb = torch.cat(all_rare_emb, dim=0).to(device)
+        rare_quality_arr = np.concatenate(all_rare_quality)
+        rare_labels_arr = np.concatenate(all_rare_labels)
     else:
         rare_emb = torch.empty(0, embedding_dim).to(device)
         rare_quality_arr = np.array([])
@@ -953,7 +990,8 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=100):
+                         learning_rate, image_size, embedding_dim, epochs=100,
+                         test_dataset=None, test_metadata_cache=None):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, PKBatchSampler
     from utils.training import check_result_exists
@@ -973,22 +1011,10 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     print(f"Training: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
     print(f"{'='*60}")
 
-    # Get valid individuals and diversity-based classification from config
-    valid_individuals = config.get('valid_individuals', [])
+    # Get valid individuals from config (preprocessing already enforces criteria)
+    feasible_individuals = config.get('valid_individuals', [])
     promoted_individuals = config.get('promoted_to_rare', [])
     excluded_individuals = config.get('excluded_entirely', [])
-
-    # Check feasibility for this threshold and gallery_size
-    feasible_individuals = []
-    for ind_id in valid_individuals:
-        training_compat = config['training_compatibility'].get(ind_id, {})
-        threshold_key = f"threshold_{threshold:.2f}"
-        if threshold_key not in training_compat.get('threshold_compatibility', {}):
-            threshold_key = "threshold_0.00"
-        threshold_compat = training_compat.get('threshold_compatibility', {}).get(threshold_key, {})
-        compatible_sizes = threshold_compat.get('compatible_training_sizes', [])
-        if gallery_size in compatible_sizes:
-            feasible_individuals.append(ind_id)
 
     if len(feasible_individuals) < MIN_P:
         print(f"Not enough individuals ({len(feasible_individuals)}) for PK sampling (need {MIN_P})")
@@ -996,9 +1022,10 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
-    # Create filtered gallery dataset
+    # Create filtered gallery dataset (gallery from train, query from test)
     train_dataset, val_dataset, individual_to_class, dataset_info = create_filtered_gallery_dataset(
-        dataset, feasible_individuals, gallery_size, threshold, seed, config, metadata_cache
+        dataset, feasible_individuals, gallery_size, threshold, seed,
+        metadata_cache, test_dataset, test_metadata_cache
     )
 
     if train_dataset is None or len(train_dataset) == 0:
@@ -1089,7 +1116,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold,
             criterion=criterion, embedding_dim=emb_dim,
             promoted_individuals=promoted_individuals,
-            excluded_individuals=excluded_individuals
+            excluded_individuals=excluded_individuals,
+            test_dataset=test_dataset, test_metadata_cache=test_metadata_cache
         )
 
         recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
@@ -1208,10 +1236,12 @@ def run_hygiene_sweep(model_name, args):
     # Load best hyperparameters
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
 
-    # Load dataset and config
-    print("\nLoading dataset...")
+    # Load datasets and config
+    print("\nLoading datasets...")
     dataset = load_reidentification_dataset()
     metadata_cache = build_metadata_cache(dataset)
+    test_dataset = load_reidentification_test_dataset()
+    test_metadata_cache = build_metadata_cache(test_dataset)
     feasibility_config = load_feasibility_config()
 
     if not feasibility_config:
@@ -1253,7 +1283,8 @@ def run_hygiene_sweep(model_name, args):
                 model_name, threshold, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim
+                embedding_dim=best_embedding_dim,
+                test_dataset=test_dataset, test_metadata_cache=test_metadata_cache
             )
             if result:
                 results_summary.append(result)
@@ -1274,14 +1305,8 @@ def run_hygiene_sweep(model_name, args):
 # ============================================================================
 
 def get_valid_individuals(config, min_p=MIN_P):
-    """Get individuals compatible with gallery_size=64 at threshold=0.0."""
-    valid_individuals = []
-    for ind_id in config.get('valid_individuals', []):
-        training_compat = config['training_compatibility'].get(ind_id, {})
-        threshold_compat = training_compat.get('threshold_compatibility', {}).get('threshold_0.00', {})
-        compatible_sizes = threshold_compat.get('compatible_training_sizes', [])
-        if 64 in compatible_sizes:
-            valid_individuals.append(ind_id)
+    """Get valid individuals from config (preprocessing already enforces criteria)."""
+    valid_individuals = config.get('valid_individuals', [])
 
     if len(valid_individuals) < min_p:
         print(f"Not enough individuals ({len(valid_individuals)}) for PK sampling (need {min_p})")
@@ -1350,7 +1375,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
     # Create temporal split dataset
     train_dataset, test_dataset, individual_to_class, dataset_info = create_ymdh_split_dataset(
-        dataset, valid_individuals, metadata_cache, config, seed=seed
+        dataset, valid_individuals, metadata_cache, seed=seed
     )
 
     if train_dataset is None or len(train_dataset) == 0:
