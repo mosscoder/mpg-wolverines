@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Plot quality score distribution for validation data, faceted by individual.
-Includes both known individuals (validation samples) and open-set unknowns (all samples).
+Plot quality score distribution for test data, faceted by individual.
+Includes both closed-set individuals (valid for reid) and open-set unknowns.
 """
 
 import os
@@ -26,28 +26,28 @@ def main():
     with open(args.config, 'r') as f:
         config = json.load(f)
 
-    # Load dataset with Arrow columnar access for efficiency
-    dataset = load_dataset("kdoherty/wolverines", "reidentification", split="train")
+    # Load test split
+    test_dataset = load_dataset("kdoherty/wolverines", "reidentification", split="test")
 
     # Use Arrow columnar access (fast)
-    all_ids = np.array(dataset['id'], dtype=object)
-    all_quality = np.array(dataset['pelage_score'], dtype=np.float32)
+    all_ids = np.array(test_dataset['id'], dtype=object)
+    all_quality = np.array(test_dataset['pelage_score'], dtype=np.float32)
 
     valid_individuals_set = set(config['valid_individuals'])
     records = []
 
-    # Extract validation samples for closed-set individuals
+    # Extract test samples for closed-set individuals
     for ind_id in config['valid_individuals']:
-        indices = config['validation_indices'][ind_id]['indices']
-        for idx in indices:
+        mask = all_ids == ind_id
+        quality_scores = all_quality[mask]
+        for q in quality_scores:
             records.append({
                 'individual': ind_id,
-                'pelage_score': all_quality[idx],
+                'pelage_score': float(q),
                 'set_type': 'closed-set'
             })
 
     # Find open-set individuals: those NOT in valid_individuals
-    # Each gets their own facet with their actual name
     unique_ids = np.unique(all_ids)
     open_set_individuals = [ind_id for ind_id in unique_ids if ind_id not in valid_individuals_set]
 
@@ -57,7 +57,7 @@ def main():
         for q in quality_scores:
             records.append({
                 'individual': ind_id,
-                'pelage_score': q,
+                'pelage_score': float(q),
                 'set_type': 'open-set'
             })
 
@@ -80,7 +80,7 @@ def main():
     g.map(plt.hist, 'pelage_score', bins=20, edgecolor='black', alpha=0.7)
     g.set_xlabels('Quality Score')
     g.set_ylabels('Count')
-    g.fig.suptitle('Quality Score Distribution by Individual', y=1.02)
+    g.fig.suptitle('Test Set Quality Score Distribution by Individual', y=1.02)
     g.tight_layout()
 
     # Save
