@@ -7,8 +7,8 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_lr_MD/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_lr_MD/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/lr/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/lr/%A_%a.err
 
 # Learning Rate Sweep for MegaDescriptor Re-ID with Temporal (ymdh) Split
 # 10 learning rates = 10 configs, one per job
@@ -22,7 +22,7 @@
 # - Hygiene validation indices excluded
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_lr_MD
+mkdir -p /home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/lr
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines

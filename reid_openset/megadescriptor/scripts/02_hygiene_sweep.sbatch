@@ -7,8 +7,8 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/openset_MD/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/openset_MD/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/hygiene/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/hygiene/%A_%a.err
 
 # Open-Set MegaDescriptor + ArcFace + Raw Cosine Gallery Hygiene Sweep Experiment
 # 6 thresholds x 6 gallery sizes x 8 seeds = 288 configs across 24 jobs (12/job)
@@ -20,7 +20,7 @@
 # - Macro-averaged per-individual metrics for fair comparison across individuals
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/openset_MD
+mkdir -p /home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/hygiene
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines

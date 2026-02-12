@@ -7,8 +7,8 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --output=/home/kdoherty/logs/wolverines/opt_emb_dim/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/opt_emb_dim/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim/%A_%a.err
 
 # Embedding Dimension Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
 # 7 embedding dims = 7 configs, one per job
@@ -17,7 +17,7 @@
 # Fixed: Best LR from prior sweep, native image size, seed=0, 50 epochs
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/opt_emb_dim
+mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
