@@ -6,7 +6,6 @@ cached metadata instead of repeated sequential dataset access.
 """
 
 import numpy as np
-import random
 from typing import Dict, List, Tuple, Any
 
 
@@ -44,96 +43,6 @@ def filter_training_pool_by_quality_vectorized(quality_cache: np.ndarray,
 
     # Return as list
     return indices_arr[mask].tolist()
-
-
-def create_filtered_gallery_dataset_optimized(dataset, individuals, gallery_size, threshold,
-                                              seed, config, metadata_cache):
-    """
-    Create gallery/query split with filtered gallery using cached metadata.
-
-    This is an optimized version of create_filtered_gallery_dataset() that uses:
-    1. Cached quality scores instead of dataset access
-    2. Vectorized filtering instead of Python loops
-    3. Cached ID-to-indices mapping
-
-    Args:
-        dataset: HuggingFace dataset
-        individuals: List of individual IDs to include
-        gallery_size: Number of gallery samples per individual
-        threshold: Quality threshold for filtering
-        seed: Random seed
-        config: Feasibility configuration
-        metadata_cache: Cached metadata from build_metadata_cache()
-
-    Returns:
-        Tuple of (train_dataset, val_dataset, individual_to_class, dataset_info)
-
-    Why results unchanged:
-        - Same filtering logic, just faster execution
-        - Same random seed → same shuffling → same sample selection
-        - Cache contains exact dataset values
-        - Only performance improves, not outputs
-    """
-    from utils.dataset import set_all_seeds
-
-    set_all_seeds(seed)
-
-    quality_cache = metadata_cache['quality_scores']
-    id_to_indices = metadata_cache['id_to_indices']
-
-    print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
-
-    all_train_indices = []
-    all_val_indices = []
-    individual_to_class = {ind: i for i, ind in enumerate(sorted(individuals))}
-
-    dataset_info = {
-        'gallery_samples_per_individual': {},
-        'eligible_pool_per_individual': {},
-        'query_samples_per_individual': {}
-    }
-
-    for ind_id in individuals:
-        # Get validation indices (queries) - these are UNFILTERED
-        val_indices = config['validation_indices'][ind_id]['indices']
-        all_val_indices.extend(val_indices)
-        dataset_info['query_samples_per_individual'][ind_id] = len(val_indices)
-
-        # Get all indices for this individual (from cache)
-        all_ind_indices = set(id_to_indices.get(ind_id, []))
-
-        # Training candidates: exclude validation indices
-        train_candidates = list(all_ind_indices - set(val_indices))
-
-        # FILTER by quality threshold (VECTORIZED)
-        eligible_pool = filter_training_pool_by_quality_vectorized(
-            quality_cache, train_candidates, threshold
-        )
-        dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
-
-        # Sample from filtered pool
-        if len(eligible_pool) == 0:
-            print(f"  WARNING: {ind_id} has NO samples above threshold {threshold}")
-            train_sampled = []
-        elif len(eligible_pool) < gallery_size:
-            print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible samples (need {gallery_size}), using all")
-            train_sampled = eligible_pool
-        else:
-            random.shuffle(eligible_pool)
-            train_sampled = eligible_pool[:gallery_size]
-
-        all_train_indices.extend(train_sampled)
-        dataset_info['gallery_samples_per_individual'][ind_id] = len(train_sampled)
-
-        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(val_indices)} query")
-
-    # Create dataset subsets
-    train_dataset = dataset.select(all_train_indices) if all_train_indices else None
-    val_dataset = dataset.select(all_val_indices)
-
-    print(f"Total: {len(all_train_indices)} gallery, {len(all_val_indices)} query")
-
-    return train_dataset, val_dataset, individual_to_class, dataset_info
 
 
 def get_rare_individual_indices_vectorized(metadata_cache: Dict[str, Any],

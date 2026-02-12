@@ -59,58 +59,6 @@ def load_wolverines_dataset():
     return dataset, test_dataset
 
 
-def create_stratified_train_val_split(dataset, 
-                                      train_percentage: float = 0.1,
-                                      val_percentage: float = 0.1,
-                                      seed: int = 42):
-    """
-    Create non-overlapping stratified train/val splits using dataset views.
-    
-    Args:
-        dataset: HuggingFace dataset
-        train_percentage: Percentage of each class for training (0.1 = 10%)
-        val_percentage: Percentage of each class for validation (0.1 = 10%)
-        seed: Random seed for reproducibility
-        
-    Returns:
-        train_dataset, val_dataset (HuggingFace dataset views)
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-    
-    # Group indices by label
-    label_to_indices = {0: [], 1: []}
-    for idx, item in enumerate(dataset):
-        label = item['label']
-        label_to_indices[label].append(idx)
-    
-    train_indices = []
-    val_indices = []
-    
-    for label in [0, 1]:
-        indices = label_to_indices[label]
-        
-        # Calculate sample sizes
-        train_size = int(len(indices) * train_percentage)
-        val_size = int(len(indices) * val_percentage)
-        total_needed = train_size + val_size
-        
-        # Randomly sample total needed indices
-        random.shuffle(indices)
-        selected_indices = indices[:total_needed]
-        
-        # Split into non-overlapping train and val sets
-        train_indices.extend(selected_indices[:train_size])
-        val_indices.extend(selected_indices[train_size:train_size + val_size])
-    
-    # Create dataset views using HuggingFace .select() - memory efficient!
-    train_dataset = dataset.select(train_indices)
-    val_dataset = dataset.select(val_indices)
-    
-    return train_dataset, val_dataset
-
-
-
 def create_kfold_splits(dataset, n_folds: int = 5, seed: int = 42):
     """Create k-fold cross-validation splits using HF dataset select()"""
     random.seed(seed)

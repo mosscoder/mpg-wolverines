@@ -1,100 +1,13 @@
 """
 Standardized result loading utilities for wolverines experiments.
-Provides generic JSON/CSV loaders and ResultsCollection class for querying results.
+Provides ResultsCollection class for querying results.
 """
 
-import os
 import json
-import glob
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional
 from collections import defaultdict
-
-
-def load_json_results(results_dir: str, pattern: str = "*.json") -> List[Dict[str, Any]]:
-    """
-    Load all JSON result files from a directory matching a pattern.
-
-    Args:
-        results_dir: Directory containing result files
-        pattern: Glob pattern for files (default: "*.json")
-
-    Returns:
-        List of dictionaries loaded from JSON files
-    """
-    results = []
-    results_path = Path(results_dir)
-
-    if not results_path.exists():
-        print(f"Results directory not found: {results_dir}")
-        return results
-
-    json_files = list(results_path.glob(pattern))
-
-    if not json_files:
-        print(f"No files matching '{pattern}' found in {results_dir}")
-        return results
-
-    print(f"Found {len(json_files)} result files")
-
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r') as f:
-                result = json.load(f)
-                result['_filename'] = json_file.name
-                result['_filepath'] = str(json_file)
-                results.append(result)
-        except json.JSONDecodeError as e:
-            print(f"Warning: Could not load {json_file.name}: {e}")
-        except Exception as e:
-            print(f"Warning: Error loading {json_file.name}: {e}")
-
-    print(f"Successfully loaded {len(results)} results")
-    return results
-
-
-def load_csv_results(results_dir: str, pattern: str = "*.csv") -> List[Dict[str, Any]]:
-    """
-    Load all CSV result files from a directory matching a pattern.
-    Each CSV is loaded as a dict with 'data' containing the DataFrame and metadata from filename.
-
-    Args:
-        results_dir: Directory containing result files
-        pattern: Glob pattern for files (default: "*.csv")
-
-    Returns:
-        List of dictionaries with 'data' key containing pandas DataFrame
-    """
-    results = []
-    results_path = Path(results_dir)
-
-    if not results_path.exists():
-        print(f"Results directory not found: {results_dir}")
-        return results
-
-    csv_files = list(results_path.glob(pattern))
-
-    if not csv_files:
-        print(f"No files matching '{pattern}' found in {results_dir}")
-        return results
-
-    print(f"Found {len(csv_files)} CSV files")
-
-    for csv_file in csv_files:
-        try:
-            df = pd.read_csv(csv_file)
-            result = {
-                'data': df,
-                '_filename': csv_file.name,
-                '_filepath': str(csv_file)
-            }
-            results.append(result)
-        except Exception as e:
-            print(f"Warning: Could not load {csv_file.name}: {e}")
-
-    print(f"Successfully loaded {len(results)} CSV files")
-    return results
 
 
 class ResultsCollection:
@@ -115,13 +28,67 @@ class ResultsCollection:
     @classmethod
     def from_json_dir(cls, results_dir: str, pattern: str = "*.json") -> 'ResultsCollection':
         """Load results from a directory of JSON files."""
-        results = load_json_results(results_dir, pattern)
+        results = []
+        results_path = Path(results_dir)
+
+        if not results_path.exists():
+            print(f"Results directory not found: {results_dir}")
+            return cls(results)
+
+        json_files = list(results_path.glob(pattern))
+
+        if not json_files:
+            print(f"No files matching '{pattern}' found in {results_dir}")
+            return cls(results)
+
+        print(f"Found {len(json_files)} result files")
+
+        for json_file in json_files:
+            try:
+                with open(json_file, 'r') as f:
+                    result = json.load(f)
+                    result['_filename'] = json_file.name
+                    result['_filepath'] = str(json_file)
+                    results.append(result)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Could not load {json_file.name}: {e}")
+            except Exception as e:
+                print(f"Warning: Error loading {json_file.name}: {e}")
+
+        print(f"Successfully loaded {len(results)} results")
         return cls(results)
 
     @classmethod
     def from_csv_dir(cls, results_dir: str, pattern: str = "*.csv") -> 'ResultsCollection':
         """Load results from a directory of CSV files."""
-        results = load_csv_results(results_dir, pattern)
+        results = []
+        results_path = Path(results_dir)
+
+        if not results_path.exists():
+            print(f"Results directory not found: {results_dir}")
+            return cls(results)
+
+        csv_files = list(results_path.glob(pattern))
+
+        if not csv_files:
+            print(f"No files matching '{pattern}' found in {results_dir}")
+            return cls(results)
+
+        print(f"Found {len(csv_files)} CSV files")
+
+        for csv_file in csv_files:
+            try:
+                df = pd.read_csv(csv_file)
+                result = {
+                    'data': df,
+                    '_filename': csv_file.name,
+                    '_filepath': str(csv_file)
+                }
+                results.append(result)
+            except Exception as e:
+                print(f"Warning: Could not load {csv_file.name}: {e}")
+
+        print(f"Successfully loaded {len(results)} CSV files")
         return cls(results)
 
     def __len__(self) -> int:
