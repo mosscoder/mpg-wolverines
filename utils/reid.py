@@ -35,7 +35,7 @@ datasets.config.NUM_PROC = 1
 MODEL_CONFIGS = {
     "dinov3": {
         "factory": "create_dinov3_arcface_model",
-        "native_size": 256,
+        "native_size": 224,
         "patch_size": 16,
         "norm_mean": [0.485, 0.456, 0.406],
         "norm_std": [0.229, 0.224, 0.225],
@@ -47,8 +47,8 @@ MODEL_CONFIGS = {
         "factory": "create_megadescriptor_arcface_model",
         "native_size": 384,
         "patch_size": 16,
-        "norm_mean": [0.5, 0.5, 0.5],
-        "norm_std": [0.5, 0.5, 0.5],
+        "norm_mean": [0.485, 0.456, 0.406],
+        "norm_std": [0.229, 0.224, 0.225],
         "backbone_label": "Frozen MegaDescriptor-L-384",
         "experiment_dir": "reid_openset/megadescriptor",
         "default_lr": 0.0005,
