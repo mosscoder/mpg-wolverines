@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--config', type=str,
                         default='preprocessing/results/feasible_individuals.json')
     parser.add_argument('--output', type=str,
-                        default='preprocessing/results/validation_quality_histogram.png')
+                        default='preprocessing/results/test_quality_histogram.png')
     args = parser.parse_args()
 
     # Load config

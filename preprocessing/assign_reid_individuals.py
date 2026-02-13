@@ -5,9 +5,10 @@ Select feasible individuals for reid experiments using HuggingFace train/test sp
 Individuals qualify for closed-set experiments if they have:
   - >= min_gallery_samples train images with pelage_score > gallery_quality_threshold
   - >= min_query_samples test images with pelage_score > query_quality_threshold
+  - >= min_test_events unique events (ymdh) in the test split
 
 Usage:
-    python preprocessing/create_validation_splits.py
+    python preprocessing/assign_reid_individuals.py
 """
 
 import os
@@ -40,6 +41,8 @@ def main():
                        help='Minimum test images above quality threshold (default: 1)')
     parser.add_argument('--query_quality_threshold', type=float, default=0.5,
                        help='Quality threshold for query selection (default: 0.5)')
+    parser.add_argument('--min_test_events', type=int, default=2,
+                       help='Minimum unique events (ymdh) in test split (default: 2)')
     args = parser.parse_args()
 
     # Manual exclusions
@@ -56,28 +59,34 @@ def main():
     print("\nAnalyzing splits...")
     train_ids = np.array(train_dataset['id'], dtype=object)
     train_scores = np.array(train_dataset['pelage_score'], dtype=np.float32)
+    train_ymdh = np.array(train_dataset['ymdh'], dtype=np.int64)
     test_ids = np.array(test_dataset['id'], dtype=object)
     test_scores = np.array(test_dataset['pelage_score'], dtype=np.float32)
+    test_ymdh = np.array(test_dataset['ymdh'], dtype=np.int64)
 
     train_stats = {}
     for ind_id in np.unique(train_ids):
         mask = train_ids == ind_id
         scores = train_scores[mask]
+        ymdh_vals = train_ymdh[mask]
         train_stats[ind_id] = {
             'total': int(mask.sum()),
             'above_025': int((scores > 0.25).sum()),
             'above_threshold': int((scores > args.gallery_quality_threshold).sum()),
             'pelage_scores': scores,
+            'events': int(len(np.unique(ymdh_vals))),
         }
 
     test_stats = {}
     for ind_id in np.unique(test_ids):
         mask = test_ids == ind_id
         scores = test_scores[mask]
+        ymdh_vals = test_ymdh[mask]
         test_stats[ind_id] = {
             'total': int(mask.sum()),
             'above_025': int((scores > 0.25).sum()),
             'above_threshold': int((scores > args.query_quality_threshold).sum()),
+            'events': int(len(np.unique(ymdh_vals))),
         }
 
     # Determine valid individuals
@@ -95,7 +104,11 @@ def main():
         train_above = train_stats.get(ind_id, {}).get('above_threshold', 0)
         test_above = test_stats.get(ind_id, {}).get('above_threshold', 0)
 
-        if train_above >= args.min_gallery_samples and test_above >= args.min_query_samples:
+        test_events = test_stats.get(ind_id, {}).get('events', 0)
+
+        if (train_above >= args.min_gallery_samples
+                and test_above >= args.min_query_samples
+                and test_events >= args.min_test_events):
             valid_individuals.append(ind_id)
         else:
             reasons = []
@@ -103,6 +116,8 @@ def main():
                 reasons.append(f"train above {args.gallery_quality_threshold}: {train_above} < {args.min_gallery_samples}")
             if test_above < args.min_query_samples:
                 reasons.append(f"test above {args.query_quality_threshold}: {test_above} < {args.min_query_samples}")
+            if test_events < args.min_test_events:
+                reasons.append(f"test events: {test_events} < {args.min_test_events}")
             excluded_individuals.append((ind_id, "; ".join(reasons)))
 
     # Sort by mean pelage score (descending)
@@ -122,12 +137,18 @@ def main():
         t = train_stats.get(ind_id, {})
         s = test_stats.get(ind_id, {})
         individual_stats[ind_id] = {
-            'train_total': t.get('total', 0),
-            'train_above_0.25': t.get('above_025', 0),
-            f'train_above_{args.gallery_quality_threshold}': t.get('above_threshold', 0),
-            'test_total': s.get('total', 0),
-            'test_above_0.25': s.get('above_025', 0),
-            f'test_above_{args.query_quality_threshold}': s.get('above_threshold', 0),
+            'train': {
+                'images': t.get('total', 0),
+                'images_above_0.25': t.get('above_025', 0),
+                f'images_above_{args.gallery_quality_threshold}': t.get('above_threshold', 0),
+                'events': t.get('events', 0),
+            },
+            'test': {
+                'images': s.get('total', 0),
+                'images_above_0.25': s.get('above_025', 0),
+                f'images_above_{args.query_quality_threshold}': s.get('above_threshold', 0),
+                'events': s.get('events', 0),
+            },
         }
 
     # Report
@@ -136,20 +157,18 @@ def main():
           f"test >= {args.min_query_samples} at > {args.query_quality_threshold}):")
     for ind_id in valid_individuals:
         t = individual_stats[ind_id]
-        print(f"  {ind_id}: train={t[f'train_above_{args.gallery_quality_threshold}']}/{t['train_total']}, "
-              f"test={t[f'test_above_{args.query_quality_threshold}']}/{t['test_total']}, "
+        tr, te = t['train'], t['test']
+        print(f"  {ind_id}: train={tr[f'images_above_{args.gallery_quality_threshold}']}/{tr['images']} imgs, {tr['events']} events | "
+              f"test={te[f'images_above_{args.query_quality_threshold}']}/{te['images']} imgs, {te['events']} events | "
               f"mean_pelage={individual_pelage_scores[ind_id]:.3f}")
 
     if excluded_individuals:
         print(f"\nExcluded {len(excluded_individuals)} individuals:")
         for ind_id, reason in excluded_individuals:
             t = individual_stats.get(ind_id, {})
-            train_above = t.get(f'train_above_{args.gallery_quality_threshold}', 0)
-            train_total = t.get('train_total', 0)
-            test_above = t.get(f'test_above_{args.query_quality_threshold}', 0)
-            test_total = t.get('test_total', 0)
-            print(f"  {ind_id}: train={train_above}/{train_total}, "
-                  f"test={test_above}/{test_total} -- {reason}")
+            tr, te = t.get('train', {}), t.get('test', {})
+            print(f"  {ind_id}: train={tr.get(f'images_above_{args.gallery_quality_threshold}', 0)}/{tr.get('images', 0)} imgs, {tr.get('events', 0)} events | "
+                  f"test={te.get(f'images_above_{args.query_quality_threshold}', 0)}/{te.get('images', 0)} imgs, {te.get('events', 0)} events -- {reason}")
 
     # Save config
     config = {
@@ -161,6 +180,7 @@ def main():
             'gallery_quality_threshold': args.gallery_quality_threshold,
             'min_query_samples': args.min_query_samples,
             'query_quality_threshold': args.query_quality_threshold,
+            'min_test_events': args.min_test_events,
         },
         'individual_pelage_scores': individual_pelage_scores,
         'individual_stats': individual_stats,

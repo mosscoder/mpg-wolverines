@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_lr_sweep_bioclip2
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-11
+#SBATCH --array=0-19
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,10 +11,10 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/lr/%A_%a.err
 
 # Learning Rate Sweep for BioCLIP-2 Re-ID with Temporal (ymdh) Split
-# 4 LRs x 3 seeds = 12 configs, one per job
+# 4 LRs x 5 seeds = 20 configs, one per job
 #
 # LRs: 0.0001, 0.0005, 0.001, 0.005
-# Fixed: 224px images, seeds=0,1,2, 50 epochs
+# Fixed: 224px images, seeds=0,1,2,3,4, 50 epochs
 #
 # Temporal split by capture event (ymdh):
 # - Earlier 50% of ymdh values -> train
@@ -50,7 +50,7 @@ python -u -m utils.reid opt_lr --model bioclip2 \
     --device gpu \
     --values 0.0001 0.0005 0.001 0.005 \
     --image-size 224 \
-    --embedding-dim 128 --epochs 50 --seeds 0 1 2
+    --embedding-dim 128 --epochs 50 --seeds 0 1 2 3 4
 
 # Print completion info
 echo "========================================"
