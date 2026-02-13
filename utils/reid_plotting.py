@@ -957,14 +957,23 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
 def print_summary_table(results: ResultsCollection):
     """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 100)
-    print(f"SUMMARY TABLE: Best Epoch by {DEFAULT_BEST_EPOCH_CRITERION.upper()} (R@1 & BA)")
-    print(f"Quality threshold: {DEFAULT_QUALITY_THRESHOLD}")
+    print("SUMMARY TABLE: Best Epoch by R@1 and BA (independent)")
     print("=" * 100)
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
 
-    print(f"{'Thresh':<8} {'Gallery':<8} {'Epoch':<6} {'R@1':<8} {'BA':<8} {'H-Mean':<8} {'Seeds':<6}")
+    # Discover available query thresholds from data
+    query_thresholds = [DEFAULT_QUALITY_THRESHOLD]
+    for r in results:
+        history = r.get('epoch_history', [])
+        if history and 'query_quality_metrics' in history[0]:
+            query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
+            break
+
+    print(f"{'Thresh':<8} {'Gallery':<8} "
+          f"{'R@1_epoch':<10} {'R@1_mean':<10} {'R@1_query_t':<12} "
+          f"{'BA_epoch':<9} {'BA_mean':<9} {'BA_query_t':<11} {'Seeds':<6}")
     print("-" * 100)
 
     metrics = {}
@@ -978,55 +987,41 @@ def print_summary_table(results: ResultsCollection):
             if not all_histories or not all_histories[0]:
                 continue
 
-            best_epoch, criterion_value, details = find_optimal_epoch(all_histories)
+            # Find best R@1 across query thresholds
+            best_r1_epoch, best_r1_mean, best_r1_qt = None, -1, query_thresholds[0]
+            for qt in query_thresholds:
+                epoch, mean_val, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=qt)
+                if mean_val is not None and mean_val > best_r1_mean:
+                    best_r1_epoch, best_r1_mean, best_r1_qt = epoch, mean_val, qt
 
-            recall_values = []
-            ba_values = []
-            for history in all_histories:
-                for h in history:
-                    if h['epoch'] == best_epoch:
-                        r = compute_epoch_metric(h, 'recall', DEFAULT_QUALITY_THRESHOLD)
-                        b = compute_epoch_metric(h, 'ba', DEFAULT_QUALITY_THRESHOLD)
-                        if r is not None:
-                            recall_values.append(r)
-                        if b is not None:
-                            ba_values.append(b)
-                        break
+            # Find best BA across query thresholds
+            best_ba_epoch, best_ba_mean, best_ba_qt = None, -1, query_thresholds[0]
+            for qt in query_thresholds:
+                epoch, mean_val, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=qt)
+                if mean_val is not None and mean_val > best_ba_mean:
+                    best_ba_epoch, best_ba_mean, best_ba_qt = epoch, mean_val, qt
 
-            if recall_values and ba_values:
-                mean_recall = np.mean(recall_values)
-                mean_ba = np.mean(ba_values)
-                if (mean_recall + mean_ba) > 0:
-                    h_mean = 2 * mean_recall * mean_ba / (mean_recall + mean_ba)
-                else:
-                    h_mean = 0.0
+            n_seeds = len(all_histories)
 
-                print(f"{threshold:<8.2f} {gallery_size:<8} {best_epoch:<6} "
-                      f"{mean_recall:<8.4f} {mean_ba:<8.4f} {h_mean:<8.4f} {len(recall_values):<6}")
-                metrics[(threshold, gallery_size)] = {
-                    'recall': mean_recall, 'ba': mean_ba, 'h_mean': h_mean,
-                    'epoch': best_epoch, 'n_seeds': len(recall_values)
-                }
+            print(f"{threshold:<8.2f} {gallery_size:<8} "
+                  f"{best_r1_epoch:<10} {best_r1_mean:<10.4f} {best_r1_qt:<12} "
+                  f"{best_ba_epoch:<9} {best_ba_mean:<9.4f} {best_ba_qt:<11} {n_seeds:<6}")
+            metrics[(threshold, gallery_size)] = {
+                'r1_epoch': best_r1_epoch, 'r1_mean': best_r1_mean, 'r1_query_t': best_r1_qt,
+                'ba_epoch': best_ba_epoch, 'ba_mean': best_ba_mean, 'ba_query_t': best_ba_qt,
+                'n_seeds': n_seeds
+            }
 
     if metrics:
-        best_key = max(metrics.keys(), key=lambda k: metrics[k]['h_mean'])
-        best_data = metrics[best_key]
+        best_r1_key = max(metrics.keys(), key=lambda k: metrics[k]['r1_mean'])
+        best_ba_key = max(metrics.keys(), key=lambda k: metrics[k]['ba_mean'])
         print("-" * 100)
-        print(f"Best config: threshold={best_key[0]}, gallery={best_key[1]}, epoch={best_data['epoch']}")
-        print(f"  R@1={best_data['recall']:.4f}, BA={best_data['ba']:.4f}, H-Mean={best_data['h_mean']:.4f}")
-
-        print("\nAlternative criteria comparison:")
-        best_by_recall = max(metrics.keys(), key=lambda k: metrics[k]['recall'])
-        best_by_ba = max(metrics.keys(), key=lambda k: metrics[k]['ba'])
-
-        if best_by_recall != best_key:
-            d = metrics[best_by_recall]
-            print(f"  Best by R@1: thresh={best_by_recall[0]}, gallery={best_by_recall[1]} "
-                  f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
-        if best_by_ba != best_key:
-            d = metrics[best_by_ba]
-            print(f"  Best by BA:  thresh={best_by_ba[0]}, gallery={best_by_ba[1]} "
-                  f"-> R@1={d['recall']:.4f}, BA={d['ba']:.4f}")
+        d = metrics[best_r1_key]
+        print(f"Best R@1: thresh={best_r1_key[0]}, gallery={best_r1_key[1]}, "
+              f"epoch={d['r1_epoch']}, R@1={d['r1_mean']:.4f}, query_t={d['r1_query_t']}")
+        d = metrics[best_ba_key]
+        print(f"Best BA:  thresh={best_ba_key[0]}, gallery={best_ba_key[1]}, "
+              f"epoch={d['ba_epoch']}, BA={d['ba_mean']:.4f}, query_t={d['ba_query_t']}")
 
 
 def run_single_model(model_name: str, results_dir: str, output_dir: str):
