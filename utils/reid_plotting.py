@@ -176,7 +176,13 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
     """
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
-    query_thresholds = ['q>=0.0', 'q>=0.1', 'q>=0.2', 'q>=0.3', 'q>=0.4', 'q>=0.5']
+    # Discover query thresholds from result data
+    query_thresholds = ['q>=0.0']
+    for r in results:
+        history = r.get('epoch_history', [])
+        if history and 'query_quality_metrics' in history[0]:
+            query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
+            break
 
     strategies = {
         'baseline': {
@@ -798,7 +804,14 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     thresholds = sorted(results.get_unique('threshold'))
-    q_key = "q>=0.3"
+    # Pick middle query threshold from result data
+    q_key = "q>=0.0"
+    for r in results:
+        history = r.get('epoch_history', [])
+        if history and 'query_quality_metrics' in history[0]:
+            available = sorted(history[0]['query_quality_metrics'].keys())
+            q_key = available[len(available) // 2]
+            break
 
     n_rows, n_cols = len(gallery_sizes), len(thresholds)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 15), sharex=True, sharey=True)
@@ -831,7 +844,7 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
     fig.legend(handles=legend_elements, loc='upper right', fontsize=9, title='Seed')
     fig.supxlabel('Epoch', fontsize=12)
     fig.supylabel('Recall@1 (val)', fontsize=12)
-    fig.suptitle('Validation Recall@1 (q>=0.3) by Configuration (Raw Cosine)', fontsize=14, y=1.01)
+    fig.suptitle(f'Validation Recall@1 ({q_key}) by Configuration (Raw Cosine)', fontsize=14, y=1.01)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')

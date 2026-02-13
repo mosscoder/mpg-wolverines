@@ -161,7 +161,7 @@ The pipeline processes only "Robust" capture events. Not all 588 robust events r
 
 #### Re-identification Role Assignment
 
-The 558 inference events (49,312 images) partition across experimental roles based on individual identity and sample sufficiency. Gallery-eligible individuals have enough events to populate gallery and validation sets; simulated unknowns serve as novel individuals during open-set evaluation; excluded individuals have too few events for either role.
+The 558 inference events (49,312 images) partition across experimental roles based on individual identity and sample sufficiency. Gallery-eligible individuals have enough events to populate gallery and validation sets; simulated unknowns serve as novel individuals during open-set evaluation.
 
 Source: `hugging_face_dataset/v2/data/feasible_individuals.json`, `hugging_face_dataset/v2/data/quality_capture_rates.json`
 
@@ -172,17 +172,16 @@ Source: `hugging_face_dataset/v2/data/feasible_individuals.json`, `hugging_face_
 | Gallery-eligible | BDF10-M6 | 82 | 5,157 |
 | Gallery-eligible | LH23-M1 | 52 | 2,475 |
 | Gallery-eligible | HFW12-F7 | 48 | 12,815 |
-| **Subtotal known** | **5 individuals** | **494** | **46,416** |
-| Simulated unknown | Tex (promoted) | 11 | 343 |
+| Gallery-eligible | Tex | 11 | 343 |
+| **Subtotal known** | **6 individuals** | **505** | **46,759** |
 | Simulated unknown | PA23-F1 | 40 | 1,497 |
 | Simulated unknown | PA23-M2 | 4 | 556 |
 | Simulated unknown | Powder Paws | 6 | 418 |
-| **Subtotal unknown** | **4 individuals** | **61** | **2,814** |
-| Excluded | PA23-M1 | 2 | 71 |
-| Excluded | HLC21-H1 | 1 | 11 |
-| **Subtotal excluded** | **2 individuals** | **3** | **82** |
+| Simulated unknown | PA23-M1 | 2 | 71 |
+| Simulated unknown | HLC21-H1 | 1 | 11 |
+| **Subtotal unknown** | **5 individuals** | **53** | **2,553** |
 
-*Check: 494 + 61 + 3 = 558 events; 46,416 + 2,814 + 82 = 49,312 images.*
+*Check: 505 + 53 = 558 events; 46,759 + 2,553 = 49,312 images.*
 
 #### Validation Queries
 
@@ -195,7 +194,8 @@ Fixed set of most-recent events from gallery-eligible individuals, used as known
 | BDF10-M6 | 1 | 31 |
 | LH23-M1 | 6 | 72 |
 | HFW12-F7 | 2 | 426 |
-| **Total** | **15** | **738** |
+| Tex | TBD | TBD |
+| **Total** | **TBD** | **TBD** |
 
 #### Gallery Training Pool
 
@@ -208,9 +208,10 @@ Remaining gallery-eligible images after removing validation queries and HuggingF
 | BDF10-M6 | 4,542 |
 | LH23-M1 | 2,277 |
 | HFW12-F7 | 10,695 |
-| **Total** | **40,717** |
+| Tex | TBD |
+| **Total** | **TBD** |
 
-*The remaining 4,961 images (46,416 − 738 − 40,717) belong to the HuggingFace test split — a temporal holdout from `07_create_reidentification_dataset.py`, not used in re-id experiments.*
+*The remaining images (46,759 − validation − gallery pool) belong to the HuggingFace test split — a temporal holdout from `07_create_reidentification_dataset.py`, not used in re-id experiments.*
 
 ### 6. Pelage Quality Classification (Stage 1)
 
@@ -230,7 +231,7 @@ Binary classification to filter images suitable for re-identification.
 
 ### 7. Individual Re-identification (Stage 2)
 
-**Location:** `reid_openset_BA/`
+**Location:** `reid_openset/`
 
 Open-set metric learning for individual identification.
 
@@ -389,7 +390,7 @@ HuggingFace datasets use Apache Arrow, which stores data in columnar format:
 
 ### S2. Detailed Metric Justification
 
-See `reid_openset_BA/METRICS.md` for comprehensive discussion of:
+See `reid_openset/METRICS.md` for comprehensive discussion of:
 - Why F1 macro-averaging mixes populations unfairly
 - Mathematical formulation of Balanced Accuracy components
 - Separation of detection task from identification task
