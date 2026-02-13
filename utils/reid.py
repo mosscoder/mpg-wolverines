@@ -661,11 +661,8 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
                 if len(ind_indices) == 0:
                     continue
 
-                accepted = 0
-                for i in ind_indices:
-                    max_score = known_scores[i].max().item()
-                    if max_score >= score_threshold:
-                        accepted += 1
+                max_scores = known_scores[ind_indices].max(dim=1).values
+                accepted = (max_scores >= score_threshold).sum().item()
 
                 per_ind_accept.append(accepted / len(ind_indices))
 
@@ -689,11 +686,8 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
                 if len(ind_indices) == 0:
                     continue
 
-                rejected = 0
-                for i in ind_indices:
-                    max_score = unknown_scores[i].max().item()
-                    if max_score < score_threshold:
-                        rejected += 1
+                max_scores = unknown_scores[ind_indices].max(dim=1).values
+                rejected = (max_scores < score_threshold).sum().item()
 
                 per_ind_reject.append(rejected / len(ind_indices))
 
@@ -836,14 +830,15 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         individual_correct = {}
         individual_total = {}
 
-        for idx in mask_indices:
-            true_label = query_labels_np[idx]
-            pred_idx = scores_known[idx].argmax().item()
-            pred_label = gallery_labels[pred_idx].item()
+        pred_indices = scores_known[mask_indices].argmax(dim=1)
+        pred_labels = gallery_labels[pred_indices].cpu().numpy()
+        true_labels = query_labels_np[mask_indices]
+        correct = (pred_labels == true_labels)
 
-            individual_total[true_label] = individual_total.get(true_label, 0) + 1
-            if pred_label == true_label:
-                individual_correct[true_label] = individual_correct.get(true_label, 0) + 1
+        for label in np.unique(true_labels):
+            label_mask = (true_labels == label)
+            individual_total[label] = int(label_mask.sum())
+            individual_correct[label] = int(correct[label_mask].sum())
 
         per_ind_recall = [
             individual_correct.get(label, 0) / individual_total[label]
@@ -860,59 +855,47 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     fold_results = []
     thresholds = np.linspace(0.0, 1.0, 101)
 
+    thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
+
     for held_out_ind in unique_individuals:
         gallery_mask = (gallery_labels != held_out_ind)
         unknown_mask = (gallery_labels == held_out_ind)
 
         unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
 
-        known_results_by_ind = {}
-        gallery_indices = torch.where(gallery_mask)[0]
+        # Vectorized: submatrix of known gallery vs known gallery
+        # Diagonal is already -1.0 from fill_diagonal_ above, excluding self
+        sub_scores = scores_gal_gal[gallery_mask][:, gallery_mask]
+        max_scores_sub = sub_scores.max(dim=1).values
+        sub_labels = gallery_labels[gallery_mask]
 
-        for idx in gallery_indices:
-            label_i = gallery_labels[idx].item()
-            row = scores_gal_gal[idx]
+        # Vectorized threshold sweep: broadcast (101,1) vs (N,) -> (101,N)
+        accepted_matrix = max_scores_sub.unsqueeze(0) >= thresholds_t.unsqueeze(1)
 
-            valid_mask = gallery_mask.clone()
-            valid_mask[idx] = False
+        # Per-individual accept rate at each threshold
+        unique_sub_labels = sub_labels.unique()
+        per_ind_rates = torch.zeros(len(unique_sub_labels), len(thresholds),
+                                     device=gallery_labels.device)
+        for j, ind_label in enumerate(unique_sub_labels):
+            ind_mask = (sub_labels == ind_label)
+            per_ind_rates[j] = accepted_matrix[:, ind_mask].float().mean(dim=1)
 
-            if valid_mask.sum() > 0:
-                scores_to_valid = row[valid_mask]
-                max_score, local_idx = scores_to_valid.max(dim=0)
+        known_accept_all = per_ind_rates.mean(dim=0)
 
-                valid_indices = torch.where(valid_mask)[0]
-                pred_idx = valid_indices[local_idx]
-                pred_label = gallery_labels[pred_idx].item()
-                is_correct = (pred_label == label_i)
-                known_results_by_ind.setdefault(label_i, []).append((max_score.item(), is_correct))
+        if len(unknown_max_scores) > 0:
+            unknown_reject_all = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
+        else:
+            unknown_reject_all = torch.zeros(len(thresholds), device=gallery_labels.device)
 
-        fold_best_ba, fold_best_thresh = 0.0, 0.5
-        fold_best_known_accept, fold_best_unknown_reject = 0.0, 0.0
-
-        for thresh in thresholds:
-            per_ind_accept = []
-            for ind_label, results in known_results_by_ind.items():
-                accepted = sum(1 for s, c in results if s >= thresh)
-                per_ind_accept.append(accepted / len(results))
-            known_accept = np.mean(per_ind_accept) if per_ind_accept else 0.0
-
-            if len(unknown_max_scores) > 0:
-                unknown_reject = (unknown_max_scores < thresh).float().mean().item()
-            else:
-                unknown_reject = 0.0
-
-            ba = (known_accept + unknown_reject) / 2
-            if ba > fold_best_ba:
-                fold_best_ba, fold_best_thresh = ba, thresh
-                fold_best_known_accept = known_accept
-                fold_best_unknown_reject = unknown_reject
+        ba_all = (known_accept_all + unknown_reject_all) / 2
+        best_idx = ba_all.argmax().item()
 
         fold_results.append({
             'individual': held_out_ind,
-            'threshold': fold_best_thresh,
-            'ba': fold_best_ba,
-            'known_accept': fold_best_known_accept,
-            'unknown_reject': fold_best_unknown_reject,
+            'threshold': thresholds[best_idx],
+            'ba': ba_all[best_idx].item(),
+            'known_accept': known_accept_all[best_idx].item(),
+            'unknown_reject': unknown_reject_all[best_idx].item(),
         })
 
     optimal_thresh = np.mean([f['threshold'] for f in fold_results])
