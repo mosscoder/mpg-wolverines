@@ -504,13 +504,13 @@ def filter_training_pool_by_quality(metadata_cache, indices, threshold):
     )
 
 
-def get_rare_individual_indices(metadata_cache, valid_individuals, quality_threshold=0.0,
+def get_rare_individual_indices(metadata_cache, qualified_individuals, quality_threshold=0.0,
                                 promoted_individuals=None, excluded_individuals=None):
     """Use vectorized operations with metadata cache."""
     from utils.optimized_filters import get_rare_individual_indices_vectorized
     return get_rare_individual_indices_vectorized(
         metadata_cache,
-        valid_individuals,
+        qualified_individuals,
         quality_threshold,
         promoted_individuals=promoted_individuals,
         excluded_individuals=excluded_individuals
@@ -711,7 +711,7 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
 
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
-                                  transform, device, dataset, valid_individuals, metadata_cache,
+                                  transform, device, dataset, qualified_individuals, metadata_cache,
                                   gallery_threshold, criterion, embedding_dim=128, batch_size=32,
                                   promoted_individuals=None, excluded_individuals=None):
     """
@@ -761,7 +761,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     # Rare/Unknown — pool from train dataset
     rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
-        metadata_cache, valid_individuals, quality_threshold=0.0,
+        metadata_cache, qualified_individuals, quality_threshold=0.0,
         promoted_individuals=promoted_individuals,
         excluded_individuals=excluded_individuals
     )
@@ -978,8 +978,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     print(f"Training: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
     print(f"{'='*60}")
 
-    # Get valid individuals from config (preprocessing already enforces criteria)
-    feasible_individuals = config.get('valid_individuals', [])
+    # Get qualified individuals from config (preprocessing already enforces criteria)
+    feasible_individuals = config.get('qualified_individuals', [])
     promoted_individuals = config.get('promoted_to_rare', [])
     excluded_individuals = config.get('excluded_entirely', [])
 
@@ -1267,15 +1267,15 @@ def run_hygiene_sweep(model_name, args):
 # Opt sweep shared training logic
 # ============================================================================
 
-def get_valid_individuals(config, min_p=MIN_P):
-    """Get valid individuals from config (preprocessing already enforces criteria)."""
-    valid_individuals = config.get('valid_individuals', [])
+def get_qualified_individuals(config, min_p=MIN_P):
+    """Get qualified individuals from config (preprocessing already enforces criteria)."""
+    qualified_individuals = config.get('qualified_individuals', [])
 
-    if len(valid_individuals) < min_p:
-        print(f"Not enough individuals ({len(valid_individuals)}) for PK sampling (need {min_p})")
+    if len(qualified_individuals) < min_p:
+        print(f"Not enough individuals ({len(qualified_individuals)}) for PK sampling (need {min_p})")
         return None
 
-    return valid_individuals
+    return qualified_individuals
 
 
 def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
@@ -1331,14 +1331,14 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     print(f"{'='*60}")
 
     # Get valid individuals
-    valid_individuals = get_valid_individuals(config)
-    if valid_individuals is None:
+    qualified_individuals = get_qualified_individuals(config)
+    if qualified_individuals is None:
         return None
-    print(f"Using {len(valid_individuals)} individuals: {', '.join(valid_individuals)}")
+    print(f"Using {len(qualified_individuals)} individuals: {', '.join(qualified_individuals)}")
 
     # Create temporal split dataset
     train_dataset, test_dataset, individual_to_class, dataset_info = create_ymdh_split_dataset(
-        dataset, valid_individuals, metadata_cache, seed=seed
+        dataset, qualified_individuals, metadata_cache, seed=seed
     )
 
     if train_dataset is None or len(train_dataset) == 0:
@@ -1363,7 +1363,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     try:
         pk_sampler = PKBatchSampler(
             labels=train_torch_dataset.get_labels(),
-            p=min(MIN_P, len(valid_individuals)),
+            p=min(MIN_P, len(qualified_individuals)),
             k=effective_k,
             drop_last=True
         )
@@ -1385,7 +1385,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
     # Create ArcFace loss
     criterion = ArcFaceLoss(
-        num_classes=len(valid_individuals),
+        num_classes=len(qualified_individuals),
         embedding_size=emb_dim,
         margin=ARCFACE_MARGIN,
         scale=ARCFACE_SCALE
@@ -1440,7 +1440,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
             'embedding_dim': embedding_dim,
         },
         'dataset': {
-            'individuals': valid_individuals,
+            'individuals': qualified_individuals,
             'train_samples_per_individual': dataset_info['train_samples_per_individual'],
             'test_samples_per_individual': dataset_info['test_samples_per_individual'],
             'total_train': dataset_info['total_train'],
@@ -1618,7 +1618,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
         print("Failed to load feasibility config")
         return None
 
-    feasible_individuals = feasibility_config.get('valid_individuals', [])
+    feasible_individuals = feasibility_config.get('qualified_individuals', [])
     promoted_individuals = feasibility_config.get('promoted_to_rare', [])
     excluded_individuals = feasibility_config.get('excluded_entirely', [])
 
