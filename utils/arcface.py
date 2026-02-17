@@ -13,6 +13,9 @@ from transformers import AutoModel
 import random
 from typing import List, Tuple
 from collections import defaultdict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class EmbeddingHead(nn.Module):

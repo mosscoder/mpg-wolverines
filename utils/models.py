@@ -1,7 +1,11 @@
+import os
 import torch
 import torch.nn as nn
 from transformers import AutoModel
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 
@@ -12,7 +16,7 @@ def create_model(model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
     """Create and initialize the wolverines classifier"""
     
     # Create backbone
-    backbone = AutoModel.from_pretrained(model_name)
+    backbone = AutoModel.from_pretrained(model_name, token=os.environ.get("HF_TOKEN"))
     
     # Freeze backbone parameters
     for param in backbone.parameters():

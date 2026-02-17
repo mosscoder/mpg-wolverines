@@ -29,6 +29,114 @@ def json_serialize_helper(obj):
     raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
 
 
+def create_greedy_temporal_validation_split(train_ids, train_scores, train_ymdh, individuals):
+    """
+    For each valid individual, walk backward from most recent ymdh in the TRAIN split,
+    selecting whole events until all 4 quality bins are covered.
+
+    Quality bins: [0.75,1.0], [0.5,0.75), [0.25,0.5), [0.0,0.25)
+
+    Returns:
+        dict of {ind_id: {indices, ymdh_values, count, bins_covered, missing_bins}}
+    """
+    quality_bins = [
+        (0.75, 1.0),
+        (0.5, 0.75),
+        (0.25, 0.5),
+        (0.0, 0.25),
+    ]
+    bin_labels = ['[0.75,1.0]', '[0.5,0.75)', '[0.25,0.5)', '[0.0,0.25)']
+
+    validation_indices = {}
+
+    for ind_id in individuals:
+        mask = train_ids == ind_id
+        ind_indices = np.where(mask)[0]
+        ind_scores = train_scores[ind_indices]
+        ind_ymdh = train_ymdh[ind_indices]
+
+        # Get unique ymdh values sorted descending (most recent first)
+        unique_ymdh = np.sort(np.unique(ind_ymdh))[::-1]
+
+        selected_indices = []
+        selected_ymdh = []
+        bins_covered = set()
+
+        for ymdh_val in unique_ymdh:
+            if len(bins_covered) == len(quality_bins):
+                break
+
+            # Get all samples from this event
+            event_mask = ind_ymdh == ymdh_val
+            event_indices = ind_indices[event_mask]
+            event_scores = ind_scores[event_mask]
+
+            # Check which bins this event covers
+            new_bins = set()
+            for b_idx, (lo, hi) in enumerate(quality_bins):
+                if b_idx not in bins_covered:
+                    if np.any((event_scores >= lo) & (event_scores < hi if b_idx < 3 else event_scores <= hi)):
+                        new_bins.add(b_idx)
+
+            # Always include if we haven't covered all bins yet
+            selected_indices.extend(event_indices.tolist())
+            selected_ymdh.append(int(ymdh_val))
+            bins_covered.update(new_bins)
+
+        missing_bins = [bin_labels[i] for i in range(len(quality_bins)) if i not in bins_covered]
+
+        validation_indices[ind_id] = {
+            'indices': selected_indices,
+            'ymdh_values': selected_ymdh,
+            'count': len(selected_indices),
+            'bins_covered': [bin_labels[i] for i in sorted(bins_covered)],
+            'missing_bins': missing_bins,
+        }
+
+        print(f"  {ind_id}: {len(selected_indices)} val samples from {len(selected_ymdh)} events, "
+              f"bins covered: {len(bins_covered)}/4"
+              + (f" (missing: {', '.join(missing_bins)})" if missing_bins else ""))
+
+    return validation_indices
+
+
+def assess_training_feasibility(train_ids, train_scores, validation_indices, individuals):
+    """
+    For each individual, count eligible training samples after excluding validation indices.
+    Check at thresholds [0.0, 0.25, 0.5] and gallery sizes [2, 4, 8, 16, 32, 64].
+
+    Returns:
+        training_compatibility dict
+    """
+    thresholds = [0.0, 0.25, 0.5]
+    gallery_sizes = [2, 4, 8, 16, 32, 64]
+
+    training_compatibility = {}
+
+    for ind_id in individuals:
+        val_idx_set = set(validation_indices[ind_id]['indices'])
+        mask = train_ids == ind_id
+        ind_indices = np.where(mask)[0]
+        ind_scores = train_scores[ind_indices]
+
+        # Exclude validation indices
+        train_mask = np.array([idx not in val_idx_set for idx in ind_indices])
+        remaining_indices = ind_indices[train_mask]
+        remaining_scores = ind_scores[train_mask]
+
+        compat = {'total_remaining': int(len(remaining_indices))}
+
+        for thresh in thresholds:
+            eligible = int(np.sum(remaining_scores >= thresh))
+            feasible_gallery_sizes = [gs for gs in gallery_sizes if eligible >= gs]
+            compat[f'eligible_at_{thresh}'] = eligible
+            compat[f'feasible_gallery_sizes_at_{thresh}'] = feasible_gallery_sizes
+
+        training_compatibility[ind_id] = compat
+
+    return training_compatibility
+
+
 def main():
     parser = argparse.ArgumentParser(description='Select feasible individuals for reid experiments')
     parser.add_argument('--output_dir', type=str, default='preprocessing/results',
@@ -126,6 +234,18 @@ def main():
         reverse=True
     )
 
+    # Create greedy temporal validation split from train data
+    print("\nCreating greedy temporal validation split...")
+    validation_indices = create_greedy_temporal_validation_split(
+        train_ids, train_scores, train_ymdh, valid_individuals
+    )
+
+    # Assess training feasibility after excluding validation indices
+    print("\nAssessing training feasibility...")
+    training_compatibility = assess_training_feasibility(
+        train_ids, train_scores, validation_indices, valid_individuals
+    )
+
     # Build individual_pelage_scores and individual_stats
     individual_pelage_scores = {}
     individual_stats = {}
@@ -184,6 +304,9 @@ def main():
         },
         'individual_pelage_scores': individual_pelage_scores,
         'individual_stats': individual_stats,
+        'validation_indices': validation_indices,
+        'training_compatibility': training_compatibility,
+        'validation_strategy': 'greedy_temporal_from_train',
     }
 
     output_path = os.path.join(args.output_dir, 'feasible_individuals.json')

@@ -518,12 +518,12 @@ def get_rare_individual_indices(metadata_cache, valid_individuals, quality_thres
 
 
 def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshold, seed,
-                                     metadata_cache, test_dataset, test_metadata_cache):
+                                     metadata_cache, config):
     """
-    Create gallery/query split with filtered gallery.
+    Create gallery/query split with filtered gallery using train-split validation.
 
-    Gallery: Training samples filtered by pelage_score >= threshold, then sampled
-    Query: ALL test split samples for valid individuals (unfiltered)
+    Gallery: Training samples (excluding validation indices) filtered by pelage_score >= threshold, then sampled
+    Query: Validation indices from greedy temporal split (from train dataset)
 
     Returns:
         train_dataset, val_dataset, individual_to_class, dataset_info
@@ -531,7 +531,7 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     set_all_seeds(seed)
 
     id_to_indices = metadata_cache['id_to_indices']
-    test_id_to_indices = test_metadata_cache['id_to_indices']
+    validation_indices = config.get('validation_indices', {})
 
     print(f"Creating filtered gallery: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
 
@@ -546,15 +546,17 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     }
 
     for ind_id in individuals:
-        # Query: all test images for this individual (unfiltered)
-        test_indices = test_id_to_indices.get(ind_id, [])
-        all_val_indices.extend(test_indices)
-        dataset_info['query_samples_per_individual'][ind_id] = len(test_indices)
+        # Query: validation indices from greedy temporal split (train dataset)
+        val_idx = validation_indices.get(ind_id, {}).get('indices', [])
+        val_idx_set = set(val_idx)
+        all_val_indices.extend(val_idx)
+        dataset_info['query_samples_per_individual'][ind_id] = len(val_idx)
 
-        # Gallery: quality-filtered train images
+        # Gallery: quality-filtered train images MINUS validation indices
         all_ind_indices = list(id_to_indices.get(ind_id, []))
+        train_only_indices = [i for i in all_ind_indices if i not in val_idx_set]
 
-        eligible_pool = filter_training_pool_by_quality(metadata_cache, all_ind_indices, threshold)
+        eligible_pool = filter_training_pool_by_quality(metadata_cache, train_only_indices, threshold)
         dataset_info['eligible_pool_per_individual'][ind_id] = len(eligible_pool)
 
         if len(eligible_pool) == 0:
@@ -570,10 +572,10 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
         all_train_indices.extend(train_sampled)
         dataset_info['gallery_samples_per_individual'][ind_id] = len(train_sampled)
 
-        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(test_indices)} query")
+        print(f"  {ind_id}: {len(train_sampled)}/{len(eligible_pool)} gallery (threshold>={threshold}), {len(val_idx)} query")
 
     train_dataset_out = dataset.select(all_train_indices) if all_train_indices else None
-    val_dataset = test_dataset.select(all_val_indices)
+    val_dataset = dataset.select(all_val_indices) if all_val_indices else None
 
     print(f"Total: {len(all_train_indices)} gallery, {len(all_val_indices)} query")
 
@@ -711,12 +713,11 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, valid_individuals, metadata_cache,
                                   gallery_threshold, criterion, embedding_dim=128, batch_size=32,
-                                  promoted_individuals=None, excluded_individuals=None,
-                                  test_dataset=None, test_metadata_cache=None):
+                                  promoted_individuals=None, excluded_individuals=None):
     """
     Evaluate model computing Recall@1 and open-set metrics with raw cosine similarity.
 
-    Rare/unknown individuals are pooled from both train and test datasets.
+    Rare/unknown individuals are pooled from the train dataset only.
 
     Returns:
         query_quality_metrics, open_set_metrics, val_loss
@@ -777,22 +778,6 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         all_rare_emb.append(emb)
         all_rare_quality.append(qual)
         all_rare_labels.append(lab)
-
-    # Also pool rare/unknown from test dataset
-    if test_dataset is not None and test_metadata_cache is not None:
-        test_rare_indices, test_rare_quality, test_rare_labels_str = get_rare_individual_indices(
-            test_metadata_cache, valid_individuals, quality_threshold=0.0,
-            promoted_individuals=promoted_individuals,
-            excluded_individuals=excluded_individuals
-        )
-        if test_rare_indices:
-            emb, qual, lab = compute_rare_embeddings(
-                model, test_dataset, test_rare_indices, test_rare_quality, test_rare_labels_str,
-                transform, device, embedding_dim=embedding_dim
-            )
-            all_rare_emb.append(emb)
-            all_rare_quality.append(qual)
-            all_rare_labels.append(lab)
 
     if all_rare_emb:
         rare_emb = torch.cat(all_rare_emb, dim=0).to(device)
@@ -973,8 +958,7 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=100,
-                         test_dataset=None, test_metadata_cache=None):
+                         learning_rate, image_size, embedding_dim, epochs=100):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, PKBatchSampler
     from utils.training import check_result_exists
@@ -1005,10 +989,10 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
-    # Create filtered gallery dataset (gallery from train, query from test)
+    # Create filtered gallery dataset (gallery from train minus validation, query from validation)
     train_dataset, val_dataset, individual_to_class, dataset_info = create_filtered_gallery_dataset(
         dataset, feasible_individuals, gallery_size, threshold, seed,
-        metadata_cache, test_dataset, test_metadata_cache
+        metadata_cache, config
     )
 
     if train_dataset is None or len(train_dataset) == 0:
@@ -1099,8 +1083,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold,
             criterion=criterion, embedding_dim=emb_dim,
             promoted_individuals=promoted_individuals,
-            excluded_individuals=excluded_individuals,
-            test_dataset=test_dataset, test_metadata_cache=test_metadata_cache
+            excluded_individuals=excluded_individuals
         )
 
         recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
@@ -1223,8 +1206,6 @@ def run_hygiene_sweep(model_name, args):
     print("\nLoading datasets...")
     dataset = load_reidentification_dataset()
     metadata_cache = build_metadata_cache(dataset)
-    test_dataset = load_reidentification_test_dataset()
-    test_metadata_cache = build_metadata_cache(test_dataset)
     feasibility_config = load_feasibility_config()
 
     if not feasibility_config:
@@ -1266,8 +1247,7 @@ def run_hygiene_sweep(model_name, args):
                 model_name, threshold, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim,
-                test_dataset=test_dataset, test_metadata_cache=test_metadata_cache
+                embedding_dim=best_embedding_dim
             )
             if result:
                 results_summary.append(result)
@@ -1492,6 +1472,492 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
 
 # ============================================================================
+# Final test evaluation
+# ============================================================================
+
+def load_best_hygiene_config(model_name, criterion='harmonic_mean'):
+    """
+    Read all hygiene sweep results for a backbone and select the best operating point.
+
+    Groups by (threshold, gallery_size), extracts best epoch per seed by criterion,
+    averages across seeds, returns the (threshold, gallery_size, epoch) with highest mean.
+
+    Args:
+        model_name: Key in MODEL_CONFIGS
+        criterion: 'recall', 'balanced_accuracy', or 'harmonic_mean'
+
+    Returns:
+        dict with {threshold, gallery_size, best_epoch, score}
+    """
+    config = MODEL_CONFIGS[model_name]
+    results_dir = os.path.join(config['experiment_dir'], 'results')
+
+    files = glob.glob(os.path.join(results_dir, 'threshold=*_gallery=*_seed=*.json'))
+    if not files:
+        raise FileNotFoundError(f"No hygiene results found in {results_dir}")
+
+    # Load all results
+    results = []
+    for f in files:
+        with open(f, 'r') as fp:
+            results.append(json.load(fp))
+
+    # Group by (threshold, gallery_size)
+    groups = defaultdict(list)
+    for r in results:
+        key = (r['config']['threshold'], r['config']['gallery_size'])
+        groups[key].append(r)
+
+    best_overall_score = -1.0
+    best_config = None
+
+    for (threshold, gallery_size), group_results in groups.items():
+        # For each seed, find the best epoch by criterion
+        per_seed_best = []
+
+        for r in group_results:
+            best_epoch_score = -1.0
+            best_epoch_num = 0
+
+            for entry in r['epoch_history']:
+                r1 = entry['query_quality_metrics']['q>=0.0']['recall_at_1']
+                ba = entry.get('open_set', {}).get('by_quality', {}).get('q>=0.0', {}).get('balanced_accuracy', 0.0)
+
+                if criterion == 'recall':
+                    score = r1
+                elif criterion == 'balanced_accuracy':
+                    score = ba
+                else:  # harmonic_mean
+                    score = 2 * r1 * ba / (r1 + ba) if (r1 + ba) > 0 else 0.0
+
+                if score > best_epoch_score:
+                    best_epoch_score = score
+                    best_epoch_num = entry['epoch']
+
+            per_seed_best.append({'score': best_epoch_score, 'epoch': best_epoch_num})
+
+        mean_score = np.mean([s['score'] for s in per_seed_best])
+        # Use median epoch as representative
+        median_epoch = int(np.median([s['epoch'] for s in per_seed_best]))
+
+        if mean_score > best_overall_score:
+            best_overall_score = mean_score
+            best_config = {
+                'threshold': threshold,
+                'gallery_size': gallery_size,
+                'best_epoch': median_epoch,
+                'score': float(mean_score),
+                'criterion': criterion,
+                'n_seeds': len(group_results),
+                'per_seed_epochs': [s['epoch'] for s in per_seed_best],
+            }
+
+    print(f"Best hygiene config ({criterion}): threshold={best_config['threshold']}, "
+          f"gallery_size={best_config['gallery_size']}, epoch={best_config['best_epoch']}, "
+          f"score={best_config['score']:.4f} (n={best_config['n_seeds']} seeds)")
+
+    return best_config
+
+
+def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
+    """
+    Final test evaluation using the best operating point from hygiene sweep.
+
+    - Gallery: train split, filtered by optimal threshold, sampled to gallery_size (seed varies)
+    - Query (known): test split images for gallery-eligible individuals
+    - Query (unknown): test split images for non-gallery individuals
+    - Train for exactly best_epoch epochs
+    - Evaluate R@1 and BA on the held-out test split
+
+    Args:
+        model_name: Key in MODEL_CONFIGS
+        args: Argparse namespace
+        seed: Random seed for gallery sampling and training
+        criterion: Criterion used to select best hygiene config
+    """
+    from utils.arcface import ArcFaceLoss, PKBatchSampler
+    from utils.training import check_result_exists
+
+    model_config = MODEL_CONFIGS[model_name]
+    experiment_dir = model_config['experiment_dir']
+
+    # Load best operating point
+    best_config = load_best_hygiene_config(model_name, criterion=criterion)
+    threshold = best_config['threshold']
+    gallery_size = best_config['gallery_size']
+    best_epoch = best_config['best_epoch']
+
+    set_all_seeds(seed)
+
+    # Output
+    output_dir = os.path.join(experiment_dir, 'results', 'test')
+    filename = f"test_seed={seed}.json"
+    output_path = os.path.join(output_dir, filename)
+
+    if check_result_exists(output_path) and not args.overwrite:
+        print(f"Skipping existing result: {filename}")
+        return None
+
+    print(f"\n{'='*60}")
+    print(f"Final Test Evaluation: seed={seed}, criterion={criterion}")
+    print(f"  threshold={threshold}, gallery_size={gallery_size}, epochs={best_epoch}")
+    print(f"{'='*60}")
+
+    # Load best hyperparameters
+    best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+
+    # Load datasets
+    print("\nLoading datasets...")
+    train_dataset = load_reidentification_dataset()
+    train_metadata_cache = build_metadata_cache(train_dataset)
+    test_dataset = load_reidentification_test_dataset()
+    test_metadata_cache = build_metadata_cache(test_dataset)
+
+    feasibility_config = load_feasibility_config()
+    if not feasibility_config:
+        print("Failed to load feasibility config")
+        return None
+
+    feasible_individuals = feasibility_config.get('valid_individuals', [])
+    promoted_individuals = feasibility_config.get('promoted_to_rare', [])
+    excluded_individuals = feasibility_config.get('excluded_entirely', [])
+
+    if len(feasible_individuals) < MIN_P:
+        print(f"Not enough individuals ({len(feasible_individuals)}) for PK sampling (need {MIN_P})")
+        return None
+
+    print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
+
+    # Create gallery from TRAIN split (quality-filtered, sampled by seed)
+    id_to_indices = train_metadata_cache['id_to_indices']
+    individual_to_class = {ind: i for i, ind in enumerate(sorted(feasible_individuals))}
+
+    all_gallery_indices = []
+    gallery_info = {}
+
+    for ind_id in feasible_individuals:
+        all_ind_indices = list(id_to_indices.get(ind_id, []))
+        eligible_pool = filter_training_pool_by_quality(train_metadata_cache, all_ind_indices, threshold)
+
+        if len(eligible_pool) == 0:
+            print(f"  WARNING: {ind_id} has NO samples above threshold {threshold}")
+            sampled = []
+        elif len(eligible_pool) < gallery_size:
+            print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible (need {gallery_size}), using all")
+            sampled = eligible_pool
+        else:
+            random.shuffle(eligible_pool)
+            sampled = eligible_pool[:gallery_size]
+
+        all_gallery_indices.extend(sampled)
+        gallery_info[ind_id] = {'sampled': len(sampled), 'eligible': len(eligible_pool)}
+        print(f"  {ind_id}: {len(sampled)}/{len(eligible_pool)} gallery")
+
+    gallery_dataset = train_dataset.select(all_gallery_indices)
+
+    # Query (known): ALL test images for gallery-eligible individuals
+    test_id_to_indices = test_metadata_cache['id_to_indices']
+    all_query_indices = []
+    query_info = {}
+    for ind_id in feasible_individuals:
+        test_indices = test_id_to_indices.get(ind_id, [])
+        all_query_indices.extend(test_indices)
+        query_info[ind_id] = len(test_indices)
+
+    query_dataset = test_dataset.select(all_query_indices)
+    print(f"\nTotal: {len(all_gallery_indices)} gallery, {len(all_query_indices)} query (known)")
+
+    # Create model
+    device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
+    model, emb_dim = create_arcface_model(model_name, embedding_dim=best_embedding_dim,
+                                           image_size=best_size, device=device)
+    print(f"Using device: {device}")
+
+    # Create transforms and training dataset
+    transform = create_transform_for_model(model_name, size=best_size)
+    train_torch_dataset = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
+
+    effective_k = min(BATCH_K, gallery_size)
+    try:
+        pk_sampler = PKBatchSampler(
+            labels=train_torch_dataset.get_labels(),
+            p=min(MIN_P, len(feasible_individuals)),
+            k=effective_k,
+            drop_last=True
+        )
+    except ValueError as e:
+        print(f"Cannot create PK sampler: {e}")
+        return None
+
+    def collate_fn(batch):
+        images = torch.stack([item[0] for item in batch])
+        labels = torch.tensor([item[1] for item in batch])
+        quality = torch.tensor([item[2] for item in batch])
+        return images, labels, quality
+
+    train_loader = DataLoader(
+        train_torch_dataset,
+        batch_sampler=pk_sampler,
+        num_workers=0,
+        collate_fn=collate_fn
+    )
+
+    # Create ArcFace loss
+    criterion = ArcFaceLoss(
+        num_classes=len(feasible_individuals),
+        embedding_size=emb_dim,
+        margin=ARCFACE_MARGIN,
+        scale=ARCFACE_SCALE
+    ).to(device)
+
+    optimizer = torch.optim.AdamW(
+        list(model.get_trainable_parameters()) + list(criterion.parameters()),
+        lr=best_lr
+    )
+
+    # Train for exactly best_epoch epochs
+    print(f"\nTraining for {best_epoch} epochs...")
+    start_time = time.time()
+    epoch_history = []
+
+    for epoch in range(best_epoch):
+        train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
+        print(f"Epoch {epoch+1:3d}/{best_epoch}: Loss={train_loss:.4f}")
+        epoch_history.append({'epoch': epoch + 1, 'train_loss': train_loss})
+
+    training_time = time.time() - start_time
+
+    # Evaluate on FULL test split
+    print("\nEvaluating on test split...")
+    model.eval()
+
+    # Gallery embeddings
+    gallery_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
+    gallery_loader = DataLoader(gallery_torch, batch_size=32, shuffle=False, num_workers=0)
+
+    gallery_embeddings = []
+    gallery_labels = []
+    with torch.no_grad():
+        for images, labels, _ in gallery_loader:
+            images = images.to(device)
+            gallery_embeddings.append(model(images))
+            gallery_labels.extend(labels.tolist())
+    gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
+    gallery_labels = torch.tensor(gallery_labels).to(device)
+
+    # Query embeddings (known individuals from test split)
+    query_torch = ArcFaceDataset(query_dataset, transform, individual_to_class)
+    query_loader = DataLoader(query_torch, batch_size=32, shuffle=False, num_workers=0)
+
+    query_embeddings = []
+    query_labels = []
+    query_quality = []
+    with torch.no_grad():
+        for images, labels, quality in query_loader:
+            images = images.to(device)
+            query_embeddings.append(model(images))
+            query_labels.extend(labels.tolist())
+            query_quality.extend(quality.tolist())
+    query_embeddings = torch.cat(query_embeddings, dim=0)
+    query_labels = torch.tensor(query_labels).to(device)
+    query_quality = np.array(query_quality)
+    query_labels_np = query_labels.cpu().numpy()
+
+    # Rare/Unknown from TEST split only
+    rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
+        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals
+    )
+
+    if rare_indices:
+        rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
+            model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
+            transform, device, embedding_dim=emb_dim
+        )
+        rare_emb = rare_emb.to(device)
+    else:
+        rare_emb = torch.empty(0, emb_dim).to(device)
+        rare_quality_vals = np.array([])
+        rare_labels_arr = np.array([])
+
+    # Compute cosine similarity matrices
+    scores_known = compute_cosine_similarity(query_embeddings, gallery_embeddings)
+
+    if len(rare_emb) > 0:
+        scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
+    else:
+        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
+
+    scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
+
+    # R@1 (macro-averaged per individual) at each quality threshold
+    query_quality_metrics = {}
+    for thresh in QUERY_QUALITY_THRESHOLDS:
+        mask = query_quality >= thresh
+        count = int(mask.sum())
+        if count == 0:
+            query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
+            continue
+
+        mask_indices = np.where(mask)[0]
+        pred_indices = scores_known[mask_indices].argmax(dim=1)
+        pred_labels = gallery_labels[pred_indices].cpu().numpy()
+        true_labels = query_labels_np[mask_indices]
+        correct = (pred_labels == true_labels)
+
+        individual_correct = {}
+        individual_total = {}
+        for label in np.unique(true_labels):
+            label_mask = (true_labels == label)
+            individual_total[label] = int(label_mask.sum())
+            individual_correct[label] = int(correct[label_mask].sum())
+
+        per_ind_recall = [
+            individual_correct.get(label, 0) / individual_total[label]
+            for label in individual_total
+        ]
+        recall = np.mean(per_ind_recall) if per_ind_recall else 0.0
+        query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
+
+    # LOO threshold calibration on gallery
+    scores_gal_gal.fill_diagonal_(-1.0)
+    unique_individuals = gallery_labels.unique().tolist()
+    fold_results = []
+    thresholds = np.linspace(0.0, 1.0, 101)
+    thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
+
+    for held_out_ind in unique_individuals:
+        gallery_mask = (gallery_labels != held_out_ind)
+        unknown_mask = (gallery_labels == held_out_ind)
+        unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
+
+        sub_scores = scores_gal_gal[gallery_mask][:, gallery_mask]
+        max_scores_sub = sub_scores.max(dim=1).values
+        sub_labels = gallery_labels[gallery_mask]
+
+        accepted_matrix = max_scores_sub.unsqueeze(0) >= thresholds_t.unsqueeze(1)
+        unique_sub_labels = sub_labels.unique()
+        per_ind_rates = torch.zeros(len(unique_sub_labels), len(thresholds), device=gallery_labels.device)
+        for j, ind_label in enumerate(unique_sub_labels):
+            ind_mask = (sub_labels == ind_label)
+            per_ind_rates[j] = accepted_matrix[:, ind_mask].float().mean(dim=1)
+
+        known_accept_all = per_ind_rates.mean(dim=0)
+
+        if len(unknown_max_scores) > 0:
+            unknown_reject_all = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
+        else:
+            unknown_reject_all = torch.zeros(len(thresholds), device=gallery_labels.device)
+
+        ba_all = (known_accept_all + unknown_reject_all) / 2
+        best_idx = ba_all.argmax().item()
+
+        fold_results.append({
+            'individual': held_out_ind,
+            'threshold': thresholds[best_idx],
+            'ba': ba_all[best_idx].item(),
+            'known_accept': known_accept_all[best_idx].item(),
+            'unknown_reject': unknown_reject_all[best_idx].item(),
+        })
+
+    optimal_thresh = np.mean([f['threshold'] for f in fold_results])
+
+    # Open-set BA using LOO-calibrated threshold
+    balanced_metrics_by_quality = compute_open_set_metrics_cosine(
+        known_query_labels=query_labels,
+        known_query_quality=query_quality,
+        known_scores=scores_known,
+        unknown_query_labels=rare_labels_arr,
+        unknown_query_quality=rare_quality_vals,
+        unknown_scores=scores_unknown,
+        score_threshold=optimal_thresh,
+        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
+        gallery_labels=gallery_labels
+    )
+
+    # Print results
+    r1_q0 = query_quality_metrics['q>=0.0']['recall_at_1']
+    ba_q0 = balanced_metrics_by_quality.get('q>=0.0', {}).get('balanced_accuracy', 0.0)
+    hm = 2 * r1_q0 * ba_q0 / (r1_q0 + ba_q0) if (r1_q0 + ba_q0) > 0 else 0.0
+
+    print(f"\nTest Results (seed={seed}):")
+    for q_thresh in QUERY_QUALITY_THRESHOLDS:
+        q_key = f"q>={q_thresh}"
+        r1 = query_quality_metrics[q_key]['recall_at_1']
+        cnt = query_quality_metrics[q_key]['count']
+        ba_data = balanced_metrics_by_quality.get(q_key, {})
+        ba = ba_data.get('balanced_accuracy', 0.0)
+        kar = ba_data.get('known_accept_rate', 0.0)
+        urr = ba_data.get('unknown_reject_rate', 0.0)
+        n_k = ba_data.get('n_known_individuals', 0)
+        n_u = ba_data.get('n_unknown_individuals', 0)
+        print(f"  {q_key}: R@1={r1:.4f} (n={cnt:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
+    print(f"  Harmonic mean (q>=0.0): {hm:.4f}")
+    print(f"  LOO threshold: {optimal_thresh:.4f}")
+
+    # Save results
+    result = {
+        'config': {
+            'seed': seed,
+            'criterion': criterion,
+            'threshold': threshold,
+            'gallery_size': gallery_size,
+            'best_epoch': best_epoch,
+            'hygiene_score': best_config['score'],
+            'learning_rate': best_lr,
+            'image_size': best_size,
+            'embedding_dim': best_embedding_dim,
+            'loss': 'ArcFace',
+            'arcface_margin': ARCFACE_MARGIN,
+            'arcface_scale': ARCFACE_SCALE,
+            'backbone': model_config['backbone_label'],
+            'score_normalization': 'Raw Cosine',
+        },
+        'dataset': {
+            'individuals': feasible_individuals,
+            'gallery_info': gallery_info,
+            'query_info': query_info,
+            'total_gallery': len(all_gallery_indices),
+            'total_query_known': len(all_query_indices),
+            'total_query_unknown': len(rare_indices) if rare_indices else 0,
+            'n_unknown_individuals': len(set(rare_labels_str)) if rare_labels_str else 0,
+            'query_source': 'hf_test_split',
+            'unknown_source': 'hf_test_split',
+        },
+        'results': {
+            'query_quality_metrics': query_quality_metrics,
+            'open_set_metrics': {
+                'threshold_calibration': {
+                    'method': 'individual_loo_ba',
+                    'threshold': optimal_thresh,
+                    'threshold_std': np.std([f['threshold'] for f in fold_results]),
+                    'n_folds': len(fold_results),
+                    'per_fold': fold_results,
+                },
+                'by_quality': balanced_metrics_by_quality,
+            },
+            'recall_at_1_q0': r1_q0,
+            'balanced_accuracy_q0': ba_q0,
+            'harmonic_mean_q0': hm,
+        },
+        'epoch_history': epoch_history,
+        'metadata': {
+            'created_at': datetime.now().isoformat(),
+            'training_time_seconds': training_time,
+            'job_idx': args.idx,
+        }
+    }
+
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(result, f, indent=2, default=lambda o: float(o) if isinstance(o, np.floating) else int(o) if isinstance(o, np.integer) else o)
+
+    print(f"\nSaved results to: {output_path}")
+    return filename
+
+
+# ============================================================================
 # CLI entry point
 # ============================================================================
 
@@ -1534,6 +2000,13 @@ if __name__ == "__main__":
     sub_emb.add_argument("--image-size", type=int, required=True, help="Fixed image size")
     sub_emb.add_argument("--epochs", type=int, default=50)
     sub_emb.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
+
+    # test_eval subcommand
+    sub_test = subparsers.add_parser("test_eval", help="Final test evaluation")
+    add_common_args(sub_test)
+    sub_test.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
+    sub_test.add_argument("--criterion", type=str, default="harmonic_mean",
+                           choices=["recall", "balanced_accuracy", "harmonic_mean"])
 
     args = parser.parse_args()
     model_name = args.model
@@ -1579,7 +2052,7 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
 
-        print(f"\nJob {args.idx} completed!")
+        print(f"\nJob {args.idx} (opt_lr) completed!")
 
     elif args.command == "opt_embedding_dim":
         dims = args.values
@@ -1617,4 +2090,28 @@ if __name__ == "__main__":
             import traceback
             traceback.print_exc()
 
-        print(f"\nJob {args.idx} completed!")
+        print(f"\nJob {args.idx} (opt_embedding_dim) completed!")
+
+    elif args.command == "test_eval":
+        seeds = args.seeds
+
+        print("=" * 80)
+        print(f"Final Test Evaluation - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print(f"  {len(seeds)} seeds, criterion={args.criterion}")
+        print("=" * 80)
+
+        if args.idx >= len(seeds):
+            print(f"Job {args.idx} has no work (only {len(seeds)} seeds)")
+            sys.exit(0)
+
+        seed = seeds[args.idx]
+        print(f"\nSeed: {seed}")
+
+        try:
+            run_final_test(model_name, args, seed, criterion=args.criterion)
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print(f"\nJob {args.idx} (test_eval) completed!")
