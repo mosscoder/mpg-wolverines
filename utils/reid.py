@@ -1530,14 +1530,11 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
         for q_thresh in q_thresholds_to_search:
             q_key = f"q>={q_thresh}"
 
-            # For each seed, find the best epoch by criterion at this q_threshold
-            per_seed_best = []
-
+            # Collect per-epoch scores across seeds, then pick the epoch
+            # with the highest cross-seed mean (not each seed's individual peak).
+            histories = []
             for r in group_results:
-                best_epoch_score = -1.0
-                best_epoch_num = 0
-                best_epoch_cosine_thresh = None
-
+                epoch_scores = []
                 for entry in r['epoch_history']:
                     if criterion == 'recall':
                         score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
@@ -1545,36 +1542,41 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                         score = entry.get('open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy', 0.0)
                     else:
                         raise ValueError(f"Unknown criterion: {criterion}")
+                    epoch_scores.append(score)
+                histories.append(epoch_scores)
 
-                    if score > best_epoch_score:
-                        best_epoch_score = score
-                        best_epoch_num = entry['epoch']
-                        best_epoch_cosine_thresh = entry.get('open_set', {}).get(
-                            'threshold_calibration', {}).get('threshold')
+            # Average across seeds at each epoch, pick best epoch
+            n_epochs = len(histories[0])
+            best_epoch_idx = 0
+            best_mean = -1.0
+            for i in range(n_epochs):
+                epoch_mean = np.mean([h[i] for h in histories])
+                if epoch_mean > best_mean:
+                    best_mean = epoch_mean
+                    best_epoch_idx = i
 
-                per_seed_best.append({
-                    'score': best_epoch_score,
-                    'epoch': best_epoch_num,
-                    'cosine_threshold': best_epoch_cosine_thresh,
-                })
+            best_epoch_num = best_epoch_idx + 1  # 1-indexed
 
-            mean_score = np.mean([s['score'] for s in per_seed_best])
-            median_epoch = int(np.median([s['epoch'] for s in per_seed_best]))
-            cosine_thresholds = [s['cosine_threshold'] for s in per_seed_best
-                                 if s['cosine_threshold'] is not None]
+            # Extract cosine threshold at best epoch (for open-set tasks)
+            cosine_thresholds = []
+            for r in group_results:
+                entry = r['epoch_history'][best_epoch_idx]
+                ct = entry.get('open_set', {}).get(
+                    'threshold_calibration', {}).get('threshold')
+                if ct is not None:
+                    cosine_thresholds.append(ct)
             mean_cosine_thresh = float(np.mean(cosine_thresholds)) if cosine_thresholds else None
 
-            if mean_score > best_overall_score:
-                best_overall_score = mean_score
+            if best_mean > best_overall_score:
+                best_overall_score = best_mean
                 best_config = {
                     'threshold': threshold,
                     'gallery_size': gallery_size,
                     'query_quality_threshold': q_thresh,
-                    'best_epoch': median_epoch,
-                    'score': float(mean_score),
+                    'best_epoch': best_epoch_num,
+                    'score': float(best_mean),
                     'criterion': criterion,
                     'n_seeds': len(group_results),
-                    'per_seed_epochs': [s['epoch'] for s in per_seed_best],
                     'cosine_threshold': mean_cosine_thresh,
                 }
 
