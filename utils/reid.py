@@ -47,8 +47,8 @@ MODEL_CONFIGS = {
         "factory": "create_megadescriptor_arcface_model",
         "native_size": 384,
         "patch_size": 16,
-        "norm_mean": [0.485, 0.456, 0.406],
-        "norm_std": [0.229, 0.224, 0.225],
+        "norm_mean": [0.5, 0.5, 0.5],
+        "norm_std": [0.5, 0.5, 0.5],
         "backbone_label": "Frozen MegaDescriptor-L-384",
         "experiment_dir": "reid_openset/megadescriptor",
         "default_lr": 0.0005,
@@ -1566,34 +1566,45 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
     return best_config
 
 
-def run_final_test(model_name, args, seed, criterion='harmonic_mean', filter_mode='filtered'):
+# Each task selects its own optimal (threshold, gallery_size, epoch) from the
+# hygiene sweep using the criterion and threshold constraint that match its goal.
+TEST_TASKS = {
+    'closed_unfiltered': {'criterion': 'recall',             'threshold_filter': 0.0},
+    'closed_filtered':   {'criterion': 'recall',             'threshold_filter': None},
+    'open_unfiltered':   {'criterion': 'balanced_accuracy',  'threshold_filter': 0.0},
+    'open_filtered':     {'criterion': 'balanced_accuracy',  'threshold_filter': None},
+}
+
+
+def run_final_test(model_name, args, seed, task_name):
     """
     Final test evaluation using the best operating point from hygiene sweep.
 
-    - Gallery: train split, filtered by optimal threshold, sampled to gallery_size (seed varies)
-    - Query (known): test split images for gallery-eligible individuals
-    - Query (unknown): test split images for non-gallery individuals
-    - Train for exactly best_epoch epochs
-    - Evaluate R@1 and BA on the held-out test split
+    Each task selects its own optimal hyperparameters:
+      - closed_unfiltered: best R@1 among threshold=0.0 configs
+      - closed_filtered:   best R@1 from the full sweep
+      - open_unfiltered:   best BA among threshold=0.0 configs
+      - open_filtered:     best BA from the full sweep
 
     Args:
         model_name: Key in MODEL_CONFIGS
         args: Argparse namespace
         seed: Random seed for gallery sampling and training
-        criterion: Criterion used to select best hygiene config
-        filter_mode: 'filtered' (best from full sweep) or 'unfiltered' (best among threshold=0.0 only)
+        task_name: Key in TEST_TASKS
     """
     from utils.arcface import ArcFaceLoss, PKBatchSampler
     from utils.training import check_result_exists
 
+    task_cfg = TEST_TASKS[task_name]
+    criterion = task_cfg['criterion']
+    threshold_filter = task_cfg['threshold_filter']
+
     model_config = MODEL_CONFIGS[model_name]
     experiment_dir = model_config['experiment_dir']
 
-    # Load best operating point
-    if filter_mode == 'unfiltered':
-        best_config = load_best_hygiene_config(model_name, criterion=criterion, threshold_filter=0.0)
-    else:
-        best_config = load_best_hygiene_config(model_name, criterion=criterion)
+    # Load best operating point for this task
+    best_config = load_best_hygiene_config(model_name, criterion=criterion,
+                                           threshold_filter=threshold_filter)
     threshold = best_config['threshold']
     gallery_size = best_config['gallery_size']
     best_epoch = best_config['best_epoch']
@@ -1602,7 +1613,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean', filter_mod
 
     # Output
     output_dir = os.path.join(experiment_dir, 'results', 'test')
-    filename = f"test_seed={seed}_{filter_mode}.json"
+    filename = f"test_seed={seed}_{task_name}.json"
     output_path = os.path.join(output_dir, filename)
 
     if check_result_exists(output_path) and not args.overwrite:
@@ -1610,8 +1621,8 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean', filter_mod
         return None
 
     print(f"\n{'='*60}")
-    print(f"Final Test Evaluation: seed={seed}, criterion={criterion}, mode={filter_mode}")
-    print(f"  threshold={threshold}, gallery_size={gallery_size}, epochs={best_epoch}")
+    print(f"Final Test Evaluation: seed={seed}, task={task_name}")
+    print(f"  criterion={criterion}, threshold={threshold}, gallery_size={gallery_size}, epochs={best_epoch}")
     print(f"{'='*60}")
 
     # Load best hyperparameters
@@ -1911,8 +1922,9 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean', filter_mod
     result = {
         'config': {
             'seed': seed,
+            'task': task_name,
             'criterion': criterion,
-            'filter_mode': filter_mode,
+            'threshold_filter': threshold_filter,
             'threshold': threshold,
             'gallery_size': gallery_size,
             'best_epoch': best_epoch,
@@ -2017,8 +2029,6 @@ if __name__ == "__main__":
     sub_test = subparsers.add_parser("test_eval", help="Final test evaluation")
     add_common_args(sub_test)
     sub_test.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
-    sub_test.add_argument("--criterion", type=str, default="harmonic_mean",
-                           choices=["recall", "balanced_accuracy", "harmonic_mean"])
 
     args = parser.parse_args()
     model_name = args.model
@@ -2106,11 +2116,12 @@ if __name__ == "__main__":
 
     elif args.command == "test_eval":
         seeds = args.seeds
+        task_names = list(TEST_TASKS.keys())
 
         print("=" * 80)
         print(f"Final Test Evaluation - {config['backbone_label']} Re-ID - Job {args.idx}")
-        print(f"  {len(seeds)} seeds, criterion={args.criterion}")
-        print(f"  Running both filtered and unfiltered modes per seed")
+        print(f"  {len(seeds)} seeds x {len(task_names)} tasks = {len(seeds) * len(task_names)} runs")
+        print(f"  Tasks: {', '.join(task_names)}")
         print("=" * 80)
 
         if args.idx >= len(seeds):
@@ -2120,11 +2131,11 @@ if __name__ == "__main__":
         seed = seeds[args.idx]
         print(f"\nSeed: {seed}")
 
-        for mode in ['filtered', 'unfiltered']:
+        for task_name in task_names:
             try:
-                run_final_test(model_name, args, seed, criterion=args.criterion, filter_mode=mode)
+                run_final_test(model_name, args, seed, task_name=task_name)
             except Exception as e:
-                print(f"Error ({mode}): {e}")
+                print(f"Error ({task_name}): {e}")
                 import traceback
                 traceback.print_exc()
 
