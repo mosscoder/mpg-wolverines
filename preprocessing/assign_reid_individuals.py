@@ -249,16 +249,26 @@ def main():
         t = train_stats.get(ind_id, {})
         s = test_stats.get(ind_id, {})
 
-        # Compute val stats from validation indices for qualified individuals
+        # Compute val stats and subtract from train for qualified individuals
         if ind_id in validation_indices:
             val_idx = validation_indices[ind_id]['indices']
             val_scores = train_scores[val_idx]
             val_ymdh = train_ymdh[val_idx]
+            val_images = len(val_idx)
+            val_above_025 = int((val_scores > 0.25).sum())
+            val_above_thresh = int((val_scores > args.gallery_quality_threshold).sum())
+            val_events = int(len(np.unique(val_ymdh)))
             val_block = {
-                'images': len(val_idx),
-                'images_above_0.25': int((val_scores > 0.25).sum()),
-                f'images_above_{args.gallery_quality_threshold}': int((val_scores > args.gallery_quality_threshold).sum()),
-                'events': int(len(np.unique(val_ymdh))),
+                'images': val_images,
+                'images_above_0.25': val_above_025,
+                f'images_above_{args.gallery_quality_threshold}': val_above_thresh,
+                'events': val_events,
+            }
+            train_block = {
+                'images': t.get('total', 0) - val_images,
+                'images_above_0.25': t.get('above_025', 0) - val_above_025,
+                f'images_above_{args.gallery_quality_threshold}': t.get('above_threshold', 0) - val_above_thresh,
+                'events': t.get('events', 0),
             }
         else:
             val_block = {
@@ -267,14 +277,15 @@ def main():
                 f'images_above_{args.gallery_quality_threshold}': 0,
                 'events': 0,
             }
-
-        individual_stats[ind_id] = {
-            'train': {
+            train_block = {
                 'images': t.get('total', 0),
                 'images_above_0.25': t.get('above_025', 0),
                 f'images_above_{args.gallery_quality_threshold}': t.get('above_threshold', 0),
                 'events': t.get('events', 0),
-            },
+            }
+
+        individual_stats[ind_id] = {
+            'train': train_block,
             'val': val_block,
             'test': {
                 'images': s.get('total', 0),

@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=test_eval_MD
-#SBATCH --partition=preempt
-#SBATCH --requeue
+#SBATCH --partition=general
 #SBATCH --array=0-7
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
@@ -44,7 +43,7 @@ echo "========================================"
 # Run final test evaluation
 python -u -m utils.reid test_eval --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/megadescriptor/results \
+    --output_dir reid_openset/megadescriptor/results/test \
     --device gpu
 
 # Print completion info

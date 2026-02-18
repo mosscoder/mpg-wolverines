@@ -1475,7 +1475,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 # Final test evaluation
 # ============================================================================
 
-def load_best_hygiene_config(model_name, criterion='harmonic_mean'):
+def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_filter=None):
     """
     Read all hygiene sweep results for a backbone and select the best operating point.
 
@@ -1485,6 +1485,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean'):
     Args:
         model_name: Key in MODEL_CONFIGS
         criterion: 'recall', 'balanced_accuracy', or 'harmonic_mean'
+        threshold_filter: If set, only consider groups with this threshold value
 
     Returns:
         dict with {threshold, gallery_size, best_epoch, score}
@@ -1507,6 +1508,12 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean'):
     for r in results:
         key = (r['config']['threshold'], r['config']['gallery_size'])
         groups[key].append(r)
+
+    # Optionally filter to a specific threshold
+    if threshold_filter is not None:
+        groups = {k: v for k, v in groups.items() if k[0] == threshold_filter}
+        if not groups:
+            raise ValueError(f"No hygiene results with threshold={threshold_filter} in {results_dir}")
 
     best_overall_score = -1.0
     best_config = None
@@ -1559,7 +1566,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean'):
     return best_config
 
 
-def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
+def run_final_test(model_name, args, seed, criterion='harmonic_mean', filter_mode='filtered'):
     """
     Final test evaluation using the best operating point from hygiene sweep.
 
@@ -1574,6 +1581,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
         args: Argparse namespace
         seed: Random seed for gallery sampling and training
         criterion: Criterion used to select best hygiene config
+        filter_mode: 'filtered' (best from full sweep) or 'unfiltered' (best among threshold=0.0 only)
     """
     from utils.arcface import ArcFaceLoss, PKBatchSampler
     from utils.training import check_result_exists
@@ -1582,7 +1590,10 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
     experiment_dir = model_config['experiment_dir']
 
     # Load best operating point
-    best_config = load_best_hygiene_config(model_name, criterion=criterion)
+    if filter_mode == 'unfiltered':
+        best_config = load_best_hygiene_config(model_name, criterion=criterion, threshold_filter=0.0)
+    else:
+        best_config = load_best_hygiene_config(model_name, criterion=criterion)
     threshold = best_config['threshold']
     gallery_size = best_config['gallery_size']
     best_epoch = best_config['best_epoch']
@@ -1591,7 +1602,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
 
     # Output
     output_dir = os.path.join(experiment_dir, 'results', 'test')
-    filename = f"test_seed={seed}.json"
+    filename = f"test_seed={seed}_{filter_mode}.json"
     output_path = os.path.join(output_dir, filename)
 
     if check_result_exists(output_path) and not args.overwrite:
@@ -1599,7 +1610,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
         return None
 
     print(f"\n{'='*60}")
-    print(f"Final Test Evaluation: seed={seed}, criterion={criterion}")
+    print(f"Final Test Evaluation: seed={seed}, criterion={criterion}, mode={filter_mode}")
     print(f"  threshold={threshold}, gallery_size={gallery_size}, epochs={best_epoch}")
     print(f"{'='*60}")
 
@@ -1901,6 +1912,7 @@ def run_final_test(model_name, args, seed, criterion='harmonic_mean'):
         'config': {
             'seed': seed,
             'criterion': criterion,
+            'filter_mode': filter_mode,
             'threshold': threshold,
             'gallery_size': gallery_size,
             'best_epoch': best_epoch,
@@ -2098,6 +2110,7 @@ if __name__ == "__main__":
         print("=" * 80)
         print(f"Final Test Evaluation - {config['backbone_label']} Re-ID - Job {args.idx}")
         print(f"  {len(seeds)} seeds, criterion={args.criterion}")
+        print(f"  Running both filtered and unfiltered modes per seed")
         print("=" * 80)
 
         if args.idx >= len(seeds):
@@ -2107,11 +2120,12 @@ if __name__ == "__main__":
         seed = seeds[args.idx]
         print(f"\nSeed: {seed}")
 
-        try:
-            run_final_test(model_name, args, seed, criterion=args.criterion)
-        except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
+        for mode in ['filtered', 'unfiltered']:
+            try:
+                run_final_test(model_name, args, seed, criterion=args.criterion, filter_mode=mode)
+            except Exception as e:
+                print(f"Error ({mode}): {e}")
+                import traceback
+                traceback.print_exc()
 
         print(f"\nJob {args.idx} (test_eval) completed!")
