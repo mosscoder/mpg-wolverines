@@ -1518,49 +1518,70 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
     best_overall_score = -1.0
     best_config = None
 
+    # For unfiltered tasks (threshold_filter=0.0), only evaluate at q>=0.0.
+    # For filtered tasks, search across all query quality thresholds to find
+    # the best (threshold, gallery_size, query_q_threshold, epoch) combo.
+    if threshold_filter is not None and threshold_filter == 0.0:
+        q_thresholds_to_search = [0.0]
+    else:
+        q_thresholds_to_search = QUERY_QUALITY_THRESHOLDS
+
     for (threshold, gallery_size), group_results in groups.items():
-        # For each seed, find the best epoch by criterion
-        per_seed_best = []
+        for q_thresh in q_thresholds_to_search:
+            q_key = f"q>={q_thresh}"
 
-        for r in group_results:
-            best_epoch_score = -1.0
-            best_epoch_num = 0
+            # For each seed, find the best epoch by criterion at this q_threshold
+            per_seed_best = []
 
-            for entry in r['epoch_history']:
-                r1 = entry['query_quality_metrics']['q>=0.0']['recall_at_1']
-                ba = entry.get('open_set', {}).get('by_quality', {}).get('q>=0.0', {}).get('balanced_accuracy', 0.0)
+            for r in group_results:
+                best_epoch_score = -1.0
+                best_epoch_num = 0
+                best_epoch_cosine_thresh = None
 
-                if criterion == 'recall':
-                    score = r1
-                elif criterion == 'balanced_accuracy':
-                    score = ba
-                else:  # harmonic_mean
-                    score = 2 * r1 * ba / (r1 + ba) if (r1 + ba) > 0 else 0.0
+                for entry in r['epoch_history']:
+                    if criterion == 'recall':
+                        score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
+                    elif criterion == 'balanced_accuracy':
+                        score = entry.get('open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy', 0.0)
+                    else:
+                        raise ValueError(f"Unknown criterion: {criterion}")
 
-                if score > best_epoch_score:
-                    best_epoch_score = score
-                    best_epoch_num = entry['epoch']
+                    if score > best_epoch_score:
+                        best_epoch_score = score
+                        best_epoch_num = entry['epoch']
+                        best_epoch_cosine_thresh = entry.get('open_set', {}).get(
+                            'threshold_calibration', {}).get('threshold')
 
-            per_seed_best.append({'score': best_epoch_score, 'epoch': best_epoch_num})
+                per_seed_best.append({
+                    'score': best_epoch_score,
+                    'epoch': best_epoch_num,
+                    'cosine_threshold': best_epoch_cosine_thresh,
+                })
 
-        mean_score = np.mean([s['score'] for s in per_seed_best])
-        # Use median epoch as representative
-        median_epoch = int(np.median([s['epoch'] for s in per_seed_best]))
+            mean_score = np.mean([s['score'] for s in per_seed_best])
+            median_epoch = int(np.median([s['epoch'] for s in per_seed_best]))
+            cosine_thresholds = [s['cosine_threshold'] for s in per_seed_best
+                                 if s['cosine_threshold'] is not None]
+            mean_cosine_thresh = float(np.mean(cosine_thresholds)) if cosine_thresholds else None
 
-        if mean_score > best_overall_score:
-            best_overall_score = mean_score
-            best_config = {
-                'threshold': threshold,
-                'gallery_size': gallery_size,
-                'best_epoch': median_epoch,
-                'score': float(mean_score),
-                'criterion': criterion,
-                'n_seeds': len(group_results),
-                'per_seed_epochs': [s['epoch'] for s in per_seed_best],
-            }
+            if mean_score > best_overall_score:
+                best_overall_score = mean_score
+                best_config = {
+                    'threshold': threshold,
+                    'gallery_size': gallery_size,
+                    'query_quality_threshold': q_thresh,
+                    'best_epoch': median_epoch,
+                    'score': float(mean_score),
+                    'criterion': criterion,
+                    'n_seeds': len(group_results),
+                    'per_seed_epochs': [s['epoch'] for s in per_seed_best],
+                    'cosine_threshold': mean_cosine_thresh,
+                }
 
     print(f"Best hygiene config ({criterion}): threshold={best_config['threshold']}, "
-          f"gallery_size={best_config['gallery_size']}, epoch={best_config['best_epoch']}, "
+          f"gallery_size={best_config['gallery_size']}, "
+          f"query_q>={best_config['query_quality_threshold']}, "
+          f"epoch={best_config['best_epoch']}, "
           f"score={best_config['score']:.4f} (n={best_config['n_seeds']} seeds)")
 
     return best_config
@@ -1608,6 +1629,7 @@ def run_final_test(model_name, args, seed, task_name):
     threshold = best_config['threshold']
     gallery_size = best_config['gallery_size']
     best_epoch = best_config['best_epoch']
+    query_quality_threshold = best_config['query_quality_threshold']
 
     set_all_seeds(seed)
 
@@ -1622,7 +1644,8 @@ def run_final_test(model_name, args, seed, task_name):
 
     print(f"\n{'='*60}")
     print(f"Final Test Evaluation: seed={seed}, task={task_name}")
-    print(f"  criterion={criterion}, threshold={threshold}, gallery_size={gallery_size}, epochs={best_epoch}")
+    print(f"  criterion={criterion}, threshold={threshold}, gallery_size={gallery_size}, "
+          f"query_q>={query_quality_threshold}, epochs={best_epoch}")
     print(f"{'='*60}")
 
     # Load best hyperparameters
@@ -1725,7 +1748,7 @@ def run_final_test(model_name, args, seed, task_name):
     )
 
     # Create ArcFace loss
-    criterion = ArcFaceLoss(
+    arcface_loss = ArcFaceLoss(
         num_classes=len(feasible_individuals),
         embedding_size=emb_dim,
         margin=ARCFACE_MARGIN,
@@ -1733,7 +1756,7 @@ def run_final_test(model_name, args, seed, task_name):
     ).to(device)
 
     optimizer = torch.optim.AdamW(
-        list(model.get_trainable_parameters()) + list(criterion.parameters()),
+        list(model.get_trainable_parameters()) + list(arcface_loss.parameters()),
         lr=best_lr
     )
 
@@ -1743,7 +1766,7 @@ def run_final_test(model_name, args, seed, task_name):
     epoch_history = []
 
     for epoch in range(best_epoch):
-        train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
+        train_loss = train_epoch_arcface(model, train_loader, optimizer, arcface_loss, device)
         print(f"Epoch {epoch+1:3d}/{best_epoch}: Loss={train_loss:.4f}")
         epoch_history.append({'epoch': epoch + 1, 'train_loss': train_loss})
 
@@ -1785,44 +1808,45 @@ def run_final_test(model_name, args, seed, task_name):
     query_quality = np.array(query_quality)
     query_labels_np = query_labels.cpu().numpy()
 
-    # Rare/Unknown from TEST split only
-    rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
-        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
-        promoted_individuals=promoted_individuals,
-        excluded_individuals=excluded_individuals
-    )
-
-    if rare_indices:
-        rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
-            model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
-            transform, device, embedding_dim=emb_dim
-        )
-        rare_emb = rare_emb.to(device)
-    else:
-        rare_emb = torch.empty(0, emb_dim).to(device)
-        rare_quality_vals = np.array([])
-        rare_labels_arr = np.array([])
-
-    # Compute cosine similarity matrices
+    # Compute cosine similarity: query vs gallery
     scores_known = compute_cosine_similarity(query_embeddings, gallery_embeddings)
 
-    if len(rare_emb) > 0:
-        scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
-    else:
-        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
+    # Shared config for result JSON
+    result_config = {
+        'seed': seed,
+        'task': task_name,
+        'criterion': criterion,
+        'threshold_filter': threshold_filter,
+        'threshold': threshold,
+        'gallery_size': gallery_size,
+        'query_quality_threshold': query_quality_threshold,
+        'best_epoch': best_epoch,
+        'hygiene_score': best_config['score'],
+        'learning_rate': best_lr,
+        'image_size': best_size,
+        'embedding_dim': best_embedding_dim,
+        'loss': 'ArcFace',
+        'arcface_margin': ARCFACE_MARGIN,
+        'arcface_scale': ARCFACE_SCALE,
+        'backbone': model_config['backbone_label'],
+    }
 
-    scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
+    dataset_info = {
+        'individuals': feasible_individuals,
+        'gallery_info': gallery_info,
+        'query_info': query_info,
+        'total_gallery': len(all_gallery_indices),
+        'total_query_known': len(all_query_indices),
+        'query_source': 'hf_test_split',
+    }
 
-    # R@1 (macro-averaged per individual) at each quality threshold
-    query_quality_metrics = {}
-    for thresh in QUERY_QUALITY_THRESHOLDS:
-        mask = query_quality >= thresh
-        count = int(mask.sum())
-        if count == 0:
-            query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": 0.0, "count": 0}
-            continue
+    if criterion == 'recall':
+        # ---- CLOSED-SET: R@1 only ----
+        # Filter queries to those meeting the selected quality threshold
+        q_mask = query_quality >= query_quality_threshold
+        mask_indices = np.where(q_mask)[0]
+        n_query = int(q_mask.sum())
 
-        mask_indices = np.where(mask)[0]
         pred_indices = scores_known[mask_indices].argmax(dim=1)
         pred_labels = gallery_labels[pred_indices].cpu().numpy()
         true_labels = query_labels_np[mask_indices]
@@ -1839,139 +1863,106 @@ def run_final_test(model_name, args, seed, task_name):
             individual_correct.get(label, 0) / individual_total[label]
             for label in individual_total
         ]
-        recall = np.mean(per_ind_recall) if per_ind_recall else 0.0
-        query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
+        recall_at_1 = float(np.mean(per_ind_recall)) if per_ind_recall else 0.0
 
-    # LOO threshold calibration on gallery
-    scores_gal_gal.fill_diagonal_(-1.0)
-    unique_individuals = gallery_labels.unique().tolist()
-    fold_results = []
-    thresholds = np.linspace(0.0, 1.0, 101)
-    thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
+        print(f"\nTest Results (seed={seed}, task={task_name}):")
+        print(f"  R@1 = {recall_at_1:.4f} (n={n_query}, q>={query_quality_threshold})")
 
-    for held_out_ind in unique_individuals:
-        gallery_mask = (gallery_labels != held_out_ind)
-        unknown_mask = (gallery_labels == held_out_ind)
-        unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
+        result = {
+            'config': result_config,
+            'dataset': dataset_info,
+            'results': {
+                'recall_at_1': recall_at_1,
+                'query_quality_threshold': query_quality_threshold,
+                'n_query': n_query,
+                'n_individuals': len(individual_total),
+            },
+            'epoch_history': epoch_history,
+            'metadata': {
+                'created_at': datetime.now().isoformat(),
+                'training_time_seconds': training_time,
+                'job_idx': args.idx,
+            }
+        }
 
-        sub_scores = scores_gal_gal[gallery_mask][:, gallery_mask]
-        max_scores_sub = sub_scores.max(dim=1).values
-        sub_labels = gallery_labels[gallery_mask]
+    else:
+        # ---- OPEN-SET: BA only, cosine threshold from hygiene ----
+        cosine_threshold = best_config['cosine_threshold']
+        if cosine_threshold is None:
+            raise ValueError("No cosine threshold found in hygiene results for open-set task")
 
-        accepted_matrix = max_scores_sub.unsqueeze(0) >= thresholds_t.unsqueeze(1)
-        unique_sub_labels = sub_labels.unique()
-        per_ind_rates = torch.zeros(len(unique_sub_labels), len(thresholds), device=gallery_labels.device)
-        for j, ind_label in enumerate(unique_sub_labels):
-            ind_mask = (sub_labels == ind_label)
-            per_ind_rates[j] = accepted_matrix[:, ind_mask].float().mean(dim=1)
+        # Rare/Unknown from TEST split only
+        rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
+            test_metadata_cache, feasible_individuals, quality_threshold=0.0,
+            promoted_individuals=promoted_individuals,
+            excluded_individuals=excluded_individuals
+        )
 
-        known_accept_all = per_ind_rates.mean(dim=0)
-
-        if len(unknown_max_scores) > 0:
-            unknown_reject_all = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
+        if rare_indices:
+            rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
+                model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
+                transform, device, embedding_dim=emb_dim
+            )
+            rare_emb = rare_emb.to(device)
         else:
-            unknown_reject_all = torch.zeros(len(thresholds), device=gallery_labels.device)
+            rare_emb = torch.empty(0, emb_dim).to(device)
+            rare_quality_vals = np.array([])
+            rare_labels_arr = np.array([])
 
-        ba_all = (known_accept_all + unknown_reject_all) / 2
-        best_idx = ba_all.argmax().item()
+        if len(rare_emb) > 0:
+            scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
+        else:
+            scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-        fold_results.append({
-            'individual': held_out_ind,
-            'threshold': thresholds[best_idx],
-            'ba': ba_all[best_idx].item(),
-            'known_accept': known_accept_all[best_idx].item(),
-            'unknown_reject': unknown_reject_all[best_idx].item(),
-        })
+        # BA using hygiene-calibrated cosine threshold at the selected query quality threshold
+        ba_metrics = compute_open_set_metrics_cosine(
+            known_query_labels=query_labels,
+            known_query_quality=query_quality,
+            known_scores=scores_known,
+            unknown_query_labels=rare_labels_arr,
+            unknown_query_quality=rare_quality_vals,
+            unknown_scores=scores_unknown,
+            score_threshold=cosine_threshold,
+            quality_thresholds=[query_quality_threshold],
+            gallery_labels=gallery_labels
+        )
 
-    optimal_thresh = np.mean([f['threshold'] for f in fold_results])
-
-    # Open-set BA using LOO-calibrated threshold
-    balanced_metrics_by_quality = compute_open_set_metrics_cosine(
-        known_query_labels=query_labels,
-        known_query_quality=query_quality,
-        known_scores=scores_known,
-        unknown_query_labels=rare_labels_arr,
-        unknown_query_quality=rare_quality_vals,
-        unknown_scores=scores_unknown,
-        score_threshold=optimal_thresh,
-        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
-        gallery_labels=gallery_labels
-    )
-
-    # Print results
-    r1_q0 = query_quality_metrics['q>=0.0']['recall_at_1']
-    ba_q0 = balanced_metrics_by_quality.get('q>=0.0', {}).get('balanced_accuracy', 0.0)
-    hm = 2 * r1_q0 * ba_q0 / (r1_q0 + ba_q0) if (r1_q0 + ba_q0) > 0 else 0.0
-
-    print(f"\nTest Results (seed={seed}):")
-    for q_thresh in QUERY_QUALITY_THRESHOLDS:
-        q_key = f"q>={q_thresh}"
-        r1 = query_quality_metrics[q_key]['recall_at_1']
-        cnt = query_quality_metrics[q_key]['count']
-        ba_data = balanced_metrics_by_quality.get(q_key, {})
+        q_key = f"q>={query_quality_threshold}"
+        ba_data = ba_metrics.get(q_key, {})
         ba = ba_data.get('balanced_accuracy', 0.0)
         kar = ba_data.get('known_accept_rate', 0.0)
         urr = ba_data.get('unknown_reject_rate', 0.0)
         n_k = ba_data.get('n_known_individuals', 0)
         n_u = ba_data.get('n_unknown_individuals', 0)
-        print(f"  {q_key}: R@1={r1:.4f} (n={cnt:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
-    print(f"  Harmonic mean (q>=0.0): {hm:.4f}")
-    print(f"  LOO threshold: {optimal_thresh:.4f}")
 
-    # Save results
-    result = {
-        'config': {
-            'seed': seed,
-            'task': task_name,
-            'criterion': criterion,
-            'threshold_filter': threshold_filter,
-            'threshold': threshold,
-            'gallery_size': gallery_size,
-            'best_epoch': best_epoch,
-            'hygiene_score': best_config['score'],
-            'learning_rate': best_lr,
-            'image_size': best_size,
-            'embedding_dim': best_embedding_dim,
-            'loss': 'ArcFace',
-            'arcface_margin': ARCFACE_MARGIN,
-            'arcface_scale': ARCFACE_SCALE,
-            'backbone': model_config['backbone_label'],
-            'score_normalization': 'Raw Cosine',
-        },
-        'dataset': {
-            'individuals': feasible_individuals,
-            'gallery_info': gallery_info,
-            'query_info': query_info,
-            'total_gallery': len(all_gallery_indices),
-            'total_query_known': len(all_query_indices),
+        print(f"\nTest Results (seed={seed}, task={task_name}):")
+        print(f"  Cosine threshold (from hygiene): {cosine_threshold:.4f}")
+        print(f"  {q_key}: BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
+
+        dataset_info.update({
             'total_query_unknown': len(rare_indices) if rare_indices else 0,
             'n_unknown_individuals': len(set(rare_labels_str)) if rare_labels_str else 0,
-            'query_source': 'hf_test_split',
             'unknown_source': 'hf_test_split',
-        },
-        'results': {
-            'query_quality_metrics': query_quality_metrics,
-            'open_set_metrics': {
-                'threshold_calibration': {
-                    'method': 'individual_loo_ba',
-                    'threshold': optimal_thresh,
-                    'threshold_std': np.std([f['threshold'] for f in fold_results]),
-                    'n_folds': len(fold_results),
-                    'per_fold': fold_results,
-                },
-                'by_quality': balanced_metrics_by_quality,
+        })
+
+        result = {
+            'config': {**result_config, 'cosine_threshold': cosine_threshold},
+            'dataset': dataset_info,
+            'results': {
+                'balanced_accuracy': ba,
+                'known_accept_rate': kar,
+                'unknown_reject_rate': urr,
+                'query_quality_threshold': query_quality_threshold,
+                'n_known_individuals': n_k,
+                'n_unknown_individuals': n_u,
             },
-            'recall_at_1_q0': r1_q0,
-            'balanced_accuracy_q0': ba_q0,
-            'harmonic_mean_q0': hm,
-        },
-        'epoch_history': epoch_history,
-        'metadata': {
-            'created_at': datetime.now().isoformat(),
-            'training_time_seconds': training_time,
-            'job_idx': args.idx,
+            'epoch_history': epoch_history,
+            'metadata': {
+                'created_at': datetime.now().isoformat(),
+                'training_time_seconds': training_time,
+                'job_idx': args.idx,
+            }
         }
-    }
 
     os.makedirs(output_dir, exist_ok=True)
     with open(output_path, 'w') as f:
