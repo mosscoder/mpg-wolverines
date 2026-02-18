@@ -834,49 +834,74 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
     # B. Threshold Calibration (LOO on Gallery Scores)
+    #
+    # Optimized: pre-compute per-individual group maxes and top-2 to avoid
+    # O(K × N²) submatrix extraction. Each fold's LOO max scores are
+    # reconstructed in O(N) via the top-2 trick, and per-individual accept
+    # rates use an indicator matmul instead of a loop over individuals.
     scores_gal_gal.fill_diagonal_(-1.0)
 
-    unique_individuals = gallery_labels.unique().tolist()
+    unique_individuals = gallery_labels.unique()
+    n_ind = len(unique_individuals)
+    N = len(gallery_labels)
     fold_results = []
     thresholds = np.linspace(0.0, 1.0, 101)
+    T = len(thresholds)
 
     thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
 
-    for held_out_ind in unique_individuals:
-        gallery_mask = (gallery_labels != held_out_ind)
-        unknown_mask = (gallery_labels == held_out_ind)
+    # Map each sample to its individual index (0..K-1)
+    ind_to_idx = {ind.item(): i for i, ind in enumerate(unique_individuals)}
+    sample_ind_idx = torch.tensor([ind_to_idx[l.item()] for l in gallery_labels],
+                                   device=gallery_labels.device)
 
-        unknown_max_scores = scores_gal_gal[unknown_mask][:, gallery_mask].max(dim=1).values
+    # group_max[s, j] = max similarity of sample s to all samples of individual j
+    # (self-match excluded via diagonal=-1.0)
+    group_max = torch.full((N, n_ind), -float('inf'), device=gallery_labels.device)
+    for j in range(n_ind):
+        ind_mask = (sample_ind_idx == j)
+        group_max[:, j] = scores_gal_gal[:, ind_mask].max(dim=1).values
 
-        # Vectorized: submatrix of known gallery vs known gallery
-        # Diagonal is already -1.0 from fill_diagonal_ above, excluding self
-        sub_scores = scores_gal_gal[gallery_mask][:, gallery_mask]
-        max_scores_sub = sub_scores.max(dim=1).values
-        sub_labels = gallery_labels[gallery_mask]
+    # Top-2 individual-level maxes per sample
+    top2_vals, top2_inds = group_max.topk(2, dim=1)  # (N, 2)
 
-        # Vectorized threshold sweep: broadcast (101,1) vs (N,) -> (101,N)
-        accepted_matrix = max_scores_sub.unsqueeze(0) >= thresholds_t.unsqueeze(1)
+    # Indicator matrix and per-individual sample counts
+    indicator = torch.zeros(N, n_ind, device=gallery_labels.device)
+    indicator[torch.arange(N, device=gallery_labels.device), sample_ind_idx] = 1.0
+    counts = indicator.sum(dim=0)  # samples per individual
 
-        # Per-individual accept rate at each threshold
-        unique_sub_labels = sub_labels.unique()
-        per_ind_rates = torch.zeros(len(unique_sub_labels), len(thresholds),
-                                     device=gallery_labels.device)
-        for j, ind_label in enumerate(unique_sub_labels):
-            ind_mask = (sub_labels == ind_label)
-            per_ind_rates[j] = accepted_matrix[:, ind_mask].float().mean(dim=1)
+    for i in range(n_ind):
+        # LOO max scores: top-1 unless top-1 was from held-out individual i
+        uses_top1 = (top2_inds[:, 0] != i)
+        max_scores = torch.where(uses_top1, top2_vals[:, 0], top2_vals[:, 1])
 
-        known_accept_all = per_ind_rates.mean(dim=0)
+        known_mask = (sample_ind_idx != i)
+        unknown_mask = (sample_ind_idx == i)
+        known_max = max_scores[known_mask]
+        unknown_max = max_scores[unknown_mask]
 
-        if len(unknown_max_scores) > 0:
-            unknown_reject_all = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
+        # Threshold sweep: (T, N_known)
+        accepted = (known_max.unsqueeze(0) >= thresholds_t.unsqueeze(1)).float()
+
+        # Per-individual accept rates via matmul: (T, N_known) @ (N_known, K) -> (T, K)
+        known_indicator = indicator[known_mask]
+        per_ind_sums = accepted @ known_indicator
+        known_counts = counts.clone()
+        known_counts[i] = 1.0  # avoid div-by-zero for held-out individual
+        per_ind_rates = per_ind_sums / known_counts.unsqueeze(0)
+        per_ind_rates[:, i] = 0.0
+        known_accept_all = per_ind_rates.sum(dim=1) / (n_ind - 1)
+
+        if len(unknown_max) > 0:
+            unknown_reject_all = (unknown_max.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
         else:
-            unknown_reject_all = torch.zeros(len(thresholds), device=gallery_labels.device)
+            unknown_reject_all = torch.zeros(T, device=gallery_labels.device)
 
         ba_all = (known_accept_all + unknown_reject_all) / 2
         best_idx = ba_all.argmax().item()
 
         fold_results.append({
-            'individual': held_out_ind,
+            'individual': unique_individuals[i].item(),
             'threshold': thresholds[best_idx],
             'ba': ba_all[best_idx].item(),
             'known_accept': known_accept_all[best_idx].item(),
