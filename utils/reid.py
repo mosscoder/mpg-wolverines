@@ -1530,41 +1530,50 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
         for q_thresh in q_thresholds_to_search:
             q_key = f"q>={q_thresh}"
 
-            # Collect per-epoch scores across seeds, then pick the epoch
-            # with the highest cross-seed mean (not each seed's individual peak).
-            histories = []
-            for r in group_results:
-                epoch_scores = []
-                for entry in r['epoch_history']:
-                    if criterion == 'recall':
-                        score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
-                    elif criterion == 'balanced_accuracy':
-                        score = entry.get('open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy', 0.0)
-                    else:
-                        raise ValueError(f"Unknown criterion: {criterion}")
-                    epoch_scores.append(score)
-                histories.append(epoch_scores)
+            # Build per-seed lookup: epoch_num -> score
+            # Only include epochs that have evaluation data.
+            all_histories = [r['epoch_history'] for r in group_results]
 
-            # Average across seeds at each epoch, pick best epoch
-            n_epochs = len(histories[0])
-            best_epoch_idx = 0
+            eval_epochs = []
+            for entry in all_histories[0]:
+                if 'query_quality_metrics' in entry:
+                    eval_epochs.append(entry['epoch'])
+
+            # For each eval epoch, average the criterion across seeds
             best_mean = -1.0
-            for i in range(n_epochs):
-                epoch_mean = np.mean([h[i] for h in histories])
-                if epoch_mean > best_mean:
-                    best_mean = epoch_mean
-                    best_epoch_idx = i
+            best_epoch_num = eval_epochs[0] if eval_epochs else 1
 
-            best_epoch_num = best_epoch_idx + 1  # 1-indexed
+            for epoch_num in eval_epochs:
+                scores = []
+                for history in all_histories:
+                    for entry in history:
+                        if entry['epoch'] == epoch_num:
+                            if criterion == 'recall':
+                                s = entry.get('query_quality_metrics', {}).get(q_key, {}).get('recall_at_1')
+                            elif criterion == 'balanced_accuracy':
+                                s = entry.get('open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy')
+                            else:
+                                raise ValueError(f"Unknown criterion: {criterion}")
+                            if s is not None:
+                                scores.append(s)
+                            break
+
+                if scores:
+                    epoch_mean = np.mean(scores)
+                    if epoch_mean > best_mean:
+                        best_mean = epoch_mean
+                        best_epoch_num = epoch_num
 
             # Extract cosine threshold at best epoch (for open-set tasks)
             cosine_thresholds = []
-            for r in group_results:
-                entry = r['epoch_history'][best_epoch_idx]
-                ct = entry.get('open_set', {}).get(
-                    'threshold_calibration', {}).get('threshold')
-                if ct is not None:
-                    cosine_thresholds.append(ct)
+            for history in all_histories:
+                for entry in history:
+                    if entry['epoch'] == best_epoch_num:
+                        ct = entry.get('open_set', {}).get(
+                            'threshold_calibration', {}).get('threshold')
+                        if ct is not None:
+                            cosine_thresholds.append(ct)
+                        break
             mean_cosine_thresh = float(np.mean(cosine_thresholds)) if cosine_thresholds else None
 
             if best_mean > best_overall_score:
