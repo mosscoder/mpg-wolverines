@@ -707,6 +707,179 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
     print(f"Saved thresholds table: {output_path}")
 
 
+def load_test_results(model_name: str) -> dict:
+    """Load test evaluation results for a backbone, grouped by task.
+
+    Args:
+        model_name: Key in MODEL_CONFIGS (e.g. 'dinov3')
+
+    Returns:
+        Dict mapping task name -> list of result dicts, or empty dict if none found.
+    """
+    from utils.reid import MODEL_CONFIGS
+    config = MODEL_CONFIGS[model_name]
+    pattern = os.path.join(config['experiment_dir'], 'results', 'test', 'test_seed=*_*.json')
+    json_files = glob.glob(pattern)
+
+    if not json_files:
+        return {}
+
+    by_task = {}
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+            task = data['config']['task']
+            by_task.setdefault(task, []).append(data)
+        except Exception as e:
+            print(f"  Warning: failed to load {json_file}: {e}")
+
+    return by_task
+
+
+def create_test_performance_table(model_data: dict, output_dir: str,
+                                  metric_type: str):
+    """Write test performance as an arXiv-style formatted .xlsx spreadsheet.
+
+    Produces one table with two rows per backbone (None + Optimal filter strategy),
+    showing mean(95% CI) scores across seeds.
+
+    Args:
+        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        output_dir: Directory to save xlsx
+        metric_type: 'closedset' or 'openset'
+    """
+    from openpyxl import Workbook
+
+    if metric_type == 'closedset':
+        task_none = 'closed_unfiltered'
+        task_optimal = 'closed_filtered'
+        score_key = 'recall_at_1'
+        score_label = 'R@1'
+        filename = 'test_closedset.xlsx'
+        sheet_title = 'Closed-Set Test'
+    else:
+        task_none = 'open_unfiltered'
+        task_optimal = 'open_filtered'
+        score_key = 'balanced_accuracy'
+        score_label = 'BA'
+        filename = 'test_openset.xlsx'
+        sheet_title = 'Open-Set Test'
+
+    models = list(model_data.keys())
+    rows = []
+
+    for model_name in models:
+        label = model_data[model_name]['label'].replace('Frozen ', '')
+        test_results = load_test_results(model_name)
+
+        if not test_results:
+            print(f"  No test results for {model_name}, skipping in {filename}")
+            continue
+
+        for strategy, task_key in [('None', task_none), ('Optimal', task_optimal)]:
+            task_data = test_results.get(task_key, [])
+            if not task_data:
+                continue
+
+            values = [d['results'][score_key] for d in task_data]
+            n = len(values)
+            mean_val = float(np.mean(values))
+
+            if n > 1:
+                sem = float(stats.sem(values))
+                ci_half = stats.t.ppf(0.975, n - 1) * sem
+            else:
+                ci_half = 0.0
+
+            ci_lower = mean_val - ci_half
+            ci_upper = mean_val + ci_half
+            score_str = f"{mean_val:.2f}({ci_lower:.2f},{ci_upper:.2f})"
+
+            # Extract hyperparams (same across seeds for a given task)
+            cfg = task_data[0]['config']
+            rows.append({
+                'Backbone': label,
+                'Filter Strategy': strategy,
+                score_label: score_str,
+                'Gallery Size': cfg.get('gallery_size', ''),
+                'Gallery Thresh': cfg.get('threshold', ''),
+                'Query Thresh': cfg.get('query_quality_threshold', ''),
+                'Epoch': cfg.get('best_epoch', ''),
+            })
+
+    if not rows:
+        print(f"  No test results found for any backbone ({metric_type}), skipping table")
+        return
+
+    # Build xlsx with same styling as create_thresholds_table
+    columns = ['Backbone', 'Filter Strategy', score_label,
+               'Gallery Size', 'Gallery Thresh', 'Query Thresh', 'Epoch']
+
+    serif_font = Font(name='Times New Roman', size=11)
+    serif_bold = Font(name='Times New Roman', size=11, bold=True)
+    header_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
+    thin_side = Side(style='thin')
+    thick_side = Side(style='medium')
+    thin_border = Border(left=thin_side, right=thin_side,
+                         top=thin_side, bottom=thin_side)
+    header_border = Border(left=thin_side, right=thin_side,
+                           top=thin_side, bottom=thick_side)
+    center_align = Alignment(horizontal='center', vertical='center')
+    left_align = Alignment(horizontal='left', vertical='center')
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title
+
+    # Header row
+    for col_idx, col_name in enumerate(columns, start=1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+
+    # Data rows
+    for r_idx, row_data in enumerate(rows, start=2):
+        for col_idx, col_name in enumerate(columns, start=1):
+            ws.cell(row=r_idx, column=col_idx, value=row_data[col_name])
+
+    # Format header
+    total_cols = len(columns)
+    for col_idx in range(1, total_cols + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = serif_bold
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = header_border
+    ws.cell(row=1, column=1).alignment = left_align
+
+    # Format data rows
+    last_data_row = 1 + len(rows)
+    for row_idx in range(2, last_data_row + 1):
+        for col_idx in range(1, total_cols + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = serif_font
+            cell.border = thin_border
+            if col_idx <= 2:
+                cell.alignment = left_align
+            else:
+                cell.alignment = center_align
+
+    # Auto-fit column widths
+    for col_idx in range(1, total_cols + 1):
+        max_len = 0
+        col_letter = get_column_letter(col_idx)
+        for row in ws.iter_rows(min_col=col_idx, max_col=col_idx,
+                                min_row=1, max_row=last_data_row):
+            for cell in row:
+                if cell.value is not None:
+                    max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, filename)
+    wb.save(output_path)
+    print(f"Saved test performance table: {output_path}")
+
+
 def create_rank1_figure(model_data: dict, output_dir: str):
     """Create 1x3 cross-backbone figure for Recall@1.
 
@@ -1122,6 +1295,11 @@ def run_aggregate(base_dir: str = "reid_openset"):
     create_novelty_detection_figure(model_data, cross_figures_dir)
     create_rank1_thresholds_table(model_data, cross_tables_dir)
     create_novelty_thresholds_table(model_data, cross_tables_dir)
+
+    # Test performance tables (skip gracefully if no test results exist)
+    print(f"\nGenerating test performance tables...")
+    create_test_performance_table(model_data, cross_tables_dir, 'closedset')
+    create_test_performance_table(model_data, cross_tables_dir, 'openset')
 
     print(f"\nAggregate analysis complete!")
     print(f"  Cross-backbone figures: {cross_figures_dir}")
