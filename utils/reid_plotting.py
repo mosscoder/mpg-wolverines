@@ -209,15 +209,22 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
         if len(baseline_filtered) > 0:
             all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
-
+                # R@1: select epoch that maximizes recall
+                best_r1_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
                 r1_values = []
+                for history in all_histories:
+                    for h in history:
+                        if h['epoch'] == best_r1_epoch:
+                            if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
+                                r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                            break
+
+                # BA: select epoch that maximizes balanced accuracy
+                best_ba_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh='q>=0.0')
                 ba_values = []
                 for history in all_histories:
                     for h in history:
-                        if h['epoch'] == best_epoch:
-                            if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
-                                r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
+                        if h['epoch'] == best_ba_epoch:
                             if 'open_set' in h:
                                 by_quality = h['open_set'].get('by_quality', {})
                                 if 'q>=0.0' in by_quality:
