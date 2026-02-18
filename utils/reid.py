@@ -76,6 +76,8 @@ BATCH_K = 8
 MIN_P = 5
 TARGET_SAMPLES_PER_INDIVIDUAL = 32
 QUERY_QUALITY_THRESHOLDS = [0.0, 0.25, 0.5]
+EVAL_BATCH_SIZE = 128
+EVAL_NUM_WORKERS = 4
 
 
 # ============================================================================
@@ -345,7 +347,7 @@ def create_ymdh_split_dataset(dataset, individuals, metadata_cache, seed=0):
 # ============================================================================
 
 def evaluate_recall_simple(model, train_dataset, test_dataset, individual_to_class,
-                           transform, device, batch_size=32):
+                           transform, device, batch_size=EVAL_BATCH_SIZE):
     """
     Compute macro-averaged Recall@1 using cosine similarity.
     No quality filtering, no open-set evaluation.
@@ -353,32 +355,35 @@ def evaluate_recall_simple(model, train_dataset, test_dataset, individual_to_cla
     Returns: recall_at_1 value
     """
     model.eval()
+    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
 
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
     test_torch = ArcFaceDataset(test_dataset, transform, individual_to_class)
 
-    train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_torch, batch_size=batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False,
+                              num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
+    test_loader = DataLoader(test_torch, batch_size=batch_size, shuffle=False,
+                             num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
     # Gallery embeddings (train)
     gallery_embeddings = []
     gallery_labels = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for batch in train_loader:
-            images = batch[0].to(device)
+            images = batch[0].to(device, non_blocking=True)
             labels = batch[1]
             emb = model(images)
             gallery_embeddings.append(emb)
             gallery_labels.extend(labels.tolist())
-    gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
+    gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
     # Query embeddings (test)
     query_embeddings = []
     query_labels = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for batch in test_loader:
-            images = batch[0].to(device)
+            images = batch[0].to(device, non_blocking=True)
             labels = batch[1]
             emb = model(images)
             query_embeddings.append(emb)
@@ -587,25 +592,27 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
 # ============================================================================
 
 def compute_rare_embeddings(model, dataset, rare_indices, rare_quality, rare_labels,
-                            transform, device, embedding_dim=128, batch_size=32):
+                            transform, device, embedding_dim=128, batch_size=EVAL_BATCH_SIZE):
     """Compute embeddings for rare/unknown individuals."""
     model.eval()
+    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
 
     rare_dataset = RareIndividualsDataset(dataset, rare_indices, rare_quality, transform)
-    rare_loader = DataLoader(rare_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    rare_loader = DataLoader(rare_dataset, batch_size=batch_size, shuffle=False,
+                             num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
     embeddings = []
     qualities = []
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for images, quality in rare_loader:
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             emb = model(images)
             embeddings.append(emb.cpu())
             qualities.extend(quality.tolist())
 
     if embeddings:
-        embeddings = torch.cat(embeddings, dim=0)
+        embeddings = torch.cat(embeddings, dim=0).float()
     else:
         embeddings = torch.empty(0, embedding_dim)
 
@@ -712,7 +719,8 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, qualified_individuals, metadata_cache,
-                                  gallery_threshold, criterion, embedding_dim=128, batch_size=32,
+                                  gallery_threshold, criterion, embedding_dim=128,
+                                  batch_size=EVAL_BATCH_SIZE,
                                   promoted_individuals=None, excluded_individuals=None):
     """
     Evaluate model computing Recall@1 and open-set metrics with raw cosine similarity.
@@ -723,36 +731,39 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         query_quality_metrics, open_set_metrics, val_loss
     """
     model.eval()
+    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
 
     # 1. Extract Embeddings
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
     val_torch = ArcFaceDataset(val_dataset, transform, individual_to_class)
 
-    train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False, num_workers=0)
-    val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_torch, batch_size=batch_size, shuffle=False,
+                              num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
+    val_loader = DataLoader(val_torch, batch_size=batch_size, shuffle=False,
+                            num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
     # Gallery
     gallery_embeddings = []
     gallery_labels = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for images, labels, _ in train_loader:
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             gallery_embeddings.append(model(images))
             gallery_labels.extend(labels.tolist())
-    gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
+    gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
     # Query (Known)
     query_embeddings = []
     query_labels = []
     query_quality = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for images, labels, quality in val_loader:
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             query_embeddings.append(model(images))
             query_labels.extend(labels.tolist())
             query_quality.extend(quality.tolist())
-    query_embeddings = torch.cat(query_embeddings, dim=0)
+    query_embeddings = torch.cat(query_embeddings, dim=0).float()
     query_labels = torch.tensor(query_labels).to(device)
     query_quality = np.array(query_quality)
 
@@ -796,8 +807,6 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     else:
         scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-    scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
-
     # 3. Compute Metrics
 
     # A. Recall@1 (Closed Set) - macro-averaged
@@ -833,110 +842,90 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
-    # B. Threshold Calibration (LOO on Gallery Scores)
+    # B. Cosine Threshold Selection (sweep on validation scores)
     #
-    # Optimized: pre-compute per-individual group maxes and top-2 to avoid
-    # O(K × N²) submatrix extraction. Each fold's LOO max scores are
-    # reconstructed in O(N) via the top-2 trick, and per-individual accept
-    # rates use an indicator matmul instead of a loop over individuals.
-    scores_gal_gal.fill_diagonal_(-1.0)
-
-    unique_individuals = gallery_labels.unique()
-    n_ind = len(unique_individuals)
-    N = len(gallery_labels)
-    fold_results = []
+    # Per quality level, sweep 101 thresholds on query-gallery and
+    # unknown-gallery scores to find the cosine threshold maximizing BA.
+    # Uses macro-averaged per-individual accept/reject rates via matmul.
     thresholds = np.linspace(0.0, 1.0, 101)
     T = len(thresholds)
-
     thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
 
-    # Map each sample to its individual index (0..K-1)
-    ind_to_idx = {ind.item(): i for i, ind in enumerate(unique_individuals)}
-    sample_ind_idx = torch.tensor([ind_to_idx[l.item()] for l in gallery_labels],
-                                   device=gallery_labels.device)
+    balanced_metrics_by_quality = {}
 
-    # group_max[s, j] = max similarity of sample s to all samples of individual j
-    # (self-match excluded via diagonal=-1.0)
-    group_max = torch.full((N, n_ind), -float('inf'), device=gallery_labels.device)
-    for j in range(n_ind):
-        ind_mask = (sample_ind_idx == j)
-        group_max[:, j] = scores_gal_gal[:, ind_mask].max(dim=1).values
+    for q_thresh in QUERY_QUALITY_THRESHOLDS:
+        q_key = f"q>={q_thresh}"
 
-    # Top-2 individual-level maxes per sample
-    top2_vals, top2_inds = group_max.topk(2, dim=1)  # (N, 2)
+        # Known queries at this quality level
+        k_mask = query_quality >= q_thresh
+        k_indices = np.where(k_mask)[0]
 
-    # Indicator matrix and per-individual sample counts
-    indicator = torch.zeros(N, n_ind, device=gallery_labels.device)
-    indicator[torch.arange(N, device=gallery_labels.device), sample_ind_idx] = 1.0
-    counts = indicator.sum(dim=0)  # samples per individual
+        if len(k_indices) > 0:
+            known_max_scores = scores_known[k_indices].max(dim=1).values
+            known_labels_masked = query_labels_np[k_indices]
+            unique_known = np.unique(known_labels_masked)
 
-    for i in range(n_ind):
-        # LOO max scores: top-1 unless top-1 was from held-out individual i
-        uses_top1 = (top2_inds[:, 0] != i)
-        max_scores = torch.where(uses_top1, top2_vals[:, 0], top2_vals[:, 1])
+            # Indicator matrix for known individuals: (N_known, K_known)
+            k_label_to_col = {l: j for j, l in enumerate(unique_known)}
+            k_indicator = torch.zeros(len(k_indices), len(unique_known),
+                                       device=gallery_labels.device)
+            for s, l in enumerate(known_labels_masked):
+                k_indicator[s, k_label_to_col[l]] = 1.0
+            k_counts = k_indicator.sum(dim=0)
 
-        known_mask = (sample_ind_idx != i)
-        unknown_mask = (sample_ind_idx == i)
-        known_max = max_scores[known_mask]
-        unknown_max = max_scores[unknown_mask]
-
-        # Threshold sweep: (T, N_known)
-        accepted = (known_max.unsqueeze(0) >= thresholds_t.unsqueeze(1)).float()
-
-        # Per-individual accept rates via matmul: (T, N_known) @ (N_known, K) -> (T, K)
-        known_indicator = indicator[known_mask]
-        per_ind_sums = accepted @ known_indicator
-        known_counts = counts.clone()
-        known_counts[i] = 1.0  # avoid div-by-zero for held-out individual
-        per_ind_rates = per_ind_sums / known_counts.unsqueeze(0)
-        per_ind_rates[:, i] = 0.0
-        known_accept_all = per_ind_rates.sum(dim=1) / (n_ind - 1)
-
-        if len(unknown_max) > 0:
-            unknown_reject_all = (unknown_max.unsqueeze(0) < thresholds_t.unsqueeze(1)).float().mean(dim=1)
+            # (T, N_known) @ (N_known, K_known) / counts -> (T, K_known) -> mean -> (T,)
+            accepted = (known_max_scores.unsqueeze(0) >= thresholds_t.unsqueeze(1)).float()
+            known_accept_curve = (accepted @ k_indicator / k_counts.unsqueeze(0)).mean(dim=1)
         else:
-            unknown_reject_all = torch.zeros(T, device=gallery_labels.device)
+            known_accept_curve = torch.zeros(T, device=gallery_labels.device)
 
-        ba_all = (known_accept_all + unknown_reject_all) / 2
-        best_idx = ba_all.argmax().item()
+        # Unknown queries at this quality level
+        u_mask = rare_quality_arr >= q_thresh if len(rare_quality_arr) > 0 else np.array([], dtype=bool)
 
-        fold_results.append({
-            'individual': unique_individuals[i].item(),
-            'threshold': thresholds[best_idx],
-            'ba': ba_all[best_idx].item(),
-            'known_accept': known_accept_all[best_idx].item(),
-            'unknown_reject': unknown_reject_all[best_idx].item(),
-        })
+        if len(rare_labels_arr) > 0 and u_mask.sum() > 0:
+            u_indices = np.where(u_mask)[0]
+            unknown_max_scores = scores_unknown[u_indices].max(dim=1).values
+            unknown_labels_masked = rare_labels_arr[u_indices]
+            unique_unknown = np.unique(unknown_labels_masked)
 
-    optimal_thresh = np.mean([f['threshold'] for f in fold_results])
-    calibration_ba = np.mean([f['ba'] for f in fold_results])
-    calibration_known_accept = np.mean([f['known_accept'] for f in fold_results])
-    calibration_unknown_reject = np.mean([f['unknown_reject'] for f in fold_results])
-    n_folds = len(fold_results)
+            u_label_to_col = {l: j for j, l in enumerate(unique_unknown)}
+            u_indicator = torch.zeros(len(u_indices), len(unique_unknown),
+                                       device=gallery_labels.device)
+            for s, l in enumerate(unknown_labels_masked):
+                u_indicator[s, u_label_to_col[l]] = 1.0
+            u_counts = u_indicator.sum(dim=0)
 
-    # C. Open Set Metrics (Balanced Accuracy)
-    balanced_metrics_by_quality = compute_open_set_metrics_cosine(
-        known_query_labels=query_labels,
-        known_query_quality=query_quality,
-        known_scores=scores_known,
-        unknown_query_labels=rare_labels_arr,
-        unknown_query_quality=rare_quality_arr,
-        unknown_scores=scores_unknown,
-        score_threshold=optimal_thresh,
-        quality_thresholds=QUERY_QUALITY_THRESHOLDS,
-        gallery_labels=gallery_labels
-    )
+            rejected = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float()
+            unknown_reject_curve = (rejected @ u_indicator / u_counts.unsqueeze(0)).mean(dim=1)
+        else:
+            unknown_reject_curve = torch.ones(T, device=gallery_labels.device)
+
+        ba_curve = (known_accept_curve + unknown_reject_curve) / 2
+        best_idx = ba_curve.argmax().item()
+        optimal_thresh_q = float(thresholds[best_idx])
+
+        # Evaluate at optimal threshold for full metrics
+        q_metrics = compute_open_set_metrics_cosine(
+            known_query_labels=query_labels,
+            known_query_quality=query_quality,
+            known_scores=scores_known,
+            unknown_query_labels=rare_labels_arr,
+            unknown_query_quality=rare_quality_arr,
+            unknown_scores=scores_unknown,
+            score_threshold=optimal_thresh_q,
+            quality_thresholds=[q_thresh],
+            gallery_labels=gallery_labels
+        )
+        balanced_metrics_by_quality[q_key] = q_metrics[q_key]
+        balanced_metrics_by_quality[q_key]['cosine_threshold'] = optimal_thresh_q
+
+    # q>=0.0 threshold stored at top level for backward compatibility
+    optimal_thresh = balanced_metrics_by_quality.get('q>=0.0', {}).get('cosine_threshold', 0.0)
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'individual_loo_ba',
+            'method': 'validation_sweep',
             'threshold': optimal_thresh,
-            'threshold_std': np.std([f['threshold'] for f in fold_results]),
-            'calibration_ba': calibration_ba,
-            'calibration_known_accept': calibration_known_accept,
-            'calibration_unknown_reject': calibration_unknown_reject,
-            'n_folds': n_folds,
-            'per_fold': fold_results,
         },
         'by_quality': balanced_metrics_by_quality
     }
@@ -1590,12 +1579,17 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                         best_epoch_num = epoch_num
 
             # Extract cosine threshold at best epoch (for open-set tasks)
+            # Prefer per-quality threshold; fall back to top-level for old results
             cosine_thresholds = []
             for history in all_histories:
                 for entry in history:
                     if entry['epoch'] == best_epoch_num:
-                        ct = entry.get('open_set', {}).get(
-                            'threshold_calibration', {}).get('threshold')
+                        open_set = entry.get('open_set', {})
+                        ct = open_set.get('by_quality', {}).get(
+                            q_key, {}).get('cosine_threshold')
+                        if ct is None:
+                            ct = open_set.get(
+                                'threshold_calibration', {}).get('threshold')
                         if ct is not None:
                             cosine_thresholds.append(ct)
                         break
@@ -1811,35 +1805,38 @@ def run_final_test(model_name, args, seed, task_name):
     # Evaluate on FULL test split
     print("\nEvaluating on test split...")
     model.eval()
+    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
 
     # Gallery embeddings
     gallery_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
-    gallery_loader = DataLoader(gallery_torch, batch_size=32, shuffle=False, num_workers=0)
+    gallery_loader = DataLoader(gallery_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
+                                num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
     gallery_embeddings = []
     gallery_labels = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for images, labels, _ in gallery_loader:
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             gallery_embeddings.append(model(images))
             gallery_labels.extend(labels.tolist())
-    gallery_embeddings = torch.cat(gallery_embeddings, dim=0)
+    gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
     # Query embeddings (known individuals from test split)
     query_torch = ArcFaceDataset(query_dataset, transform, individual_to_class)
-    query_loader = DataLoader(query_torch, batch_size=32, shuffle=False, num_workers=0)
+    query_loader = DataLoader(query_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
+                              num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
     query_embeddings = []
     query_labels = []
     query_quality = []
-    with torch.no_grad():
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
         for images, labels, quality in query_loader:
-            images = images.to(device)
+            images = images.to(device, non_blocking=True)
             query_embeddings.append(model(images))
             query_labels.extend(labels.tolist())
             query_quality.extend(quality.tolist())
-    query_embeddings = torch.cat(query_embeddings, dim=0)
+    query_embeddings = torch.cat(query_embeddings, dim=0).float()
     query_labels = torch.tensor(query_labels).to(device)
     query_quality = np.array(query_quality)
     query_labels_np = query_labels.cpu().numpy()

@@ -1103,9 +1103,14 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
             for history in all_histories:
                 for h in history:
                     if h['epoch'] == best_epoch and 'open_set' in h:
-                        thresh_cal = h['open_set'].get('threshold_calibration', {})
-                        if 'threshold' in thresh_cal:
-                            thresh_values.append(thresh_cal['threshold'])
+                        open_set = h['open_set']
+                        ct = open_set.get('by_quality', {}).get(
+                            'q>=0.0', {}).get('cosine_threshold')
+                        if ct is None:
+                            ct = open_set.get(
+                                'threshold_calibration', {}).get('threshold')
+                        if ct is not None:
+                            thresh_values.append(ct)
                         break
 
             if thresh_values:
