@@ -305,7 +305,8 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
                 strategies['optimal']['ba_ci_lower'].append(mean_ba - ci_ba)
                 strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
 
-        # --- Optimal BA: find best gallery x eval quality combo for BA ---
+        # --- Optimal BA: find best gallery threshold for BA ---
+        # Use q>=0.0 only: single cosine threshold calibrated on full unknown pool
         best_mean_ba = -1
         best_ba_values_ba = None
         best_gal_thresh_ba = None
@@ -321,7 +322,7 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             if 'open_set' not in all_histories[0][0]:
                 continue
 
-            for q_thresh in query_thresholds:
+            for q_thresh in ['q>=0.0']:
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=q_thresh)
 
                 ba_values = []

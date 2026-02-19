@@ -1579,14 +1579,15 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                         best_epoch_num = epoch_num
 
             # Extract cosine threshold at best epoch (for open-set tasks)
-            # Prefer per-quality threshold; fall back to top-level for old results
+            # Always use q>=0.0 threshold (calibrated on full unknown pool)
+            # to avoid overfitting to small per-quality subsets
             cosine_thresholds = []
             for history in all_histories:
                 for entry in history:
                     if entry['epoch'] == best_epoch_num:
                         open_set = entry.get('open_set', {})
                         ct = open_set.get('by_quality', {}).get(
-                            q_key, {}).get('cosine_threshold')
+                            'q>=0.0', {}).get('cosine_threshold')
                         if ct is None:
                             ct = open_set.get(
                                 'threshold_calibration', {}).get('threshold')
