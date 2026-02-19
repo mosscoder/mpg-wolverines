@@ -111,6 +111,11 @@ def build_metadata_cache(dataset):
     if 'pelage_score' in dataset.column_names:
         quality_scores = np.array(dataset['pelage_score'], dtype=np.float32)
 
+    # Filenames for temporal ordering within events
+    filenames = None
+    if 'filename' in dataset.column_names:
+        filenames = np.array(dataset['filename'], dtype=object)
+
     # Build ID-to-indices mapping
     id_to_indices = defaultdict(list)
     for idx, ind_id in enumerate(ids):
@@ -124,6 +129,8 @@ def build_metadata_cache(dataset):
     }
     if quality_scores is not None:
         cache['quality_scores'] = quality_scores
+    if filenames is not None:
+        cache['filenames'] = filenames
 
     return cache
 
@@ -292,6 +299,50 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     print(f"Total: {len(all_train_indices)} gallery, {len(all_val_indices)} query")
 
     return train_dataset_out, val_dataset, individual_to_class, dataset_info
+
+
+def get_event_index_map(metadata_cache, indices):
+    """Group indices by YMDH event."""
+    ymdh = metadata_cache['ymdh']
+    event_map = defaultdict(list)
+    for idx in indices:
+        event_map[int(ymdh[idx])].append(idx)
+    return dict(event_map)
+
+
+def subsample_to_match_filtered(metadata_cache, all_indices, filtered_indices):
+    """
+    Deterministic event-matched subsampling by temporal spacing.
+
+    For each YMDH event, sort all images by filename (which encodes capture
+    order), then pick n_target images evenly spaced from first to last using
+    linspace indices. This is deterministic and preserves temporal coverage
+    across each burst.
+    """
+    filenames = metadata_cache['filenames']
+
+    all_event_map = get_event_index_map(metadata_cache, all_indices)
+    filtered_event_map = get_event_index_map(metadata_cache, filtered_indices)
+
+    sampled = []
+    for event, filtered_event_indices in filtered_event_map.items():
+        n_target = len(filtered_event_indices)
+        available = all_event_map.get(event, [])
+        if not available:
+            continue
+
+        # Sort by filename to get capture order
+        available_sorted = sorted(available, key=lambda idx: filenames[idx])
+
+        n_available = len(available_sorted)
+        if n_target >= n_available:
+            sampled.extend(available_sorted)
+        else:
+            # Evenly spaced indices from first to last
+            pick_indices = np.round(np.linspace(0, n_available - 1, n_target)).astype(int)
+            sampled.extend(available_sorted[i] for i in pick_indices)
+
+    return sampled
 
 
 def get_qualified_individuals(config, min_p=MIN_P):

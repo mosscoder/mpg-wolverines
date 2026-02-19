@@ -35,12 +35,13 @@ from utils.reid_data import (  # noqa: F401
     create_ymdh_split_dataset, filter_training_pool_by_quality,
     get_rare_individual_indices, create_filtered_gallery_dataset,
     get_qualified_individuals,
+    get_event_index_map, subsample_to_match_filtered,
 )
 from utils.reid_evaluation import (  # noqa: F401
     evaluate_recall_simple, compute_rare_embeddings, compute_validation_loss,
     compute_cosine_similarity, compute_open_set_metrics_cosine,
     compute_open_set_metrics_per_individual_threshold,
-    evaluate_recall_with_openset,
+    evaluate_recall_with_openset, compute_arcface_center_thresholds,
 )
 
 
@@ -833,11 +834,16 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
 
 # Each task selects its own optimal (threshold, gallery_size, epoch) from the
 # hygiene sweep using the criterion and threshold constraint that match its goal.
+#
+# Filtered tasks use ALL images above the quality threshold (no gallery_size cap).
+# Matched tasks use event-matched subsampling: for each individual's YMDH event,
+# count how many images pass the quality filter, then randomly sample that count
+# from the full event (no filter). This isolates the effect of quality filtering.
 TEST_TASKS = {
-    'closed_unfiltered': {'criterion': 'recall',             'threshold_filter': 0.0},
-    'closed_filtered':   {'criterion': 'recall',             'threshold_filter': None},
-    'open_unfiltered':   {'criterion': 'balanced_accuracy',  'threshold_filter': 0.0},
-    'open_filtered':     {'criterion': 'balanced_accuracy',  'threshold_filter': None},
+    'closed_filtered': {'criterion': 'recall',            'threshold_filter': None},   # idx 0
+    'closed_matched':  {'criterion': 'recall',            'threshold_filter': 0.0},    # idx 1
+    'open_filtered':   {'criterion': 'balanced_accuracy', 'threshold_filter': None},   # idx 2
+    'open_matched':    {'criterion': 'balanced_accuracy', 'threshold_filter': 0.0},    # idx 3
 }
 
 
@@ -845,11 +851,13 @@ def run_final_test(model_name, args, seed, task_name):
     """
     Final test evaluation using the best operating point from hygiene sweep.
 
-    Each task selects its own optimal hyperparameters:
-      - closed_unfiltered: best R@1 among threshold=0.0 configs
-      - closed_filtered:   best R@1 from the full sweep
-      - open_unfiltered:   best BA among threshold=0.0 configs
-      - open_filtered:     best BA from the full sweep
+    Gallery construction:
+      - Filtered tasks: ALL images above quality threshold (no gallery_size cap)
+      - Matched tasks: event-matched subsampling from the full pool to match
+        the filtered gallery's per-event image counts
+
+    Thresholds are computed fresh from the trained model's own ArcFace centers
+    (p5 percentile), not imported from hygiene averages.
 
     Args:
         model_name: Key in MODEL_CONFIGS
@@ -863,17 +871,30 @@ def run_final_test(model_name, args, seed, task_name):
     task_cfg = TEST_TASKS[task_name]
     criterion = task_cfg['criterion']
     threshold_filter = task_cfg['threshold_filter']
+    is_matched = threshold_filter is not None  # matched tasks have threshold_filter=0.0
 
     model_config = MODEL_CONFIGS[model_name]
     experiment_dir = model_config['experiment_dir']
 
-    # Load best operating point for this task
-    best_config = load_best_hygiene_config(model_name, criterion=criterion,
-                                           threshold_filter=threshold_filter)
-    threshold = best_config['threshold']
-    gallery_size = best_config['gallery_size']
-    best_epoch = best_config['best_epoch']
-    query_quality_threshold = best_config['query_quality_threshold']
+    # For matched tasks, we need TWO hygiene configs:
+    # 1. The filtered config (same criterion, threshold_filter=None) to determine
+    #    what "filtered" means (quality threshold) and build the filtered gallery
+    # 2. The unfiltered config (same criterion, threshold_filter=0.0) for
+    #    best_epoch and query_quality_threshold
+    if is_matched:
+        filtered_config = load_best_hygiene_config(model_name, criterion=criterion,
+                                                    threshold_filter=None)
+        best_config = load_best_hygiene_config(model_name, criterion=criterion,
+                                               threshold_filter=threshold_filter)
+        quality_threshold = filtered_config['threshold']  # defines "filtered"
+        best_epoch = best_config['best_epoch']
+        query_quality_threshold = best_config['query_quality_threshold']
+    else:
+        best_config = load_best_hygiene_config(model_name, criterion=criterion,
+                                               threshold_filter=threshold_filter)
+        quality_threshold = best_config['threshold']
+        best_epoch = best_config['best_epoch']
+        query_quality_threshold = best_config['query_quality_threshold']
 
     set_all_seeds(seed)
 
@@ -888,8 +909,12 @@ def run_final_test(model_name, args, seed, task_name):
 
     print(f"\n{'='*60}")
     print(f"Final Test Evaluation: seed={seed}, task={task_name}")
-    print(f"  criterion={criterion}, threshold={threshold}, gallery_size={gallery_size}, "
+    print(f"  criterion={criterion}, quality_threshold={quality_threshold}, "
           f"query_q>={query_quality_threshold}, epochs={best_epoch}")
+    if is_matched:
+        print(f"  gallery_mode=event_matched (matching filtered threshold={quality_threshold})")
+    else:
+        print(f"  gallery_mode=full_filtered (all images >= {quality_threshold})")
     print(f"{'='*60}")
 
     # Load best hyperparameters
@@ -917,7 +942,7 @@ def run_final_test(model_name, args, seed, task_name):
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
-    # Create gallery from TRAIN split (quality-filtered, sampled by seed)
+    # Create gallery from TRAIN split
     id_to_indices = train_metadata_cache['id_to_indices']
     individual_to_class = {ind: i for i, ind in enumerate(sorted(feasible_individuals))}
 
@@ -926,21 +951,40 @@ def run_final_test(model_name, args, seed, task_name):
 
     for ind_id in feasible_individuals:
         all_ind_indices = list(id_to_indices.get(ind_id, []))
-        eligible_pool = filter_training_pool_by_quality(train_metadata_cache, all_ind_indices, threshold)
 
-        if len(eligible_pool) == 0:
-            print(f"  WARNING: {ind_id} has NO samples above threshold {threshold}")
-            sampled = []
-        elif len(eligible_pool) < gallery_size:
-            print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible (need {gallery_size}), using all")
-            sampled = eligible_pool
+        # Build filtered gallery: ALL images above quality threshold (no cap)
+        filtered_pool = filter_training_pool_by_quality(
+            train_metadata_cache, all_ind_indices, quality_threshold
+        )
+
+        if is_matched:
+            # Event-matched subsampling: sample from full pool to match
+            # the filtered gallery's per-event image counts
+            sampled = subsample_to_match_filtered(
+                train_metadata_cache, all_ind_indices, filtered_pool
+            )
+            gallery_info[ind_id] = {
+                'sampled': len(sampled),
+                'filtered_count': len(filtered_pool),
+                'total': len(all_ind_indices),
+                'mode': 'event_matched',
+            }
+            print(f"  {ind_id}: {len(sampled)} gallery (event-matched to {len(filtered_pool)} filtered)")
         else:
-            random.shuffle(eligible_pool)
-            sampled = eligible_pool[:gallery_size]
+            # Filtered: use ALL eligible images
+            sampled = filtered_pool
+            gallery_info[ind_id] = {
+                'sampled': len(sampled),
+                'eligible': len(filtered_pool),
+                'total': len(all_ind_indices),
+                'mode': 'full_filtered',
+            }
+            if len(sampled) == 0:
+                print(f"  WARNING: {ind_id} has NO samples above threshold {quality_threshold}")
+            else:
+                print(f"  {ind_id}: {len(sampled)}/{len(all_ind_indices)} gallery (filtered >= {quality_threshold})")
 
         all_gallery_indices.extend(sampled)
-        gallery_info[ind_id] = {'sampled': len(sampled), 'eligible': len(eligible_pool)}
-        print(f"  {ind_id}: {len(sampled)}/{len(eligible_pool)} gallery")
 
     gallery_dataset = train_dataset.select(all_gallery_indices)
 
@@ -966,7 +1010,11 @@ def run_final_test(model_name, args, seed, task_name):
     transform = create_transform_for_model(model_name, size=best_size)
     train_torch_dataset = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
 
-    effective_k = min(BATCH_K, gallery_size)
+    # Determine effective_k from gallery composition
+    min_gallery_per_ind = min(
+        info['sampled'] for info in gallery_info.values()
+    ) if gallery_info else 1
+    effective_k = min(BATCH_K, min_gallery_per_ind)
     try:
         pk_sampler = PKBatchSampler(
             labels=train_torch_dataset.get_labels(),
@@ -1036,6 +1084,16 @@ def run_final_test(model_name, args, seed, task_name):
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
+    # Compute fresh per-individual thresholds from this model's ArcFace centers
+    class_to_name = {v: k for k, v in individual_to_class.items()}
+    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
+        gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
+    )
+
+    print(f"\nFresh ArcFace center p5 thresholds (global mean={global_threshold:.4f}):")
+    for name, t in sorted(per_individual_thresholds.items()):
+        print(f"    {name}: {t:.4f}")
+
     # Query embeddings (known individuals from test split)
     query_torch = ArcFaceDataset(query_dataset, transform, individual_to_class)
     query_loader = DataLoader(query_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
@@ -1064,8 +1122,7 @@ def run_final_test(model_name, args, seed, task_name):
         'task': task_name,
         'criterion': criterion,
         'threshold_filter': threshold_filter,
-        'threshold': threshold,
-        'gallery_size': gallery_size,
+        'quality_threshold': quality_threshold,
         'query_quality_threshold': query_quality_threshold,
         'best_epoch': best_epoch,
         'hygiene_score': best_config['score'],
@@ -1076,6 +1133,9 @@ def run_final_test(model_name, args, seed, task_name):
         'arcface_margin': ARCFACE_MARGIN,
         'arcface_scale': ARCFACE_SCALE,
         'backbone': model_config['backbone_label'],
+        'gallery_mode': 'event_matched' if is_matched else 'full_filtered',
+        'cosine_threshold': global_threshold,
+        'per_individual_thresholds': per_individual_thresholds,
     }
 
     dataset_info = {
@@ -1133,13 +1193,7 @@ def run_final_test(model_name, args, seed, task_name):
         }
 
     else:
-        # ---- OPEN-SET: BA only, per-individual thresholds from hygiene ----
-        per_individual_thresholds = best_config.get('per_individual_thresholds', {})
-        cosine_threshold = best_config['cosine_threshold']  # global mean for logging
-        if not per_individual_thresholds and cosine_threshold is None:
-            raise ValueError("No thresholds found in hygiene results for open-set task")
-
-        class_to_name = {v: k for k, v in individual_to_class.items()}
+        # ---- OPEN-SET: BA with fresh per-individual thresholds ----
 
         # Rare/Unknown from TEST split only
         rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
@@ -1164,33 +1218,19 @@ def run_final_test(model_name, args, seed, task_name):
         else:
             scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-        # BA using per-individual thresholds from hygiene calibration
-        if per_individual_thresholds:
-            ba_metrics = compute_open_set_metrics_per_individual_threshold(
-                known_query_labels=query_labels,
-                known_query_quality=query_quality,
-                known_scores=scores_known,
-                unknown_query_labels=rare_labels_arr,
-                unknown_query_quality=rare_quality_vals,
-                unknown_scores=scores_unknown,
-                per_individual_thresholds=per_individual_thresholds,
-                quality_thresholds=[query_quality_threshold],
-                gallery_labels=gallery_labels,
-                class_to_name=class_to_name
-            )
-        else:
-            # Fallback to global threshold for backward compat with old results
-            ba_metrics = compute_open_set_metrics_cosine(
-                known_query_labels=query_labels,
-                known_query_quality=query_quality,
-                known_scores=scores_known,
-                unknown_query_labels=rare_labels_arr,
-                unknown_query_quality=rare_quality_vals,
-                unknown_scores=scores_unknown,
-                score_threshold=cosine_threshold,
-                quality_thresholds=[query_quality_threshold],
-                gallery_labels=gallery_labels
-            )
+        # BA using fresh per-individual thresholds from this model's ArcFace centers
+        ba_metrics = compute_open_set_metrics_per_individual_threshold(
+            known_query_labels=query_labels,
+            known_query_quality=query_quality,
+            known_scores=scores_known,
+            unknown_query_labels=rare_labels_arr,
+            unknown_query_quality=rare_quality_vals,
+            unknown_scores=scores_unknown,
+            per_individual_thresholds=per_individual_thresholds,
+            quality_thresholds=[query_quality_threshold],
+            gallery_labels=gallery_labels,
+            class_to_name=class_to_name
+        )
 
         q_key = f"q>={query_quality_threshold}"
         ba_data = ba_metrics.get(q_key, {})
@@ -1201,10 +1241,7 @@ def run_final_test(model_name, args, seed, task_name):
         n_u = ba_data.get('n_unknown_individuals', 0)
 
         print(f"\nTest Results (seed={seed}, task={task_name}):")
-        print(f"  Cosine threshold mean (from hygiene): {cosine_threshold:.4f}")
-        if per_individual_thresholds:
-            for name, t in sorted(per_individual_thresholds.items()):
-                print(f"    {name}: {t:.4f}")
+        print(f"  Fresh threshold (global mean): {global_threshold:.4f}")
         print(f"  {q_key}: BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
 
         dataset_info.update({
@@ -1214,11 +1251,7 @@ def run_final_test(model_name, args, seed, task_name):
         })
 
         result = {
-            'config': {
-                **result_config,
-                'cosine_threshold': cosine_threshold,
-                'per_individual_thresholds': per_individual_thresholds,
-            },
+            'config': result_config,
             'dataset': dataset_info,
             'results': {
                 'balanced_accuracy': ba,
@@ -1291,7 +1324,6 @@ if __name__ == "__main__":
     # test_eval subcommand
     sub_test = subparsers.add_parser("test_eval", help="Final test evaluation")
     add_common_args(sub_test)
-    sub_test.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
 
     args = parser.parse_args()
     model_name = args.model
@@ -1378,28 +1410,27 @@ if __name__ == "__main__":
         print(f"\nJob {args.idx} (opt_embedding_dim) completed!")
 
     elif args.command == "test_eval":
-        seeds = args.seeds
         task_names = list(TEST_TASKS.keys())
+        seed = 0  # single seed
 
         print("=" * 80)
         print(f"Final Test Evaluation - {config['backbone_label']} Re-ID - Job {args.idx}")
-        print(f"  {len(seeds)} seeds x {len(task_names)} tasks = {len(seeds) * len(task_names)} runs")
-        print(f"  Tasks: {', '.join(task_names)}")
+        print(f"  {len(task_names)} tasks (one per SLURM node), seed={seed}")
+        print(f"  Tasks: {', '.join(f'{i}={name}' for i, name in enumerate(task_names))}")
         print("=" * 80)
 
-        if args.idx >= len(seeds):
-            print(f"Job {args.idx} has no work (only {len(seeds)} seeds)")
+        if args.idx >= len(task_names):
+            print(f"Job {args.idx} has no work (only {len(task_names)} tasks)")
             sys.exit(0)
 
-        seed = seeds[args.idx]
-        print(f"\nSeed: {seed}")
+        task_name = task_names[args.idx]
+        print(f"\nTask: {task_name} (seed={seed})")
 
-        for task_name in task_names:
-            try:
-                run_final_test(model_name, args, seed, task_name=task_name)
-            except Exception as e:
-                print(f"Error ({task_name}): {e}")
-                import traceback
-                traceback.print_exc()
+        try:
+            run_final_test(model_name, args, seed, task_name=task_name)
+        except Exception as e:
+            print(f"Error ({task_name}): {e}")
+            import traceback
+            traceback.print_exc()
 
         print(f"\nJob {args.idx} (test_eval) completed!")

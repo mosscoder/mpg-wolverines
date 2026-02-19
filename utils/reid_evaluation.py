@@ -324,6 +324,47 @@ def compute_open_set_metrics_per_individual_threshold(
     return results
 
 
+def compute_arcface_center_thresholds(gallery_embeddings, gallery_labels, criterion,
+                                      class_to_name, device, percentile=5):
+    """
+    Compute per-individual acceptance thresholds from ArcFace centers.
+
+    For each individual, computes cosine similarity between their gallery
+    embeddings and their learned ArcFace center. The p-th percentile
+    similarity sets the acceptance threshold.
+
+    Args:
+        gallery_embeddings: Tensor of gallery embeddings
+        gallery_labels: Tensor of gallery class labels
+        criterion: ArcFaceLoss module (has .weight attribute for centers)
+        class_to_name: dict {class_label_int: individual_name}
+        device: torch device
+        percentile: Percentile for threshold (default 5 = p5)
+
+    Returns:
+        (per_individual_thresholds dict, global_threshold float)
+    """
+    with torch.no_grad():
+        centers = F.normalize(criterion.weight, p=2, dim=1)
+
+    gallery_emb_norm = F.normalize(gallery_embeddings, p=2, dim=1)
+    gallery_center_sims = torch.mm(gallery_emb_norm, centers.t())
+
+    per_individual_thresholds = {}
+    for ind_label in gallery_labels.unique():
+        ind_mask = (gallery_labels == ind_label)
+        ind_name = class_to_name[ind_label.item()]
+        sims_to_own_center = gallery_center_sims[ind_mask, ind_label.item()]
+        per_individual_thresholds[ind_name] = float(
+            np.percentile(sims_to_own_center.cpu().numpy(), percentile)
+        )
+
+    valid_thresholds = list(per_individual_thresholds.values())
+    global_threshold = float(np.mean(valid_thresholds)) if valid_thresholds else 0.5
+
+    return per_individual_thresholds, global_threshold
+
+
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, qualified_individuals, metadata_cache,
                                   criterion, embedding_dim=128,
@@ -450,37 +491,11 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
     # B. Per-individual threshold calibration via ArcFace centers
-    #
-    # For each individual, compute cosine similarity between their gallery
-    # embeddings and their learned ArcFace center. The 5th percentile
-    # similarity sets the acceptance threshold: a query matched to this
-    # individual must be at least as similar to the center as 95% of the
-    # gallery exemplars. This is robust to outlier gallery images and
-    # doesn't require quality filtering since the center is a learned
-    # prototype independent of individual image quality.
     class_to_name = {v: k for k, v in individual_to_class.items()}
 
-    # Extract L2-normalized ArcFace centers
-    with torch.no_grad():
-        centers = F.normalize(criterion.weight, p=2, dim=1)  # [n_classes, emb_dim]
-
-    # Gallery-to-center cosine similarity
-    gallery_emb_norm = F.normalize(gallery_embeddings, p=2, dim=1)
-    gallery_center_sims = torch.mm(gallery_emb_norm, centers.t())  # [n_gallery, n_classes]
-
-    per_individual_thresholds = {}
-    for ind_label in gallery_labels.unique():
-        ind_mask = (gallery_labels == ind_label)
-        ind_name = class_to_name[ind_label.item()]
-
-        # Similarity of this individual's gallery images to their own center
-        sims_to_own_center = gallery_center_sims[ind_mask, ind_label.item()]
-        per_individual_thresholds[ind_name] = float(
-            np.percentile(sims_to_own_center.cpu().numpy(), 5)
-        )
-
-    valid_thresholds = list(per_individual_thresholds.values())
-    global_threshold = float(np.mean(valid_thresholds)) if valid_thresholds else 0.5
+    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
+        gallery_embeddings, gallery_labels, criterion, class_to_name, device
+    )
 
     # Compute BA metrics using per-individual thresholds
     balanced_metrics_by_quality = {}
