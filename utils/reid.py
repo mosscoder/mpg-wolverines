@@ -717,6 +717,110 @@ def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, kno
     return results
 
 
+def compute_open_set_metrics_per_individual_threshold(
+        known_query_labels, known_query_quality, known_scores,
+        unknown_query_labels, unknown_query_quality, unknown_scores,
+        per_individual_thresholds, quality_thresholds, gallery_labels,
+        class_to_name):
+    """
+    Compute macro-averaged open-set metrics using per-individual cosine thresholds.
+
+    Each query's accept/reject decision uses the threshold of the gallery individual
+    it matched best with, rather than a single global threshold.
+
+    Args:
+        per_individual_thresholds: dict {individual_name: float} of cosine thresholds
+        class_to_name: dict {class_label_int: individual_name}
+    """
+    if isinstance(known_query_labels, torch.Tensor):
+        known_labels_np = known_query_labels.cpu().numpy()
+    else:
+        known_labels_np = np.array(known_query_labels)
+
+    gallery_labels_np = gallery_labels.cpu().numpy() if isinstance(gallery_labels, torch.Tensor) else np.array(gallery_labels)
+
+    results = {}
+
+    for q_thresh in quality_thresholds:
+        # Known accept rate (macro-averaged)
+        k_mask = known_query_quality >= q_thresh
+        per_ind_accept = []
+        n_known_individuals = 0
+
+        if k_mask.sum() > 0:
+            known_indices = np.where(k_mask)[0]
+            unique_known_labels = np.unique(known_labels_np[known_indices])
+
+            for ind_label in unique_known_labels:
+                ind_mask = (known_labels_np == ind_label) & k_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # For each query, find best gallery match and that match's individual
+                max_scores, max_gallery_idx = known_scores[ind_indices].max(dim=1)
+                matched_gallery_labels = gallery_labels_np[max_gallery_idx.cpu().numpy()]
+
+                accepted = 0
+                for score, matched_label in zip(max_scores, matched_gallery_labels):
+                    matched_name = class_to_name[int(matched_label)]
+                    thresh = per_individual_thresholds.get(matched_name, 0.5)
+                    if score.item() >= thresh:
+                        accepted += 1
+
+                per_ind_accept.append(accepted / len(ind_indices))
+
+            n_known_individuals = len(per_ind_accept)
+
+        known_accept_rate = np.mean(per_ind_accept) if per_ind_accept else 0.0
+
+        # Unknown reject rate (macro-averaged)
+        u_mask = unknown_query_quality >= q_thresh
+        per_ind_reject = []
+        n_unknown_individuals = 0
+
+        if len(unknown_query_labels) > 0 and u_mask.sum() > 0:
+            unknown_indices = np.where(u_mask)[0]
+            unique_unknown_labels = np.unique(unknown_query_labels[unknown_indices])
+
+            for ind_id in unique_unknown_labels:
+                ind_mask = (unknown_query_labels == ind_id) & u_mask
+                ind_indices = np.where(ind_mask)[0]
+
+                if len(ind_indices) == 0:
+                    continue
+
+                # For each unknown query, find best gallery match and use that individual's threshold
+                max_scores, max_gallery_idx = unknown_scores[ind_indices].max(dim=1)
+                matched_gallery_labels = gallery_labels_np[max_gallery_idx.cpu().numpy()]
+
+                rejected = 0
+                for score, matched_label in zip(max_scores, matched_gallery_labels):
+                    matched_name = class_to_name[int(matched_label)]
+                    thresh = per_individual_thresholds.get(matched_name, 0.5)
+                    if score.item() < thresh:
+                        rejected += 1
+
+                per_ind_reject.append(rejected / len(ind_indices))
+
+            n_unknown_individuals = len(per_ind_reject)
+
+        unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 1.0
+
+        balanced_acc = (known_accept_rate + unknown_reject_rate) / 2.0
+
+        results[f"q>={q_thresh}"] = {
+            'balanced_accuracy': balanced_acc,
+            'known_accept_rate': known_accept_rate,
+            'unknown_reject_rate': unknown_reject_rate,
+            'n_known_individuals': n_known_individuals,
+            'n_unknown_individuals': n_unknown_individuals
+        }
+
+    return results
+
+
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, qualified_individuals, metadata_cache,
                                   gallery_threshold, criterion, embedding_dim=128,
@@ -842,90 +946,55 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
-    # B. Cosine Threshold Selection (sweep on validation scores)
+    # B. Per-individual threshold calibration (gallery self-similarity)
     #
-    # Per quality level, sweep 101 thresholds on query-gallery and
-    # unknown-gallery scores to find the cosine threshold maximizing BA.
-    # Uses macro-averaged per-individual accept/reject rates via matmul.
-    thresholds = np.linspace(0.0, 1.0, 101)
-    T = len(thresholds)
-    thresholds_t = torch.tensor(thresholds, dtype=torch.float32, device=gallery_labels.device)
+    # For each gallery individual, compute the 95th percentile of pairwise
+    # cosine similarities between that individual's images and all other
+    # gallery images. This represents the maximum similarity an unknown would
+    # have to this individual's region of embedding space. Thresholds naturally
+    # scale with gallery composition.
+    scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
+    scores_gal_gal.fill_diagonal_(-1.0)  # exclude self-matches
 
+    unique_individuals = gallery_labels.unique()
+    class_to_name = {v: k for k, v in individual_to_class.items()}
+
+    per_individual_thresholds = {}
+    for ind_label in unique_individuals:
+        ind_mask = (gallery_labels == ind_label)
+        other_mask = ~ind_mask
+        cross_sims = scores_gal_gal[ind_mask][:, other_mask]
+        thresh = float(torch.quantile(cross_sims.float().flatten(), 0.95).item())
+        ind_name = class_to_name[ind_label.item()]
+        per_individual_thresholds[ind_name] = thresh
+
+    global_threshold = float(np.mean(list(per_individual_thresholds.values())))
+
+    # Compute BA metrics using per-individual thresholds
     balanced_metrics_by_quality = {}
 
     for q_thresh in QUERY_QUALITY_THRESHOLDS:
         q_key = f"q>={q_thresh}"
-
-        # Known queries at this quality level
-        k_mask = query_quality >= q_thresh
-        k_indices = np.where(k_mask)[0]
-
-        if len(k_indices) > 0:
-            known_max_scores = scores_known[k_indices].max(dim=1).values
-            known_labels_masked = query_labels_np[k_indices]
-            unique_known = np.unique(known_labels_masked)
-
-            # Indicator matrix for known individuals: (N_known, K_known)
-            k_label_to_col = {l: j for j, l in enumerate(unique_known)}
-            k_indicator = torch.zeros(len(k_indices), len(unique_known),
-                                       device=gallery_labels.device)
-            for s, l in enumerate(known_labels_masked):
-                k_indicator[s, k_label_to_col[l]] = 1.0
-            k_counts = k_indicator.sum(dim=0)
-
-            # (T, N_known) @ (N_known, K_known) / counts -> (T, K_known) -> mean -> (T,)
-            accepted = (known_max_scores.unsqueeze(0) >= thresholds_t.unsqueeze(1)).float()
-            known_accept_curve = (accepted @ k_indicator / k_counts.unsqueeze(0)).mean(dim=1)
-        else:
-            known_accept_curve = torch.zeros(T, device=gallery_labels.device)
-
-        # Unknown queries at this quality level
-        u_mask = rare_quality_arr >= q_thresh if len(rare_quality_arr) > 0 else np.array([], dtype=bool)
-
-        if len(rare_labels_arr) > 0 and u_mask.sum() > 0:
-            u_indices = np.where(u_mask)[0]
-            unknown_max_scores = scores_unknown[u_indices].max(dim=1).values
-            unknown_labels_masked = rare_labels_arr[u_indices]
-            unique_unknown = np.unique(unknown_labels_masked)
-
-            u_label_to_col = {l: j for j, l in enumerate(unique_unknown)}
-            u_indicator = torch.zeros(len(u_indices), len(unique_unknown),
-                                       device=gallery_labels.device)
-            for s, l in enumerate(unknown_labels_masked):
-                u_indicator[s, u_label_to_col[l]] = 1.0
-            u_counts = u_indicator.sum(dim=0)
-
-            rejected = (unknown_max_scores.unsqueeze(0) < thresholds_t.unsqueeze(1)).float()
-            unknown_reject_curve = (rejected @ u_indicator / u_counts.unsqueeze(0)).mean(dim=1)
-        else:
-            unknown_reject_curve = torch.ones(T, device=gallery_labels.device)
-
-        ba_curve = (known_accept_curve + unknown_reject_curve) / 2
-        best_idx = ba_curve.argmax().item()
-        optimal_thresh_q = float(thresholds[best_idx])
-
-        # Evaluate at optimal threshold for full metrics
-        q_metrics = compute_open_set_metrics_cosine(
+        q_metrics = compute_open_set_metrics_per_individual_threshold(
             known_query_labels=query_labels,
             known_query_quality=query_quality,
             known_scores=scores_known,
             unknown_query_labels=rare_labels_arr,
             unknown_query_quality=rare_quality_arr,
             unknown_scores=scores_unknown,
-            score_threshold=optimal_thresh_q,
+            per_individual_thresholds=per_individual_thresholds,
             quality_thresholds=[q_thresh],
-            gallery_labels=gallery_labels
+            gallery_labels=gallery_labels,
+            class_to_name=class_to_name
         )
         balanced_metrics_by_quality[q_key] = q_metrics[q_key]
-        balanced_metrics_by_quality[q_key]['cosine_threshold'] = optimal_thresh_q
-
-    # q>=0.0 threshold stored at top level for backward compatibility
-    optimal_thresh = balanced_metrics_by_quality.get('q>=0.0', {}).get('cosine_threshold', 0.0)
+        balanced_metrics_by_quality[q_key]['cosine_threshold'] = global_threshold
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'validation_sweep',
-            'threshold': optimal_thresh,
+            'method': 'gallery_self_similarity_p95',
+            'threshold': global_threshold,
+            'per_individual': per_individual_thresholds,
         },
         'by_quality': balanced_metrics_by_quality
     }
@@ -1505,7 +1574,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
         dict with {threshold, gallery_size, best_epoch, score}
     """
     config = MODEL_CONFIGS[model_name]
-    results_dir = os.path.join(config['experiment_dir'], 'results')
+    results_dir = os.path.join(config['experiment_dir'], 'results', 'hygiene')
 
     files = glob.glob(os.path.join(results_dir, 'threshold=*_gallery=*_seed=*.json'))
     if not files:
@@ -1578,22 +1647,28 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                         best_mean = epoch_mean
                         best_epoch_num = epoch_num
 
-            # Extract cosine threshold at best epoch (for open-set tasks)
-            # Always use q>=0.0 threshold (calibrated on full unknown pool)
-            # to avoid overfitting to small per-quality subsets
+            # Extract per-individual thresholds at best epoch (for open-set tasks)
+            all_per_individual_thresholds = defaultdict(list)
             cosine_thresholds = []
             for history in all_histories:
                 for entry in history:
                     if entry['epoch'] == best_epoch_num:
                         open_set = entry.get('open_set', {})
-                        ct = open_set.get('by_quality', {}).get(
-                            'q>=0.0', {}).get('cosine_threshold')
+                        per_ind = open_set.get('threshold_calibration', {}).get('per_individual', {})
+                        for name, thresh in per_ind.items():
+                            all_per_individual_thresholds[name].append(thresh)
+                        # Global threshold for backward compat
+                        ct = open_set.get('threshold_calibration', {}).get('threshold')
                         if ct is None:
-                            ct = open_set.get(
-                                'threshold_calibration', {}).get('threshold')
+                            ct = open_set.get('by_quality', {}).get(
+                                'q>=0.0', {}).get('cosine_threshold')
                         if ct is not None:
                             cosine_thresholds.append(ct)
                         break
+
+            # Average each individual's threshold across seeds
+            mean_per_individual = {name: float(np.mean(vals))
+                                   for name, vals in all_per_individual_thresholds.items()}
             mean_cosine_thresh = float(np.mean(cosine_thresholds)) if cosine_thresholds else None
 
             if best_mean > best_overall_score:
@@ -1607,6 +1682,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                     'criterion': criterion,
                     'n_seeds': len(group_results),
                     'cosine_threshold': mean_cosine_thresh,
+                    'per_individual_thresholds': mean_per_individual,
                 }
 
     print(f"Best hygiene config ({criterion}): threshold={best_config['threshold']}, "
@@ -1920,10 +1996,13 @@ def run_final_test(model_name, args, seed, task_name):
         }
 
     else:
-        # ---- OPEN-SET: BA only, cosine threshold from hygiene ----
-        cosine_threshold = best_config['cosine_threshold']
-        if cosine_threshold is None:
-            raise ValueError("No cosine threshold found in hygiene results for open-set task")
+        # ---- OPEN-SET: BA only, per-individual thresholds from hygiene ----
+        per_individual_thresholds = best_config.get('per_individual_thresholds', {})
+        cosine_threshold = best_config['cosine_threshold']  # global mean for logging
+        if not per_individual_thresholds and cosine_threshold is None:
+            raise ValueError("No thresholds found in hygiene results for open-set task")
+
+        class_to_name = {v: k for k, v in individual_to_class.items()}
 
         # Rare/Unknown from TEST split only
         rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
@@ -1948,18 +2027,33 @@ def run_final_test(model_name, args, seed, task_name):
         else:
             scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-        # BA using hygiene-calibrated cosine threshold at the selected query quality threshold
-        ba_metrics = compute_open_set_metrics_cosine(
-            known_query_labels=query_labels,
-            known_query_quality=query_quality,
-            known_scores=scores_known,
-            unknown_query_labels=rare_labels_arr,
-            unknown_query_quality=rare_quality_vals,
-            unknown_scores=scores_unknown,
-            score_threshold=cosine_threshold,
-            quality_thresholds=[query_quality_threshold],
-            gallery_labels=gallery_labels
-        )
+        # BA using per-individual thresholds from hygiene calibration
+        if per_individual_thresholds:
+            ba_metrics = compute_open_set_metrics_per_individual_threshold(
+                known_query_labels=query_labels,
+                known_query_quality=query_quality,
+                known_scores=scores_known,
+                unknown_query_labels=rare_labels_arr,
+                unknown_query_quality=rare_quality_vals,
+                unknown_scores=scores_unknown,
+                per_individual_thresholds=per_individual_thresholds,
+                quality_thresholds=[query_quality_threshold],
+                gallery_labels=gallery_labels,
+                class_to_name=class_to_name
+            )
+        else:
+            # Fallback to global threshold for backward compat with old results
+            ba_metrics = compute_open_set_metrics_cosine(
+                known_query_labels=query_labels,
+                known_query_quality=query_quality,
+                known_scores=scores_known,
+                unknown_query_labels=rare_labels_arr,
+                unknown_query_quality=rare_quality_vals,
+                unknown_scores=scores_unknown,
+                score_threshold=cosine_threshold,
+                quality_thresholds=[query_quality_threshold],
+                gallery_labels=gallery_labels
+            )
 
         q_key = f"q>={query_quality_threshold}"
         ba_data = ba_metrics.get(q_key, {})
@@ -1970,7 +2064,10 @@ def run_final_test(model_name, args, seed, task_name):
         n_u = ba_data.get('n_unknown_individuals', 0)
 
         print(f"\nTest Results (seed={seed}, task={task_name}):")
-        print(f"  Cosine threshold (from hygiene): {cosine_threshold:.4f}")
+        print(f"  Cosine threshold mean (from hygiene): {cosine_threshold:.4f}")
+        if per_individual_thresholds:
+            for name, t in sorted(per_individual_thresholds.items()):
+                print(f"    {name}: {t:.4f}")
         print(f"  {q_key}: BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
 
         dataset_info.update({
@@ -1980,7 +2077,11 @@ def run_final_test(model_name, args, seed, task_name):
         })
 
         result = {
-            'config': {**result_config, 'cosine_threshold': cosine_threshold},
+            'config': {
+                **result_config,
+                'cosine_threshold': cosine_threshold,
+                'per_individual_thresholds': per_individual_thresholds,
+            },
             'dataset': dataset_info,
             'results': {
                 'balanced_accuracy': ba,

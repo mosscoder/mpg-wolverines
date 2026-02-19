@@ -306,7 +306,6 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
                 strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
 
         # --- Optimal BA: find best gallery threshold for BA ---
-        # Use q>=0.0 only: single cosine threshold calibrated on full unknown pool
         best_mean_ba = -1
         best_ba_values_ba = None
         best_gal_thresh_ba = None
@@ -322,7 +321,7 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             if 'open_set' not in all_histories[0][0]:
                 continue
 
-            for q_thresh in ['q>=0.0']:
+            for q_thresh in query_thresholds:
                 best_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=q_thresh)
 
                 ba_values = []
@@ -1270,7 +1269,7 @@ def run_aggregate(base_dir: str = "reid_openset"):
     model_data = {}
 
     for model_name, config in MODEL_CONFIGS.items():
-        results_dir = f"{config['experiment_dir']}/results"
+        results_dir = f"{config['experiment_dir']}/results/hygiene"
         print(f"\n--- Loading {model_name} from {results_dir} ---")
 
         result = run_single_model(model_name, results_dir, base_dir)
@@ -1329,7 +1328,7 @@ if __name__ == "__main__":
         run_aggregate()
     elif args.model:
         config = MODEL_CONFIGS[args.model]
-        results_dir = args.results_dir or f"{config['experiment_dir']}/results"
+        results_dir = args.results_dir or f"{config['experiment_dir']}/results/hygiene"
         output_dir = args.output_dir or "reid_openset"
         run_single_model(args.model, results_dir, output_dir)
     else:

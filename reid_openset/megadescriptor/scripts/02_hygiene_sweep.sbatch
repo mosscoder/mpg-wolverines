@@ -45,7 +45,7 @@ echo "========================================"
 # Run the open-set raw cosine hygiene sweep script
 python -u -m utils.reid hygiene --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/megadescriptor/results \
+    --output_dir reid_openset/megadescriptor/results/hygiene \
     --device gpu
 
 # Print completion info
