@@ -326,7 +326,7 @@ def compute_open_set_metrics_per_individual_threshold(
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
                                   transform, device, dataset, qualified_individuals, metadata_cache,
-                                  gallery_threshold, criterion, embedding_dim=128,
+                                  criterion, embedding_dim=128,
                                   batch_size=EVAL_BATCH_SIZE,
                                   promoted_individuals=None, excluded_individuals=None):
     """
@@ -449,43 +449,38 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
-    # B. Per-individual threshold calibration (within-individual pairwise similarity)
+    # B. Per-individual threshold calibration via ArcFace centers
     #
-    # For each gallery individual, compute pairwise cosine similarities among
-    # that individual's own gallery images. The minimum pairwise similarity
-    # sets the acceptance threshold: a query must be at least as similar as
-    # the weakest self-match to be accepted. As training progresses,
-    # within-individual similarity increases → threshold rises → stricter
-    # rejection of unknowns.
-    scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
-    scores_gal_gal.fill_diagonal_(-1.0)  # exclude self-matches
-
-    unique_individuals = gallery_labels.unique()
+    # For each individual, compute cosine similarity between their gallery
+    # embeddings and their learned ArcFace center. The 5th percentile
+    # similarity sets the acceptance threshold: a query matched to this
+    # individual must be at least as similar to the center as 95% of the
+    # gallery exemplars. This is robust to outlier gallery images and
+    # doesn't require quality filtering since the center is a learned
+    # prototype independent of individual image quality.
     class_to_name = {v: k for k, v in individual_to_class.items()}
 
+    # Extract L2-normalized ArcFace centers
+    with torch.no_grad():
+        centers = F.normalize(criterion.weight, p=2, dim=1)  # [n_classes, emb_dim]
+
+    # Gallery-to-center cosine similarity
+    gallery_emb_norm = F.normalize(gallery_embeddings, p=2, dim=1)
+    gallery_center_sims = torch.mm(gallery_emb_norm, centers.t())  # [n_gallery, n_classes]
+
     per_individual_thresholds = {}
-    for ind_label in unique_individuals:
+    for ind_label in gallery_labels.unique():
         ind_mask = (gallery_labels == ind_label)
-        n_ind = ind_mask.sum().item()
         ind_name = class_to_name[ind_label.item()]
 
-        if n_ind < 2:
-            # Single gallery image — no pairwise sims, use global fallback later
-            per_individual_thresholds[ind_name] = None
-            continue
+        # Similarity of this individual's gallery images to their own center
+        sims_to_own_center = gallery_center_sims[ind_mask, ind_label.item()]
+        per_individual_thresholds[ind_name] = float(
+            np.percentile(sims_to_own_center.cpu().numpy(), 5)
+        )
 
-        within_sims = scores_gal_gal[ind_mask][:, ind_mask]
-        # Extract upper triangle (off-diagonal pairwise similarities)
-        triu_idx = torch.triu_indices(n_ind, n_ind, offset=1)
-        pairwise_sims = within_sims[triu_idx[0], triu_idx[1]]
-        per_individual_thresholds[ind_name] = float(pairwise_sims.min().item())
-
-    # Fill in fallback for individuals with only 1 gallery image
-    valid_thresholds = [v for v in per_individual_thresholds.values() if v is not None]
+    valid_thresholds = list(per_individual_thresholds.values())
     global_threshold = float(np.mean(valid_thresholds)) if valid_thresholds else 0.5
-    for name in per_individual_thresholds:
-        if per_individual_thresholds[name] is None:
-            per_individual_thresholds[name] = global_threshold
 
     # Compute BA metrics using per-individual thresholds
     balanced_metrics_by_quality = {}
@@ -509,8 +504,8 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'within_individual_pairwise_min',
-            'threshold': global_threshold,
+            'method': 'arcface_center_p5',
+            'global_threshold': global_threshold,
             'per_individual': per_individual_thresholds,
         },
         'by_quality': balanced_metrics_by_quality

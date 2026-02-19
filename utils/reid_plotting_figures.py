@@ -277,13 +277,8 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
                 for h in history:
                     if h['epoch'] == best_epoch and 'open_set' in h:
                         open_set = h['open_set']
-                        ct = open_set.get('by_quality', {}).get(
-                            'q>=0.0', {}).get('cosine_threshold')
-                        if ct is None:
-                            ct = open_set.get(
-                                'threshold_calibration', {}).get('threshold')
-                        if ct is not None:
-                            thresh_values.append(ct)
+                        ct = open_set['threshold_calibration']['global_threshold']
+                        thresh_values.append(ct)
                         break
 
             if thresh_values:

@@ -316,7 +316,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
         query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
-            dataset, feasible_individuals, metadata_cache, gallery_threshold=threshold,
+            dataset, feasible_individuals, metadata_cache,
             criterion=criterion, embedding_dim=emb_dim,
             promoted_individuals=promoted_individuals,
             excluded_individuals=excluded_individuals
@@ -342,7 +342,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             best_harmonic_mean = hm
             best_hm_epoch = epoch + 1
 
-        thresh_mean = open_set_metrics.get('threshold_calibration', {}).get('threshold', 0.0)
+        thresh_mean = by_quality.get('q>=0.0', {}).get('cosine_threshold', 0.0)
 
         print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, thresh={thresh_mean:.3f}")
 
@@ -796,16 +796,11 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                 for entry in history:
                     if entry['epoch'] == best_epoch_num:
                         open_set = entry.get('open_set', {})
-                        per_ind = open_set.get('threshold_calibration', {}).get('per_individual', {})
-                        for name, thresh in per_ind.items():
+                        thresh_cal = open_set['threshold_calibration']
+
+                        for name, thresh in thresh_cal['per_individual'].items():
                             all_per_individual_thresholds[name].append(thresh)
-                        # Global threshold for backward compat
-                        ct = open_set.get('threshold_calibration', {}).get('threshold')
-                        if ct is None:
-                            ct = open_set.get('by_quality', {}).get(
-                                'q>=0.0', {}).get('cosine_threshold')
-                        if ct is not None:
-                            cosine_thresholds.append(ct)
+                        cosine_thresholds.append(thresh_cal['global_threshold'])
                         break
 
             # Average each individual's threshold across seeds
