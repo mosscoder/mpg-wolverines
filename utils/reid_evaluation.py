@@ -449,13 +449,14 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
-    # B. Per-individual threshold calibration (gallery self-similarity)
+    # B. Per-individual threshold calibration (within-individual pairwise similarity)
     #
-    # For each gallery individual, compute the 95th percentile of pairwise
-    # cosine similarities between that individual's images and all other
-    # gallery images. This represents the maximum similarity an unknown would
-    # have to this individual's region of embedding space. Thresholds naturally
-    # scale with gallery composition.
+    # For each gallery individual, compute pairwise cosine similarities among
+    # that individual's own gallery images. The minimum pairwise similarity
+    # sets the acceptance threshold: a query must be at least as similar as
+    # the weakest self-match to be accepted. As training progresses,
+    # within-individual similarity increases → threshold rises → stricter
+    # rejection of unknowns.
     scores_gal_gal = compute_cosine_similarity(gallery_embeddings, gallery_embeddings)
     scores_gal_gal.fill_diagonal_(-1.0)  # exclude self-matches
 
@@ -465,13 +466,26 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     per_individual_thresholds = {}
     for ind_label in unique_individuals:
         ind_mask = (gallery_labels == ind_label)
-        other_mask = ~ind_mask
-        cross_sims = scores_gal_gal[ind_mask][:, other_mask]
-        thresh = float(torch.quantile(cross_sims.float().flatten(), 0.95).item())
+        n_ind = ind_mask.sum().item()
         ind_name = class_to_name[ind_label.item()]
-        per_individual_thresholds[ind_name] = thresh
 
-    global_threshold = float(np.mean(list(per_individual_thresholds.values())))
+        if n_ind < 2:
+            # Single gallery image — no pairwise sims, use global fallback later
+            per_individual_thresholds[ind_name] = None
+            continue
+
+        within_sims = scores_gal_gal[ind_mask][:, ind_mask]
+        # Extract upper triangle (off-diagonal pairwise similarities)
+        triu_idx = torch.triu_indices(n_ind, n_ind, offset=1)
+        pairwise_sims = within_sims[triu_idx[0], triu_idx[1]]
+        per_individual_thresholds[ind_name] = float(pairwise_sims.min().item())
+
+    # Fill in fallback for individuals with only 1 gallery image
+    valid_thresholds = [v for v in per_individual_thresholds.values() if v is not None]
+    global_threshold = float(np.mean(valid_thresholds)) if valid_thresholds else 0.5
+    for name in per_individual_thresholds:
+        if per_individual_thresholds[name] is None:
+            per_individual_thresholds[name] = global_threshold
 
     # Compute BA metrics using per-individual thresholds
     balanced_metrics_by_quality = {}
@@ -495,7 +509,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'gallery_self_similarity_p95',
+            'method': 'within_individual_pairwise_min',
             'threshold': global_threshold,
             'per_individual': per_individual_thresholds,
         },
