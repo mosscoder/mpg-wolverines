@@ -388,7 +388,7 @@ def evaluate_recall_simple(model, train_dataset, test_dataset, individual_to_cla
             emb = model(images)
             query_embeddings.append(emb)
             query_labels.extend(labels.tolist())
-    query_embeddings = torch.cat(query_embeddings, dim=0)
+    query_embeddings = torch.cat(query_embeddings, dim=0).float()
     query_labels_np = np.array(query_labels)
 
     # Compute cosine similarity
