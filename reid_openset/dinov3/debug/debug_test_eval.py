@@ -8,7 +8,7 @@ on the test split (R@1, open-set BA).
 Usage:
     cd /home/kdoherty/wolverines
     python -u reid_openset/dinov3/debug/debug_test_eval.py \
-        --device gpu --epochs 50 --seed 0
+        --device gpu --epochs 20 --seed 0
 """
 
 import os
@@ -57,7 +57,7 @@ MODEL_NAME = "dinov3"
 def main():
     parser = argparse.ArgumentParser(description="Debug test eval: unfiltered DINOv3")
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()

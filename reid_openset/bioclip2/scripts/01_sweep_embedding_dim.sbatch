@@ -15,7 +15,7 @@
 # 2 dims x 5 seeds = 10 configs, one per job
 #
 # Dims: 256, 512
-# Fixed: Best LR from prior sweep, native image size, seeds=0,1,2,3,4, 50 epochs
+# Fixed: Best LR from prior sweep, native image size, seeds=0,1,2,3,4, 20 epochs
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/embedding_dim
@@ -51,7 +51,7 @@ python -u -m utils.reid opt_embedding_dim --model bioclip2 \
     --device gpu \
     --values 256 512 \
     --lr 0.0005 --image-size 224 \
-    --epochs 50 --seeds 0 1 2 3 4
+    --epochs 20 --seeds 0 1 2 3 4
 
 # Print completion info
 echo "========================================"

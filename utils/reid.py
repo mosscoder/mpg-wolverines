@@ -195,7 +195,7 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=50):
+                         learning_rate, image_size, embedding_dim, epochs=20):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
@@ -496,7 +496,7 @@ def run_hygiene_sweep(model_name, args):
 def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
                      dataset, config, metadata_cache,
                      learning_rate=None, image_size=None, embedding_dim=128,
-                     epochs=50, seed=0):
+                     epochs=20, seed=0):
     """
     Shared training loop for all opt sweep scripts (LR, resize, embedding_dim).
 
@@ -1281,7 +1281,7 @@ if __name__ == "__main__":
     sub_lr.add_argument("--values", type=float, nargs="+", required=True, help="Learning rates to sweep")
     sub_lr.add_argument("--image-size", type=int, required=True, help="Fixed image size")
     sub_lr.add_argument("--embedding-dim", type=int, default=128, help="Fixed embedding dimension")
-    sub_lr.add_argument("--epochs", type=int, default=50)
+    sub_lr.add_argument("--epochs", type=int, default=20)
     sub_lr.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     # opt_embedding_dim subcommand
@@ -1290,7 +1290,7 @@ if __name__ == "__main__":
     sub_emb.add_argument("--values", type=int, nargs="+", required=True, help="Embedding dims to sweep")
     sub_emb.add_argument("--lr", type=float, required=True, help="Fixed learning rate")
     sub_emb.add_argument("--image-size", type=int, required=True, help="Fixed image size")
-    sub_emb.add_argument("--epochs", type=int, default=50)
+    sub_emb.add_argument("--epochs", type=int, default=20)
     sub_emb.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     # test_eval subcommand
