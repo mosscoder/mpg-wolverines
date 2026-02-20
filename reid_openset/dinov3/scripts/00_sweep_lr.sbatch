@@ -55,7 +55,7 @@ python -u -m utils.reid opt_lr --model dinov3 \
     --device gpu \
     --values 0.0001 0.0005 0.001 0.005 \
     --image-size 224 \
-    --embedding-dim 128 --epochs 50 --seeds 0 1 2 3 4
+    --embedding-dim 256 --epochs 50 --seeds 0 1 2 3 4
 
 # Print completion info
 echo "========================================"

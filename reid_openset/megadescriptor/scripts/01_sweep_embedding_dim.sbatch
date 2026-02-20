@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_emb_dim_sweep_MD
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-9
+#SBATCH --array=0-23
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
