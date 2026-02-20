@@ -46,7 +46,7 @@ from utils.reid_data import (
     ArcFaceDataset,
     load_feasibility_config, load_reidentification_dataset,
     build_metadata_cache, get_rare_individual_indices,
-    create_filtered_gallery_dataset,
+    filter_training_pool_by_quality,
 )
 from utils.reid_evaluation import (
     evaluate_recall_with_openset,
@@ -168,20 +168,42 @@ def build_unfiltered_split(dataset, metadata_cache, feasible_individuals, feasib
 
 
 def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibility_config,
-                         threshold, gallery_size, seed):
-    """Quality-filtered + gallery-capped split via create_filtered_gallery_dataset."""
-    train_ds, val_ds, individual_to_class, raw_info = create_filtered_gallery_dataset(
-        dataset, feasible_individuals, gallery_size, threshold, seed,
-        metadata_cache, feasibility_config,
-    )
+                         threshold, seed):
+    """Quality-filtered split: all images passing threshold (no gallery_size cap)."""
+    set_all_seeds(seed)
+    id_to_indices = metadata_cache["id_to_indices"]
+    validation_indices = feasibility_config.get("validation_indices", {})
+    individual_to_class = {ind: i for i, ind in enumerate(sorted(feasible_individuals))}
+
+    all_train_indices = []
+    all_val_indices = []
+    gallery_info = {}
+    query_info = {}
+
+    for ind_id in feasible_individuals:
+        val_idx = validation_indices.get(ind_id, {}).get("indices", [])
+        val_idx_set = set(val_idx)
+        all_val_indices.extend(val_idx)
+        query_info[ind_id] = len(val_idx)
+
+        all_ind_indices = list(id_to_indices.get(ind_id, []))
+        train_only = [i for i in all_ind_indices if i not in val_idx_set]
+        eligible = filter_training_pool_by_quality(metadata_cache, train_only, threshold)
+        all_train_indices.extend(eligible)
+        gallery_info[ind_id] = len(eligible)
+
+        print(f"  {ind_id}: {len(eligible)}/{len(train_only)} pass threshold>={threshold}, {len(val_idx)} val")
+
+    train_ds = dataset.select(all_train_indices) if all_train_indices else None
+    val_ds = dataset.select(all_val_indices)
+    print(f"Total: {len(all_train_indices)} train (filtered), {len(all_val_indices)} val")
+
     dataset_info = {
-        "gallery_info": raw_info["gallery_samples_per_individual"],
-        "eligible_pool_info": raw_info["eligible_pool_per_individual"],
-        "query_info": raw_info["query_samples_per_individual"],
-        "total_train": len(train_ds) if train_ds else 0,
-        "total_val": len(val_ds) if val_ds else 0,
+        "gallery_info": gallery_info,
+        "query_info": query_info,
+        "total_train": len(all_train_indices),
+        "total_val": len(all_val_indices),
         "quality_threshold": threshold,
-        "gallery_size": gallery_size,
     }
     return train_ds, val_ds, individual_to_class, dataset_info
 
@@ -441,12 +463,11 @@ def main():
         print(f"\nLoading best hygiene config for criterion={hygiene_criterion}...")
         best_hygiene = load_best_hygiene_config(MODEL_NAME, criterion=hygiene_criterion)
         threshold = best_hygiene["threshold"]
-        gallery_size = best_hygiene["gallery_size"]
-        print(f"Mode: {mode_label} (threshold={threshold}, gallery_size={gallery_size})")
+        print(f"Mode: {mode_label} (threshold={threshold}, all eligible images)")
 
         train_ds, val_ds, individual_to_class, dataset_info = build_filtered_split(
             dataset, metadata_cache, feasible_individuals, feasibility_config,
-            threshold, gallery_size, seed,
+            threshold, seed,
         )
         dataset_info["mode"] = mode_label
         dataset_info["hygiene_config"] = best_hygiene
