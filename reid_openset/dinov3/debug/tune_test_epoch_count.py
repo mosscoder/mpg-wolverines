@@ -1,17 +1,18 @@
 """
-Tune epoch count: train on all unfiltered data (minus val), evaluate on val each epoch.
+Tune epoch count across three gallery conditions, each on its own node.
 
-Uses the same train/val splitting regime as the hygiene sweep (greedy temporal
-validation indices from feasibility config). No quality filtering, no gallery_size
-cap. Gallery = all training images for qualified individuals minus validation images.
+  idx=0  Unfiltered: all training images (minus val), no quality filter
+  idx=1  Best R@1 filtered: best (threshold, gallery_size) from hygiene by recall
+  idx=2  Best BA filtered: best (threshold, gallery_size) from hygiene by balanced_accuracy
 
-Uses the persistent-pointer BalancedBatchSampler so epoch length is based on the
-smallest class (one pass through the rarest individual per epoch).
+Uses the same train/val splitting as the hygiene sweep (greedy temporal
+validation indices from feasibility config). Persistent-pointer
+BalancedBatchSampler sizes epochs to the smallest class.
 
 Usage:
     cd /home/kdoherty/wolverines
     python -u reid_openset/dinov3/debug/tune_test_epoch_count.py \
-        --device gpu --epochs 100 --eval-every 5 --seed 0
+        --idx 0 --device gpu --epochs 200 --eval-every 5 --seed 0
 """
 
 import os
@@ -45,16 +46,24 @@ from utils.reid_data import (
     ArcFaceDataset,
     load_feasibility_config, load_reidentification_dataset,
     build_metadata_cache, get_rare_individual_indices,
+    create_filtered_gallery_dataset,
 )
 from utils.reid_evaluation import (
     evaluate_recall_with_openset,
 )
 from utils.reid import (
-    count_trainable_parameters, load_best_hyperparams,
+    count_trainable_parameters, load_best_hyperparams, load_best_hygiene_config,
 )
 
 
 MODEL_NAME = "dinov3"
+
+# idx -> (label, hygiene criterion or None)
+JOB_CONFIGS = {
+    0: ("unfiltered", None),
+    1: ("best_recall", "recall"),
+    2: ("best_ba", "balanced_accuracy"),
+}
 
 
 class BalancedBatchSampler(Sampler):
@@ -120,56 +129,12 @@ class BalancedBatchSampler(Sampler):
         return math.ceil(self.min_class_size / self.k)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Tune epoch count: unfiltered DINOv3, val eval each epoch")
-    parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--eval-every", type=int, default=5,
-                        help="Evaluate on val every N epochs (always eval on last epoch)")
-    parser.add_argument("--overwrite", action="store_true")
-    args = parser.parse_args()
-
-    seed = args.seed
-    epochs = args.epochs
-    eval_every = args.eval_every
+def build_unfiltered_split(dataset, metadata_cache, feasible_individuals, feasibility_config, seed):
+    """All training images minus val indices, no quality filter."""
     set_all_seeds(seed)
-
-    output_dir = os.path.join(MODEL_CONFIGS[MODEL_NAME]["experiment_dir"], "debug")
-    output_path = os.path.join(output_dir, f"tune_epoch_count_seed={seed}.json")
-
-    if os.path.exists(output_path) and not args.overwrite:
-        print(f"Result exists: {output_path}. Use --overwrite to replace.")
-        return
-
-    print("=" * 70)
-    print(f"Tune Epoch Count: DINOv3 unfiltered, val eval each epoch, seed={seed}")
-    print("=" * 70)
-
-    # Load best hyperparams from opt sweeps
-    best_lr, best_size, best_embedding_dim = load_best_hyperparams(MODEL_NAME)
-
-    # Load dataset and config
-    print("\nLoading dataset...")
-    dataset = load_reidentification_dataset()
-    metadata_cache = build_metadata_cache(dataset)
-
-    feasibility_config = load_feasibility_config()
-    if not feasibility_config:
-        print("Failed to load feasibility config")
-        return
-
-    feasible_individuals = feasibility_config.get("qualified_individuals", [])
-    promoted_individuals = feasibility_config.get("promoted_to_rare", [])
-    excluded_individuals = feasibility_config.get("excluded_entirely", [])
-    validation_indices = feasibility_config.get("validation_indices", {})
-
-    print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
-
-    # Split: train = all images minus val, val = greedy temporal indices
     id_to_indices = metadata_cache["id_to_indices"]
+    validation_indices = feasibility_config.get("validation_indices", {})
     individual_to_class = {ind: i for i, ind in enumerate(sorted(feasible_individuals))}
-    class_to_name = {v: k for k, v in individual_to_class.items()}
 
     all_train_indices = []
     all_val_indices = []
@@ -189,21 +154,60 @@ def main():
 
         print(f"  {ind_id}: {len(train_only)} train, {len(val_idx)} val")
 
-    train_dataset = dataset.select(all_train_indices)
-    val_dataset = dataset.select(all_val_indices)
-    print(f"\nTotal: {len(all_train_indices)} train, {len(all_val_indices)} val")
+    train_ds = dataset.select(all_train_indices)
+    val_ds = dataset.select(all_val_indices)
+    print(f"Total: {len(all_train_indices)} train, {len(all_val_indices)} val")
 
-    # Create model
-    device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
+    dataset_info = {
+        "gallery_info": gallery_info,
+        "query_info": query_info,
+        "total_train": len(all_train_indices),
+        "total_val": len(all_val_indices),
+    }
+    return train_ds, val_ds, individual_to_class, dataset_info
+
+
+def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibility_config,
+                         threshold, gallery_size, seed):
+    """Quality-filtered + gallery-capped split via create_filtered_gallery_dataset."""
+    train_ds, val_ds, individual_to_class, raw_info = create_filtered_gallery_dataset(
+        dataset, feasible_individuals, gallery_size, threshold, seed,
+        metadata_cache, feasibility_config,
+    )
+    dataset_info = {
+        "gallery_info": raw_info["gallery_samples_per_individual"],
+        "eligible_pool_info": raw_info["eligible_pool_per_individual"],
+        "query_info": raw_info["query_samples_per_individual"],
+        "total_train": len(train_ds) if train_ds else 0,
+        "total_val": len(val_ds) if val_ds else 0,
+        "quality_threshold": threshold,
+        "gallery_size": gallery_size,
+    }
+    return train_ds, val_ds, individual_to_class, dataset_info
+
+
+def run_training(mode_label, train_dataset, val_dataset, individual_to_class, dataset_info,
+                 dataset, metadata_cache, feasible_individuals, promoted_individuals,
+                 excluded_individuals, best_lr, best_size, best_embedding_dim,
+                 epochs, eval_every, seed, device_str, output_path, overwrite):
+    """Train + eval loop shared across all three conditions."""
+    from utils.arcface import ArcFaceLoss
+
+    if os.path.exists(output_path) and not overwrite:
+        print(f"Result exists: {output_path}. Use --overwrite to replace.")
+        return
+
+    if train_dataset is None or len(train_dataset) == 0:
+        print(f"No training data for {mode_label}, skipping.")
+        return
+
+    device = "cuda" if device_str == "gpu" and torch.cuda.is_available() else "cpu"
     model, emb_dim = create_arcface_model(MODEL_NAME, embedding_dim=best_embedding_dim,
                                            image_size=best_size, device=device)
     print(f"Using device: {device}")
 
-    # Transforms and training dataloader
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
-
-    from utils.arcface import ArcFaceLoss
 
     sampler = BalancedBatchSampler(
         labels=train_torch.get_labels(),
@@ -222,7 +226,6 @@ def main():
     train_loader = DataLoader(train_torch, batch_sampler=sampler,
                               num_workers=0, collate_fn=collate_fn)
 
-    # ArcFace loss + optimizer
     arcface_loss = ArcFaceLoss(
         num_classes=len(feasible_individuals),
         embedding_size=emb_dim,
@@ -239,14 +242,13 @@ def main():
         lr=best_lr,
     )
 
-    # Warm up the dataloader (first iteration triggers HF dataset decoding)
+    # Warm up dataloader
     print("\nWarming up dataloader (first batch)...", flush=True)
     _warmup_iter = iter(train_loader)
     _warmup_batch = next(_warmup_iter)
     del _warmup_iter, _warmup_batch
     print("Dataloader ready.")
 
-    # Training loop with val evaluation every N epochs
     print(f"\nTraining for {epochs} epochs (eval every {eval_every} epochs)...")
     use_amp = (device == "cuda") or (isinstance(device, torch.device) and device.type == "cuda")
     start_time = time.time()
@@ -259,7 +261,6 @@ def main():
     best_hm_epoch = 0
 
     for epoch in range(epochs):
-        # --- Train ---
         model.train()
         arcface_loss.train()
         total_loss = 0
@@ -282,7 +283,6 @@ def main():
 
         train_loss = total_loss / max(num_batches, 1)
 
-        # --- Evaluate on val every N epochs (and always on last) ---
         is_eval_epoch = ((epoch + 1) % eval_every == 0) or (epoch + 1 == epochs)
 
         if is_eval_epoch:
@@ -343,6 +343,7 @@ def main():
 
     result = {
         "config": {
+            "mode": mode_label,
             "seed": seed,
             "epochs": epochs,
             "learning_rate": best_lr,
@@ -352,16 +353,8 @@ def main():
             "arcface_margin": ARCFACE_MARGIN,
             "arcface_scale": ARCFACE_SCALE,
             "backbone": MODEL_CONFIGS[MODEL_NAME]["backbone_label"],
-            "quality_threshold": 0.0,
-            "gallery_mode": "all_unfiltered_minus_val",
         },
-        "dataset": {
-            "individuals": feasible_individuals,
-            "gallery_info": gallery_info,
-            "query_info": query_info,
-            "total_train": len(all_train_indices),
-            "total_val": len(all_val_indices),
-        },
+        "dataset": dataset_info,
         "epoch_history": epoch_history,
         "metadata": {
             "created_at": datetime.now().isoformat(),
@@ -375,7 +368,7 @@ def main():
         },
     }
 
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(result, f, indent=2,
                   default=lambda o: float(o) if isinstance(o, np.floating)
@@ -383,6 +376,102 @@ def main():
 
     print(f"\nSaved: {output_path}")
     print(f"Training time: {training_time:.1f}s")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Tune epoch count: 3 gallery conditions")
+    parser.add_argument("--idx", type=int, required=True,
+                        help="0=unfiltered, 1=best R@1 filtered, 2=best BA filtered")
+    parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-every", type=int, default=5)
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+
+    idx = args.idx
+    if idx not in JOB_CONFIGS:
+        print(f"idx={idx} has no work assigned, exiting.")
+        return
+
+    mode_label, hygiene_criterion = JOB_CONFIGS[idx]
+    seed = args.seed
+    epochs = args.epochs
+    eval_every = args.eval_every
+    set_all_seeds(seed)
+
+    output_dir = os.path.join(MODEL_CONFIGS[MODEL_NAME]["experiment_dir"], "debug")
+    output_path = os.path.join(output_dir, f"tune_epoch_count_{mode_label}_seed={seed}.json")
+
+    if os.path.exists(output_path) and not args.overwrite:
+        print(f"Result exists: {output_path}. Use --overwrite to replace.")
+        return
+
+    print("=" * 70)
+    print(f"Tune Epoch Count [{mode_label}]: DINOv3, seed={seed}, idx={idx}")
+    print("=" * 70)
+
+    best_lr, best_size, best_embedding_dim = load_best_hyperparams(MODEL_NAME)
+
+    print("\nLoading dataset...")
+    dataset = load_reidentification_dataset()
+    metadata_cache = build_metadata_cache(dataset)
+
+    feasibility_config = load_feasibility_config()
+    if not feasibility_config:
+        print("Failed to load feasibility config")
+        return
+
+    feasible_individuals = feasibility_config.get("qualified_individuals", [])
+    promoted_individuals = feasibility_config.get("promoted_to_rare", [])
+    excluded_individuals = feasibility_config.get("excluded_entirely", [])
+
+    print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
+
+    # Build train/val split based on mode
+    if hygiene_criterion is None:
+        # Unfiltered
+        print(f"\nMode: unfiltered (all train minus val, no quality filter)")
+        train_ds, val_ds, individual_to_class, dataset_info = build_unfiltered_split(
+            dataset, metadata_cache, feasible_individuals, feasibility_config, seed,
+        )
+        dataset_info["mode"] = "unfiltered"
+    else:
+        # Filtered: load best hygiene config for this criterion
+        print(f"\nLoading best hygiene config for criterion={hygiene_criterion}...")
+        best_hygiene = load_best_hygiene_config(MODEL_NAME, criterion=hygiene_criterion)
+        threshold = best_hygiene["threshold"]
+        gallery_size = best_hygiene["gallery_size"]
+        print(f"Mode: {mode_label} (threshold={threshold}, gallery_size={gallery_size})")
+
+        train_ds, val_ds, individual_to_class, dataset_info = build_filtered_split(
+            dataset, metadata_cache, feasible_individuals, feasibility_config,
+            threshold, gallery_size, seed,
+        )
+        dataset_info["mode"] = mode_label
+        dataset_info["hygiene_config"] = best_hygiene
+
+    run_training(
+        mode_label=mode_label,
+        train_dataset=train_ds,
+        val_dataset=val_ds,
+        individual_to_class=individual_to_class,
+        dataset_info=dataset_info,
+        dataset=dataset,
+        metadata_cache=metadata_cache,
+        feasible_individuals=feasible_individuals,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals,
+        best_lr=best_lr,
+        best_size=best_size,
+        best_embedding_dim=best_embedding_dim,
+        epochs=epochs,
+        eval_every=eval_every,
+        seed=seed,
+        device_str=args.device,
+        output_path=output_path,
+        overwrite=args.overwrite,
+    )
 
 
 if __name__ == "__main__":
