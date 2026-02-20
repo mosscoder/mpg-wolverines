@@ -1,6 +1,6 @@
 """
 ArcFace model factories and utilities for wolverine re-identification.
-Includes embedding head, ArcFace loss, PK batch sampling, and model creation.
+Includes embedding head, ArcFace loss, balanced batch sampling, and model creation.
 """
 
 import os
@@ -95,97 +95,68 @@ class ArcFaceLoss(nn.Module):
         return F.cross_entropy(output, labels)
 
 
-class PKBatchSampler(Sampler):
+class BalancedBatchSampler(Sampler):
     """
-    Sampler for P-K batch sampling in metric learning.
-    Each batch contains P identities with K samples each.
+    Balanced batch sampler for metric learning with ArcFace loss.
+
+    Each batch contains an equal number of samples from every class,
+    plus remainder slots filled by random extra draws to hit exact batch_size.
+    One epoch exhausts the largest class; smaller classes are oversampled.
     """
 
-    def __init__(self,
-                 labels: List[int],
-                 p: int = 5,
-                 k: int = 8,
-                 drop_last: bool = True):
-        """
-        Args:
-            labels: List of class labels for each sample
-            p: Number of identities per batch
-            k: Number of samples per identity
-            drop_last: Whether to drop the last incomplete batch
-        """
+    def __init__(self, labels, batch_size=32):
         super().__init__(None)
-        self.labels = labels
-        self.p = p
-        self.k = k
-        self.drop_last = drop_last
-
-        # Group indices by label
+        self.batch_size = batch_size
         self.label_to_indices = defaultdict(list)
         for idx, label in enumerate(labels):
             self.label_to_indices[label].append(idx)
 
-        # Filter to labels with at least k samples
-        self.valid_labels = [
-            label for label, indices in self.label_to_indices.items()
-            if len(indices) >= k
-        ]
+        self.n_classes = len(self.label_to_indices)
+        self.k = batch_size // self.n_classes
+        if self.k == 0:
+            self.k = 1
+        self.remainder = batch_size - (self.k * self.n_classes)
+        self.max_class_size = max(len(v) for v in self.label_to_indices.values())
 
-        if len(self.valid_labels) < p:
-            raise ValueError(
-                f"Not enough identities with >= {k} samples. "
-                f"Need {p}, have {len(self.valid_labels)}"
-            )
-
-        self.batch_size = p * k
+    def _next_from_class(self, label, class_indices, pointers):
+        """Get next index from a class, wrapping with reshuffle when exhausted."""
+        indices = class_indices[label]
+        ptr = pointers[label]
+        if ptr >= len(indices):
+            random.shuffle(indices)
+            class_indices[label] = indices
+            ptr = 0
+        idx = indices[ptr]
+        pointers[label] = ptr + 1
+        return idx
 
     def __iter__(self):
-        """Generate batches of P identities x K samples."""
-        # Shuffle valid labels
-        labels = self.valid_labels.copy()
-        random.shuffle(labels)
+        # Shuffle each class's indices at epoch start
+        class_indices = {}
+        for label, indices in self.label_to_indices.items():
+            shuffled = indices.copy()
+            random.shuffle(shuffled)
+            class_indices[label] = shuffled
 
-        # Shuffle indices within each label
-        label_indices = {}
-        for label in labels:
-            indices = self.label_to_indices[label].copy()
-            random.shuffle(indices)
-            label_indices[label] = indices
+        pointers = {label: 0 for label in self.label_to_indices}
+        labels = list(self.label_to_indices.keys())
+        n_batches = math.ceil(self.max_class_size / self.k)
 
-        # Generate batches
-        batch = []
-        label_idx = 0
-
-        while label_idx + self.p <= len(labels):
-            # Select P labels for this batch
-            batch_labels = labels[label_idx:label_idx + self.p]
-            label_idx += self.p
-
-            # Get K samples from each label
-            for label in batch_labels:
-                indices = label_indices[label]
-
-                # If not enough samples, reshuffle and restart
-                if len(indices) < self.k:
-                    indices = self.label_to_indices[label].copy()
-                    random.shuffle(indices)
-                    label_indices[label] = indices
-
-                # Take K samples
-                batch.extend(indices[:self.k])
-                label_indices[label] = indices[self.k:]
-
-            if len(batch) == self.batch_size:
-                yield batch
-                batch = []
-
-        # Handle remaining labels by cycling back
-        if not self.drop_last and batch:
+        for _ in range(n_batches):
+            batch = []
+            # Base: k samples from each class
+            for label in labels:
+                for _ in range(self.k):
+                    batch.append(self._next_from_class(label, class_indices, pointers))
+            # Remainder: 1 extra from randomly chosen classes to hit batch_size
+            if self.remainder > 0:
+                extra_labels = random.sample(labels, self.remainder)
+                for label in extra_labels:
+                    batch.append(self._next_from_class(label, class_indices, pointers))
             yield batch
 
     def __len__(self):
-        """Number of batches per epoch."""
-        num_batches = len(self.valid_labels) // self.p
-        return num_batches
+        return math.ceil(self.max_class_size / self.k)
 
 
 def create_megadescriptor_arcface_model(

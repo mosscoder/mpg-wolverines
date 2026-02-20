@@ -11,7 +11,7 @@ from torch.utils.data import Dataset as TorchDataset
 from datasets import load_dataset
 
 from utils.dataset import set_all_seeds
-from utils.reid_config import TARGET_SAMPLES_PER_INDIVIDUAL, MIN_P
+from utils.reid_config import TARGET_SAMPLES_PER_INDIVIDUAL
 
 import datasets
 datasets.config.NUM_PROC = 1
@@ -345,12 +345,12 @@ def subsample_to_match_filtered(metadata_cache, all_indices, filtered_indices):
     return sampled
 
 
-def get_qualified_individuals(config, min_p=MIN_P):
+def get_qualified_individuals(config, min_individuals=2):
     """Get qualified individuals from config (preprocessing already enforces criteria)."""
     qualified_individuals = config.get('qualified_individuals', [])
 
-    if len(qualified_individuals) < min_p:
-        print(f"Not enough individuals ({len(qualified_individuals)}) for PK sampling (need {min_p})")
+    if len(qualified_individuals) < min_individuals:
+        print(f"Not enough individuals ({len(qualified_individuals)}) for training (need >= {min_individuals})")
         return None
 
     return qualified_individuals

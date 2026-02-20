@@ -8,7 +8,7 @@ on the test split (R@1, open-set BA).
 Usage:
     cd /home/kdoherty/wolverines
     python -u reid_openset/dinov3/debug/debug_test_eval.py \
-        --device gpu --epochs 100 --seed 0
+        --device gpu --epochs 50 --seed 0
 """
 
 import os
@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from utils.dataset import set_all_seeds
 from utils.reid_config import (
-    MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, BATCH_K, MIN_P,
+    MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, TRAIN_BATCH_SIZE,
     QUERY_QUALITY_THRESHOLDS, EVAL_BATCH_SIZE, EVAL_NUM_WORKERS,
     create_arcface_model, create_transform_for_model,
 )
@@ -57,7 +57,7 @@ MODEL_NAME = "dinov3"
 def main():
     parser = argparse.ArgumentParser(description="Debug test eval: unfiltered DINOv3")
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -144,16 +144,11 @@ def main():
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
     train_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
 
-    from utils.arcface import ArcFaceLoss, PKBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
 
-    min_gallery = min(gallery_info.values())
-    effective_k = min(BATCH_K, min_gallery)
-
-    pk_sampler = PKBatchSampler(
+    sampler = BalancedBatchSampler(
         labels=train_torch.get_labels(),
-        p=min(MIN_P, len(feasible_individuals)),
-        k=effective_k,
-        drop_last=True,
+        batch_size=TRAIN_BATCH_SIZE,
     )
 
     def collate_fn(batch):
@@ -162,7 +157,7 @@ def main():
         quality = torch.tensor([item[2] for item in batch])
         return images, labels, quality
 
-    train_loader = DataLoader(train_torch, batch_sampler=pk_sampler,
+    train_loader = DataLoader(train_torch, batch_sampler=sampler,
                               num_workers=0, collate_fn=collate_fn)
 
     # ArcFace loss + optimizer
@@ -181,6 +176,13 @@ def main():
         list(model.get_trainable_parameters()) + list(arcface_loss.parameters()),
         lr=best_lr,
     )
+
+    # Warm up the dataloader (first iteration triggers HF dataset decoding)
+    print("\nWarming up dataloader (first batch)...", flush=True)
+    _warmup_iter = iter(train_loader)
+    _warmup_batch = next(_warmup_iter)
+    del _warmup_iter, _warmup_batch
+    print("Dataloader ready.")
 
     # Training loop — loss only
     print(f"\nTraining for {epochs} epochs...")

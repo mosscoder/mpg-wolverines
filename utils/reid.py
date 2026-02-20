@@ -23,7 +23,7 @@ from utils.dataset import set_all_seeds
 
 # Re-export from submodules for backward compatibility
 from utils.reid_config import (  # noqa: F401
-    MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, BATCH_K, MIN_P,
+    MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, TRAIN_BATCH_SIZE,
     TARGET_SAMPLES_PER_INDIVIDUAL, QUERY_QUALITY_THRESHOLDS,
     EVAL_BATCH_SIZE, EVAL_NUM_WORKERS,
     create_arcface_model, create_reid_transform, create_transform_for_model,
@@ -195,9 +195,9 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=100):
+                         learning_rate, image_size, embedding_dim, epochs=50):
     """Train one hygiene sweep configuration and return results."""
-    from utils.arcface import ArcFaceLoss, PKBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
 
     model_config = MODEL_CONFIGS[model_name]
@@ -220,8 +220,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     promoted_individuals = config.get('promoted_to_rare', [])
     excluded_individuals = config.get('excluded_entirely', [])
 
-    if len(feasible_individuals) < MIN_P:
-        print(f"Not enough individuals ({len(feasible_individuals)}) for PK sampling (need {MIN_P})")
+    if len(feasible_individuals) < 2:
+        print(f"Not enough individuals ({len(feasible_individuals)}) for training (need >= 2)")
         return None
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
@@ -236,11 +236,6 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         print(f"No training data available after filtering")
         return None
 
-    effective_k = min(BATCH_K, gallery_size)
-    if len(train_dataset) < MIN_P * effective_k:
-        print(f"Not enough training samples ({len(train_dataset)}) for PK batching")
-        return None
-
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
     model, emb_dim = create_arcface_model(model_name, embedding_dim=embedding_dim,
@@ -251,17 +246,11 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     transform = create_transform_for_model(model_name, size=image_size)
     train_torch_dataset = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
-    # Create PK batch sampler
-    try:
-        pk_sampler = PKBatchSampler(
-            labels=train_torch_dataset.get_labels(),
-            p=min(MIN_P, len(feasible_individuals)),
-            k=effective_k,
-            drop_last=True
-        )
-    except ValueError as e:
-        print(f"Cannot create PK sampler: {e}")
-        return None
+    # Create balanced batch sampler
+    sampler = BalancedBatchSampler(
+        labels=train_torch_dataset.get_labels(),
+        batch_size=TRAIN_BATCH_SIZE,
+    )
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -271,7 +260,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
     train_loader = DataLoader(
         train_torch_dataset,
-        batch_sampler=pk_sampler,
+        batch_sampler=sampler,
         num_workers=0,
         collate_fn=collate_fn
     )
@@ -383,7 +372,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'scheduler': 'None (fixed LR)',
             'learning_rate': learning_rate,
             'epochs': epochs,
-            'batch_size_k': BATCH_K,
+            'batch_size': TRAIN_BATCH_SIZE,
             'backbone': model_config['backbone_label'],
             'score_normalization': 'Raw Cosine'
         },
@@ -528,7 +517,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     Returns:
         filename if saved, None if skipped
     """
-    from utils.arcface import ArcFaceLoss, PKBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
 
     model_config = MODEL_CONFIGS[model_name]
     if learning_rate is None:
@@ -584,18 +573,11 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     transform = create_transform_for_model(model_name, size=image_size)
     train_torch_dataset = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
-    # Create PK batch sampler
-    effective_k = min(BATCH_K, TARGET_SAMPLES_PER_INDIVIDUAL)
-    try:
-        pk_sampler = PKBatchSampler(
-            labels=train_torch_dataset.get_labels(),
-            p=min(MIN_P, len(qualified_individuals)),
-            k=effective_k,
-            drop_last=True
-        )
-    except ValueError as e:
-        print(f"Cannot create PK sampler: {e}")
-        return None
+    # Create balanced batch sampler
+    sampler = BalancedBatchSampler(
+        labels=train_torch_dataset.get_labels(),
+        batch_size=TRAIN_BATCH_SIZE,
+    )
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -604,7 +586,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
     train_loader = DataLoader(
         train_torch_dataset,
-        batch_sampler=pk_sampler,
+        batch_sampler=sampler,
         num_workers=0,
         collate_fn=collate_fn
     )
@@ -865,7 +847,7 @@ def run_final_test(model_name, args, seed, task_name):
         seed: Random seed for gallery sampling and training
         task_name: Key in TEST_TASKS
     """
-    from utils.arcface import ArcFaceLoss, PKBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
 
     task_cfg = TEST_TASKS[task_name]
@@ -936,8 +918,8 @@ def run_final_test(model_name, args, seed, task_name):
     promoted_individuals = feasibility_config.get('promoted_to_rare', [])
     excluded_individuals = feasibility_config.get('excluded_entirely', [])
 
-    if len(feasible_individuals) < MIN_P:
-        print(f"Not enough individuals ({len(feasible_individuals)}) for PK sampling (need {MIN_P})")
+    if len(feasible_individuals) < 2:
+        print(f"Not enough individuals ({len(feasible_individuals)}) for training (need >= 2)")
         return None
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
@@ -1010,21 +992,11 @@ def run_final_test(model_name, args, seed, task_name):
     transform = create_transform_for_model(model_name, size=best_size)
     train_torch_dataset = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
 
-    # Determine effective_k from gallery composition
-    min_gallery_per_ind = min(
-        info['sampled'] for info in gallery_info.values()
-    ) if gallery_info else 1
-    effective_k = min(BATCH_K, min_gallery_per_ind)
-    try:
-        pk_sampler = PKBatchSampler(
-            labels=train_torch_dataset.get_labels(),
-            p=min(MIN_P, len(feasible_individuals)),
-            k=effective_k,
-            drop_last=True
-        )
-    except ValueError as e:
-        print(f"Cannot create PK sampler: {e}")
-        return None
+    # Create balanced batch sampler
+    sampler = BalancedBatchSampler(
+        labels=train_torch_dataset.get_labels(),
+        batch_size=TRAIN_BATCH_SIZE,
+    )
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -1034,7 +1006,7 @@ def run_final_test(model_name, args, seed, task_name):
 
     train_loader = DataLoader(
         train_torch_dataset,
-        batch_sampler=pk_sampler,
+        batch_sampler=sampler,
         num_workers=0,
         collate_fn=collate_fn
     )
