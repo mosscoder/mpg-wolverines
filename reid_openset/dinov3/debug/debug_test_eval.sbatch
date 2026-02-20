@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=debug_test_eval
 #SBATCH --partition=general
-#SBATCH --array=0-23
+#SBATCH --array=0
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -30,12 +30,6 @@ export HF_DATASETS_OFFLINE=1
 # Use node-local scratch for temp files (avoids /tmp full errors)
 export TMPDIR=/scratch/kdoherty
 mkdir -p $TMPDIR
-
-# Only job 0 has work
-if [ "$SLURM_ARRAY_TASK_ID" -ne 0 ]; then
-    echo "Job $SLURM_ARRAY_TASK_ID: no work assigned, exiting."
-    exit 0
-fi
 
 # Print job info
 echo "========================================"

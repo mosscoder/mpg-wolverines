@@ -25,6 +25,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["HF_HOME"] = "/data/hf_cache"
 
+# Ensure project root is on sys.path when run as a script
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
 from utils.dataset import set_all_seeds
 from utils.reid_config import (
     MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, BATCH_K, MIN_P,
