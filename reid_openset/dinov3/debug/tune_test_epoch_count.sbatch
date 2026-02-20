@@ -40,7 +40,7 @@ echo "Start time: $(date)"
 echo "========================================"
 
 python -u reid_openset/dinov3/debug/tune_test_epoch_count.py \
-    --device gpu --epochs 100 --seed 0
+    --device gpu --epochs 100 --eval-every 5 --seed 0
 
 # Print completion info
 echo "========================================"

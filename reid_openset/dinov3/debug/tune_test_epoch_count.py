@@ -11,7 +11,7 @@ smallest class (one pass through the rarest individual per epoch).
 Usage:
     cd /home/kdoherty/wolverines
     python -u reid_openset/dinov3/debug/tune_test_epoch_count.py \
-        --device gpu --epochs 100 --seed 0
+        --device gpu --epochs 100 --eval-every 5 --seed 0
 """
 
 import os
@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from utils.dataset import set_all_seeds
 from utils.reid_config import (
     MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, TRAIN_BATCH_SIZE,
-    QUERY_QUALITY_THRESHOLDS, EVAL_BATCH_SIZE, EVAL_NUM_WORKERS,
+    EVAL_BATCH_SIZE, EVAL_NUM_WORKERS,
     create_arcface_model, create_transform_for_model,
 )
 from utils.reid_data import (
@@ -125,11 +125,14 @@ def main():
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-every", type=int, default=5,
+                        help="Evaluate on val every N epochs (always eval on last epoch)")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     seed = args.seed
     epochs = args.epochs
+    eval_every = args.eval_every
     set_all_seeds(seed)
 
     output_dir = os.path.join(MODEL_CONFIGS[MODEL_NAME]["experiment_dir"], "debug")
@@ -243,8 +246,8 @@ def main():
     del _warmup_iter, _warmup_batch
     print("Dataloader ready.")
 
-    # Training loop with val evaluation each epoch
-    print(f"\nTraining for {epochs} epochs (eval on val each epoch)...")
+    # Training loop with val evaluation every N epochs
+    print(f"\nTraining for {epochs} epochs (eval every {eval_every} epochs)...")
     use_amp = (device == "cuda") or (isinstance(device, torch.device) and device.type == "cuda")
     start_time = time.time()
     epoch_history = []
@@ -279,56 +282,58 @@ def main():
 
         train_loss = total_loss / max(num_batches, 1)
 
-        # --- Evaluate on val ---
-        query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
-            model, train_dataset, val_dataset, individual_to_class, transform, device,
-            dataset, feasible_individuals, metadata_cache,
-            criterion=arcface_loss, embedding_dim=emb_dim,
-            promoted_individuals=promoted_individuals,
-            excluded_individuals=excluded_individuals,
-        )
+        # --- Evaluate on val every N epochs (and always on last) ---
+        is_eval_epoch = ((epoch + 1) % eval_every == 0) or (epoch + 1 == epochs)
 
-        recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
-        by_quality = open_set_metrics.get("by_quality", {})
-        ba_q0 = by_quality.get("q>=0.0", {}).get("balanced_accuracy", 0.0)
-        kar = by_quality.get("q>=0.0", {}).get("known_accept_rate", 0.0)
-        urr = by_quality.get("q>=0.0", {}).get("unknown_reject_rate", 0.0)
-        thresh = by_quality.get("q>=0.0", {}).get("cosine_threshold", 0.0)
+        if is_eval_epoch:
+            query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
+                model, train_dataset, val_dataset, individual_to_class, transform, device,
+                dataset, feasible_individuals, metadata_cache,
+                criterion=arcface_loss, embedding_dim=emb_dim,
+                promoted_individuals=promoted_individuals,
+                excluded_individuals=excluded_individuals,
+            )
 
-        if recall_1 > best_recall:
-            best_recall = recall_1
-            best_recall_epoch = epoch + 1
-        if ba_q0 > best_ba:
-            best_ba = ba_q0
-            best_ba_epoch = epoch + 1
-        hm = 2 * recall_1 * ba_q0 / (recall_1 + ba_q0) if (recall_1 + ba_q0) > 0 else 0.0
-        if hm > best_hm:
-            best_hm = hm
-            best_hm_epoch = epoch + 1
+            recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
+            by_quality = open_set_metrics.get("by_quality", {})
+            ba_q0 = by_quality.get("q>=0.0", {}).get("balanced_accuracy", 0.0)
+            kar = by_quality.get("q>=0.0", {}).get("known_accept_rate", 0.0)
+            urr = by_quality.get("q>=0.0", {}).get("unknown_reject_rate", 0.0)
+            thresh = by_quality.get("q>=0.0", {}).get("cosine_threshold", 0.0)
+            n_k = by_quality.get("q>=0.0", {}).get("n_known_individuals", 0)
+            n_u = by_quality.get("q>=0.0", {}).get("n_unknown_individuals", 0)
 
-        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
-              f"R@1={recall_1:.4f}, BA={ba_q0:.4f} (K={kar:.2f}, U={urr:.2f}), thresh={thresh:.3f}")
+            if recall_1 > best_recall:
+                best_recall = recall_1
+                best_recall_epoch = epoch + 1
+            if ba_q0 > best_ba:
+                best_ba = ba_q0
+                best_ba_epoch = epoch + 1
+            hm = 2 * recall_1 * ba_q0 / (recall_1 + ba_q0) if (recall_1 + ba_q0) > 0 else 0.0
+            if hm > best_hm:
+                best_hm = hm
+                best_hm_epoch = epoch + 1
 
-        for q_thresh in QUERY_QUALITY_THRESHOLDS:
-            q_key = f"q>={q_thresh}"
-            r1 = query_quality_metrics[q_key]["recall_at_1"]
-            count = query_quality_metrics[q_key]["count"]
-            ba_data = by_quality.get(q_key, {})
-            ba_val = ba_data.get("balanced_accuracy", 0.0)
-            kar_val = ba_data.get("known_accept_rate", 0.0)
-            urr_val = ba_data.get("unknown_reject_rate", 0.0)
-            n_k = ba_data.get("n_known_individuals", 0)
-            n_u = ba_data.get("n_unknown_individuals", 0)
-            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba_val:.4f} "
-                  f"(K={kar_val:.2f}[{n_k}], U={urr_val:.2f}[{n_u}])")
+            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
+                  f"R@1={recall_1:.4f}, BA={ba_q0:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}]), "
+                  f"thresh={thresh:.3f}")
 
-        epoch_history.append({
-            "epoch": epoch + 1,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "query_quality_metrics": query_quality_metrics,
-            "open_set": open_set_metrics,
-        })
+            epoch_history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "recall_at_1": recall_1,
+                "balanced_accuracy": ba_q0,
+                "known_accept_rate": kar,
+                "unknown_reject_rate": urr,
+                "cosine_threshold": thresh,
+            })
+        else:
+            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}")
+            epoch_history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+            })
 
     training_time = time.time() - start_time
 
