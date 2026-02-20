@@ -40,8 +40,8 @@ from utils.reid_data import (  # noqa: F401
 from utils.reid_evaluation import (  # noqa: F401
     evaluate_recall_simple, compute_rare_embeddings, compute_validation_loss,
     compute_cosine_similarity,
-    evaluate_recall_with_openset, compute_loco_gap_threshold,
-    compute_open_set_metrics_gap,
+    compute_open_set_metrics_per_individual_threshold,
+    evaluate_recall_with_openset, compute_arcface_center_thresholds,
 )
 
 
@@ -343,9 +343,9 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             best_harmonic_mean = hm
             best_hm_epoch = epoch + 1
 
-        tau = open_set_metrics.get('threshold_calibration', {}).get('global_tau', 0.0)
+        thresh_mean = by_quality.get('q>=0.0', {}).get('cosine_threshold', 0.0)
 
-        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, tau={tau:.3f}")
+        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, thresh={thresh_mean:.3f}")
 
         for q_thresh in QUERY_QUALITY_THRESHOLDS:
             q_key = f"q>={q_thresh}"
@@ -790,16 +790,24 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                         best_mean = epoch_mean
                         best_epoch_num = epoch_num
 
-            # Extract gap threshold at best epoch
-            all_taus = []
+            # Extract per-individual thresholds at best epoch (for open-set tasks)
+            all_per_individual_thresholds = defaultdict(list)
+            cosine_thresholds = []
             for history in all_histories:
                 for entry in history:
                     if entry['epoch'] == best_epoch_num:
-                        thresh_cal = entry.get('open_set', {}).get('threshold_calibration', {})
-                        all_taus.append(thresh_cal.get('global_tau', 0.0))
+                        open_set = entry.get('open_set', {})
+                        thresh_cal = open_set['threshold_calibration']
+
+                        for name, thresh in thresh_cal['per_individual'].items():
+                            all_per_individual_thresholds[name].append(thresh)
+                        cosine_thresholds.append(thresh_cal['global_threshold'])
                         break
 
-            mean_tau = float(np.mean(all_taus)) if all_taus else None
+            # Average each individual's threshold across seeds
+            mean_per_individual = {name: float(np.mean(vals))
+                                   for name, vals in all_per_individual_thresholds.items()}
+            mean_cosine_thresh = float(np.mean(cosine_thresholds)) if cosine_thresholds else None
 
             if best_mean > best_overall_score:
                 best_overall_score = best_mean
@@ -811,7 +819,8 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                     'score': float(best_mean),
                     'criterion': criterion,
                     'n_seeds': len(group_results),
-                    'global_tau': mean_tau,
+                    'cosine_threshold': mean_cosine_thresh,
+                    'per_individual_thresholds': mean_per_individual,
                 }
 
     print(f"Best hygiene config ({criterion}): threshold={best_config['threshold']}, "
@@ -1075,14 +1084,15 @@ def run_final_test(model_name, args, seed, task_name):
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
-    # Compute LOCO gap threshold from gallery self-similarity
+    # Compute fresh per-individual thresholds from this model's ArcFace centers
     class_to_name = {v: k for k, v in individual_to_class.items()}
-    global_tau, calibration_details = compute_loco_gap_threshold(
-        gallery_embeddings, gallery_labels
+    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
+        gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
     )
 
-    print(f"\nLOCO gap threshold: tau={global_tau:.4f}")
-    print(f"  Calibration: {calibration_details}")
+    print(f"\nFresh ArcFace center p2 thresholds (global mean={global_threshold:.4f}):")
+    for name, t in sorted(per_individual_thresholds.items()):
+        print(f"    {name}: {t:.4f}")
 
     # Query embeddings (known individuals from test split)
     query_torch = ArcFaceDataset(query_dataset, transform, individual_to_class)
@@ -1124,7 +1134,8 @@ def run_final_test(model_name, args, seed, task_name):
         'arcface_scale': ARCFACE_SCALE,
         'backbone': model_config['backbone_label'],
         'gallery_mode': 'event_matched' if is_matched else 'full_filtered',
-        'global_tau': global_tau,
+        'cosine_threshold': global_threshold,
+        'per_individual_thresholds': per_individual_thresholds,
     }
 
     dataset_info = {
@@ -1207,15 +1218,15 @@ def run_final_test(model_name, args, seed, task_name):
         else:
             scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-        # BA using LOCO gap threshold
-        ba_metrics = compute_open_set_metrics_gap(
+        # BA using fresh per-individual thresholds from this model's ArcFace centers
+        ba_metrics = compute_open_set_metrics_per_individual_threshold(
             known_query_labels=query_labels,
             known_query_quality=query_quality,
             known_scores=scores_known,
             unknown_query_labels=rare_labels_arr,
             unknown_query_quality=rare_quality_vals,
             unknown_scores=scores_unknown,
-            global_tau=global_tau,
+            per_individual_thresholds=per_individual_thresholds,
             quality_thresholds=[query_quality_threshold],
             gallery_labels=gallery_labels,
             class_to_name=class_to_name
@@ -1230,7 +1241,7 @@ def run_final_test(model_name, args, seed, task_name):
         n_u = ba_data.get('n_unknown_individuals', 0)
 
         print(f"\nTest Results (seed={seed}, task={task_name}):")
-        print(f"  LOCO gap threshold: tau={global_tau:.4f}")
+        print(f"  Fresh threshold (global mean): {global_threshold:.4f}")
         print(f"  {q_key}: BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
 
         dataset_info.update({
