@@ -195,7 +195,7 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=20):
+                         learning_rate, image_size, embedding_dim, epochs=50):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
