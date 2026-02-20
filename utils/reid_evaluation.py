@@ -141,99 +141,137 @@ def compute_cosine_similarity(query_emb, gallery_emb):
     return torch.mm(query_emb, gallery_emb.t())
 
 
-def compute_open_set_metrics_cosine(known_query_labels, known_query_quality, known_scores,
-                                     unknown_query_labels, unknown_query_quality, unknown_scores,
-                                     score_threshold, quality_thresholds, gallery_labels):
+def compute_loco_gap_threshold(gallery_embeddings, gallery_labels):
     """
-    Compute macro-averaged open-set metrics for raw cosine similarity scores.
+    Post-hoc LOCO simulation to find a global gap threshold optimizing BA.
 
-    Uses per-individual averaging for both known accept rate and unknown reject rate.
-    """
-    if isinstance(known_query_labels, torch.Tensor):
-        known_labels_np = known_query_labels.cpu().numpy()
-    else:
-        known_labels_np = np.array(known_query_labels)
+    For each gallery sample i with label L:
+      Known gap (label=1): mask out i, find max sim to same-class (Top1_Known),
+        max sim to best other class (Top2_Known), gap = Top1 - Top2.
+      Unknown gap (label=0): mask out ALL of class L, group remaining by class,
+        find max sim per class, sort desc -> Top1_Unknown, Top2_Unknown, gap = Top1 - Top2.
 
-    results = {}
-
-    for q_thresh in quality_thresholds:
-        # Known accept rate (macro-averaged)
-        k_mask = known_query_quality >= q_thresh
-        per_ind_accept = []
-        n_known_individuals = 0
-
-        if k_mask.sum() > 0:
-            known_indices = np.where(k_mask)[0]
-            unique_known_labels = np.unique(known_labels_np[known_indices])
-
-            for ind_label in unique_known_labels:
-                ind_mask = (known_labels_np == ind_label) & k_mask
-                ind_indices = np.where(ind_mask)[0]
-
-                if len(ind_indices) == 0:
-                    continue
-
-                max_scores = known_scores[ind_indices].max(dim=1).values
-                accepted = (max_scores >= score_threshold).sum().item()
-
-                per_ind_accept.append(accepted / len(ind_indices))
-
-            n_known_individuals = len(per_ind_accept)
-
-        known_accept_rate = np.mean(per_ind_accept) if per_ind_accept else 0.0
-
-        # Unknown reject rate (macro-averaged)
-        u_mask = unknown_query_quality >= q_thresh
-        per_ind_reject = []
-        n_unknown_individuals = 0
-
-        if len(unknown_query_labels) > 0 and u_mask.sum() > 0:
-            unknown_indices = np.where(u_mask)[0]
-            unique_unknown_labels = np.unique(unknown_query_labels[unknown_indices])
-
-            for ind_id in unique_unknown_labels:
-                ind_mask = (unknown_query_labels == ind_id) & u_mask
-                ind_indices = np.where(ind_mask)[0]
-
-                if len(ind_indices) == 0:
-                    continue
-
-                max_scores = unknown_scores[ind_indices].max(dim=1).values
-                rejected = (max_scores < score_threshold).sum().item()
-
-                per_ind_reject.append(rejected / len(ind_indices))
-
-            n_unknown_individuals = len(per_ind_reject)
-
-        unknown_reject_rate = np.mean(per_ind_reject) if per_ind_reject else 1.0
-
-        balanced_acc = (known_accept_rate + unknown_reject_rate) / 2.0
-
-        results[f"q>={q_thresh}"] = {
-            'balanced_accuracy': balanced_acc,
-            'known_accept_rate': known_accept_rate,
-            'unknown_reject_rate': unknown_reject_rate,
-            'n_known_individuals': n_known_individuals,
-            'n_unknown_individuals': n_unknown_individuals
-        }
-
-    return results
-
-
-def compute_open_set_metrics_per_individual_threshold(
-        known_query_labels, known_query_quality, known_scores,
-        unknown_query_labels, unknown_query_quality, unknown_scores,
-        per_individual_thresholds, quality_thresholds, gallery_labels,
-        class_to_name):
-    """
-    Compute macro-averaged open-set metrics using per-individual cosine thresholds.
-
-    Each query's accept/reject decision uses the threshold of the gallery individual
-    it matched best with, rather than a single global threshold.
+    Use roc_curve to find the gap threshold maximizing balanced accuracy.
 
     Args:
-        per_individual_thresholds: dict {individual_name: float} of cosine thresholds
+        gallery_embeddings: Tensor [N, D] of gallery embeddings
+        gallery_labels: Tensor [N] of gallery class labels
+
+    Returns:
+        global_tau (float), calibration_details (dict)
+    """
+    from sklearn.metrics import roc_curve
+
+    gallery_emb_norm = F.normalize(gallery_embeddings, p=2, dim=1)
+    sim_matrix = torch.mm(gallery_emb_norm, gallery_emb_norm.t()).cpu().numpy()
+    np.fill_diagonal(sim_matrix, -np.inf)
+
+    labels_np = gallery_labels.cpu().numpy() if isinstance(gallery_labels, torch.Tensor) else np.array(gallery_labels)
+    unique_classes = np.unique(labels_np)
+    N = len(labels_np)
+
+    # Precompute class masks
+    class_masks = {c: (labels_np == c) for c in unique_classes}
+
+    gaps = []
+    gap_labels = []
+
+    for i in range(N):
+        own_class = labels_np[i]
+        own_mask = class_masks[own_class].copy()
+
+        # --- Known gap (label=1) ---
+        # Max sim to same class (excluding self — already -inf on diagonal)
+        same_class_sims = sim_matrix[i][own_mask]
+        if np.sum(own_mask) < 2:
+            # Only one sample in this class, skip known gap
+            pass
+        else:
+            top1_known = np.max(same_class_sims)
+
+            # Max sim to best other class
+            other_mask = ~own_mask
+            if np.any(other_mask):
+                top2_known = np.max(sim_matrix[i][other_mask])
+                gaps.append(top1_known - top2_known)
+                gap_labels.append(1)
+
+        # --- Unknown gap (label=0) ---
+        # Mask out entire own class
+        other_mask = ~own_mask
+        if np.sum(other_mask) < 2:
+            continue
+
+        other_sims = sim_matrix[i][other_mask]
+        other_labels = labels_np[other_mask]
+        other_classes = np.unique(other_labels)
+
+        if len(other_classes) < 2:
+            continue
+
+        # Max sim per other class
+        per_class_max = np.array([
+            np.max(other_sims[other_labels == c]) for c in other_classes
+        ])
+        sorted_max = np.sort(per_class_max)[::-1]
+        top1_unknown = sorted_max[0]
+        top2_unknown = sorted_max[1]
+        gaps.append(top1_unknown - top2_unknown)
+        gap_labels.append(0)
+
+    gaps = np.array(gaps)
+    gap_labels = np.array(gap_labels)
+
+    n_known_gaps = int(np.sum(gap_labels == 1))
+    n_unknown_gaps = int(np.sum(gap_labels == 0))
+
+    if n_known_gaps == 0 or n_unknown_gaps == 0:
+        # Cannot calibrate — fall back to tau=0
+        return 0.0, {
+            'n_known_gaps': n_known_gaps,
+            'n_unknown_gaps': n_unknown_gaps,
+            'best_balanced_accuracy': 0.5,
+            'fallback': True,
+        }
+
+    # Use roc_curve: positive class = known (label=1), score = gap
+    fpr, tpr, thresholds = roc_curve(gap_labels, gaps)
+    balanced_acc = (tpr + (1 - fpr)) / 2.0
+    best_idx = np.argmax(balanced_acc)
+    global_tau = float(thresholds[best_idx])
+    best_ba = float(balanced_acc[best_idx])
+
+    return global_tau, {
+        'n_known_gaps': n_known_gaps,
+        'n_unknown_gaps': n_unknown_gaps,
+        'best_balanced_accuracy': best_ba,
+    }
+
+
+def compute_open_set_metrics_gap(known_query_labels, known_query_quality, known_scores,
+                                  unknown_query_labels, unknown_query_quality, unknown_scores,
+                                  global_tau, quality_thresholds, gallery_labels, class_to_name):
+    """
+    Compute macro-averaged open-set metrics using gap-based accept/reject.
+
+    For each query:
+      - Group gallery similarities by identity, take max per identity
+      - Sort descending -> Top1, Top2
+      - Accept if (Top1 - Top2) > global_tau, else reject as unknown
+
+    Args:
+        known_query_labels: labels for known queries
+        known_query_quality: quality scores for known queries
+        known_scores: [n_known, n_gallery] cosine similarity matrix
+        unknown_query_labels: labels for unknown queries
+        unknown_query_quality: quality scores for unknown queries
+        unknown_scores: [n_unknown, n_gallery] cosine similarity matrix
+        global_tau: gap threshold from LOCO calibration
+        quality_thresholds: list of quality thresholds to evaluate
+        gallery_labels: [n_gallery] class labels for gallery
         class_to_name: dict {class_label_int: individual_name}
+
+    Returns: dict keyed by quality threshold with BA, known_accept_rate, unknown_reject_rate
     """
     if isinstance(known_query_labels, torch.Tensor):
         known_labels_np = known_query_labels.cpu().numpy()
@@ -241,6 +279,20 @@ def compute_open_set_metrics_per_individual_threshold(
         known_labels_np = np.array(known_query_labels)
 
     gallery_labels_np = gallery_labels.cpu().numpy() if isinstance(gallery_labels, torch.Tensor) else np.array(gallery_labels)
+    unique_gallery_classes = np.unique(gallery_labels_np)
+
+    # Precompute per-class gallery indices
+    class_indices = {c: np.where(gallery_labels_np == c)[0] for c in unique_gallery_classes}
+
+    def _compute_gap(scores_row):
+        """Compute gap between top-1 and top-2 per-identity max similarity."""
+        per_class_max = np.array([
+            float(scores_row[idx].max()) for idx in class_indices.values()
+        ])
+        if len(per_class_max) < 2:
+            return 0.0
+        sorted_max = np.sort(per_class_max)[::-1]
+        return sorted_max[0] - sorted_max[1]
 
     results = {}
 
@@ -261,15 +313,10 @@ def compute_open_set_metrics_per_individual_threshold(
                 if len(ind_indices) == 0:
                     continue
 
-                # For each query, find best gallery match and that match's individual
-                max_scores, max_gallery_idx = known_scores[ind_indices].max(dim=1)
-                matched_gallery_labels = gallery_labels_np[max_gallery_idx.cpu().numpy()]
-
                 accepted = 0
-                for score, matched_label in zip(max_scores, matched_gallery_labels):
-                    matched_name = class_to_name[int(matched_label)]
-                    thresh = per_individual_thresholds.get(matched_name, 0.5)
-                    if score.item() >= thresh:
+                for idx in ind_indices:
+                    gap = _compute_gap(known_scores[idx])
+                    if gap > global_tau:
                         accepted += 1
 
                 per_ind_accept.append(accepted / len(ind_indices))
@@ -294,15 +341,10 @@ def compute_open_set_metrics_per_individual_threshold(
                 if len(ind_indices) == 0:
                     continue
 
-                # For each unknown query, find best gallery match and use that individual's threshold
-                max_scores, max_gallery_idx = unknown_scores[ind_indices].max(dim=1)
-                matched_gallery_labels = gallery_labels_np[max_gallery_idx.cpu().numpy()]
-
                 rejected = 0
-                for score, matched_label in zip(max_scores, matched_gallery_labels):
-                    matched_name = class_to_name[int(matched_label)]
-                    thresh = per_individual_thresholds.get(matched_name, 0.5)
-                    if score.item() < thresh:
+                for idx in ind_indices:
+                    gap = _compute_gap(unknown_scores[idx])
+                    if gap <= global_tau:
                         rejected += 1
 
                 per_ind_reject.append(rejected / len(ind_indices))
@@ -322,47 +364,6 @@ def compute_open_set_metrics_per_individual_threshold(
         }
 
     return results
-
-
-def compute_arcface_center_thresholds(gallery_embeddings, gallery_labels, criterion,
-                                      class_to_name, device, percentile=5):
-    """
-    Compute per-individual acceptance thresholds from ArcFace centers.
-
-    For each individual, computes cosine similarity between their gallery
-    embeddings and their learned ArcFace center. The p-th percentile
-    similarity sets the acceptance threshold.
-
-    Args:
-        gallery_embeddings: Tensor of gallery embeddings
-        gallery_labels: Tensor of gallery class labels
-        criterion: ArcFaceLoss module (has .weight attribute for centers)
-        class_to_name: dict {class_label_int: individual_name}
-        device: torch device
-        percentile: Percentile for threshold (default 5 = p5)
-
-    Returns:
-        (per_individual_thresholds dict, global_threshold float)
-    """
-    with torch.no_grad():
-        centers = F.normalize(criterion.weight, p=2, dim=1)
-
-    gallery_emb_norm = F.normalize(gallery_embeddings, p=2, dim=1)
-    gallery_center_sims = torch.mm(gallery_emb_norm, centers.t())
-
-    per_individual_thresholds = {}
-    for ind_label in gallery_labels.unique():
-        ind_mask = (gallery_labels == ind_label)
-        ind_name = class_to_name[ind_label.item()]
-        sims_to_own_center = gallery_center_sims[ind_mask, ind_label.item()]
-        per_individual_thresholds[ind_name] = float(
-            np.percentile(sims_to_own_center.cpu().numpy(), percentile)
-        )
-
-    valid_thresholds = list(per_individual_thresholds.values())
-    global_threshold = float(np.mean(valid_thresholds)) if valid_thresholds else 0.5
-
-    return per_individual_thresholds, global_threshold
 
 
 def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_to_class,
@@ -490,38 +491,37 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
 
-    # B. Per-individual threshold calibration via ArcFace centers
+    # B. Gap-based threshold calibration via LOCO simulation
     class_to_name = {v: k for k, v in individual_to_class.items()}
 
-    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
-        gallery_embeddings, gallery_labels, criterion, class_to_name, device
+    global_tau, calibration_details = compute_loco_gap_threshold(
+        gallery_embeddings, gallery_labels
     )
 
-    # Compute BA metrics using per-individual thresholds
+    # Compute BA metrics using gap threshold
     balanced_metrics_by_quality = {}
 
     for q_thresh in QUERY_QUALITY_THRESHOLDS:
         q_key = f"q>={q_thresh}"
-        q_metrics = compute_open_set_metrics_per_individual_threshold(
+        q_metrics = compute_open_set_metrics_gap(
             known_query_labels=query_labels,
             known_query_quality=query_quality,
             known_scores=scores_known,
             unknown_query_labels=rare_labels_arr,
             unknown_query_quality=rare_quality_arr,
             unknown_scores=scores_unknown,
-            per_individual_thresholds=per_individual_thresholds,
+            global_tau=global_tau,
             quality_thresholds=[q_thresh],
             gallery_labels=gallery_labels,
             class_to_name=class_to_name
         )
         balanced_metrics_by_quality[q_key] = q_metrics[q_key]
-        balanced_metrics_by_quality[q_key]['cosine_threshold'] = global_threshold
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'arcface_center_p5',
-            'global_threshold': global_threshold,
-            'per_individual': per_individual_thresholds,
+            'method': 'loco_gap',
+            'global_tau': global_tau,
+            **calibration_details,
         },
         'by_quality': balanced_metrics_by_quality
     }
