@@ -19,26 +19,15 @@ load_dotenv()
 
 
 class EmbeddingHead(nn.Module):
-    """Linear projection head that outputs L2-normalized embeddings."""
+    """Linear -> BatchNorm1d -> L2 Norm projection head."""
 
     def __init__(self, input_dim: int = 768, embedding_dim: int = 128):
-        """
-        Args:
-            input_dim: Input feature dimension from backbone (768 for DINOv3-ViT-B)
-            embedding_dim: Output embedding dimension
-        """
         super().__init__()
         self.fc = nn.Linear(input_dim, embedding_dim)
+        self.bn = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input features of shape (batch_size, input_dim)
-
-        Returns:
-            L2-normalized embeddings of shape (batch_size, embedding_dim)
-        """
-        return F.normalize(self.fc(x), p=2, dim=1)
+        return F.normalize(self.bn(self.fc(x)), p=2, dim=1)
 
 
 class ArcFaceLoss(nn.Module):
@@ -207,7 +196,7 @@ def create_megadescriptor_arcface_model(
     """
     Create MegaDescriptor backbone with trainable projection head for ArcFace training.
 
-    Architecture: Frozen MegaDescriptor -> ~1536-d -> Linear -> 128-d
+    Architecture: Frozen MegaDescriptor -> ~1536-d -> EmbeddingHead -> ArcFace
 
     Args:
         model_name: timm model name for MegaDescriptor
@@ -231,8 +220,7 @@ def create_megadescriptor_arcface_model(
         dummy = torch.zeros(1, 3, 384, 384)
         backbone_dim = backbone(dummy).shape[1]  # ~1536
 
-    # Trainable projection head
-    head = nn.Linear(backbone_dim, embedding_dim)
+    head = EmbeddingHead(backbone_dim, embedding_dim)
 
     class MegaDescriptorWithHead(nn.Module):
         def __init__(self, backbone, head):
@@ -277,7 +265,7 @@ def create_bioclip2_arcface_model(
     """
     Create BioCLIP-2 backbone with trainable projection head for ArcFace training.
 
-    Architecture: Frozen BioCLIP-2 ViT-L/14 -> 1024-d (raw ViT features) -> Linear -> 128-d
+    Architecture: Frozen BioCLIP-2 ViT-L/14 -> 1024-d (raw ViT features) -> EmbeddingHead -> ArcFace
 
     Args:
         embedding_dim: Output embedding dimension (default 128)
@@ -308,8 +296,7 @@ def create_bioclip2_arcface_model(
         dummy = torch.zeros(1, 3, image_size, image_size)
         backbone_dim = backbone.encode_image(dummy).shape[1]  # 1024 (raw ViT-L features)
 
-    # Trainable projection head
-    head = nn.Linear(backbone_dim, embedding_dim)
+    head = EmbeddingHead(backbone_dim, embedding_dim)
 
     class BioCLIP2WithHead(nn.Module):
         def __init__(self, backbone, head):
@@ -353,7 +340,7 @@ def create_dinov3_arcface_model(
     """
     Create DINOv3 backbone with trainable projection head for ArcFace training.
 
-    Architecture: Frozen DINOv3-ViT-B/16 -> 768-d CLS -> Linear -> embedding_dim
+    Architecture: Frozen DINOv3-ViT-B/16 -> 768-d CLS -> EmbeddingHead -> ArcFace
 
     Args:
         embedding_dim: Output embedding dimension (default 128)
@@ -372,8 +359,7 @@ def create_dinov3_arcface_model(
         param.requires_grad = False
     backbone.eval()
 
-    # Trainable projection head (768 -> embedding_dim)
-    head = nn.Linear(768, embedding_dim)
+    head = EmbeddingHead(768, embedding_dim)
 
     class DINOv3WithHead(nn.Module):
         def __init__(self, backbone, head):

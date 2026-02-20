@@ -144,8 +144,8 @@ def create_ymdh_split_dataset(dataset, individuals, metadata_cache, seed=0):
     2. Get unique ymdh values and sort chronologically
     3. Earlier 50% of ymdh -> train pool
     4. Later 50% of ymdh -> test pool
-    5. Train gets priority: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
-    6. Test gets remainder: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available if <32)
+    5. Train gets priority: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available)
+    6. Test gets remainder: sample TARGET_SAMPLES_PER_INDIVIDUAL (or all available)
 
     Returns: train_dataset, test_dataset, individual_to_class, dataset_info
     """

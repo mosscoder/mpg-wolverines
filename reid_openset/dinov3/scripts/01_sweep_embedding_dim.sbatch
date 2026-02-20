@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_emb_dim_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-34
+#SBATCH --array=0-9
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -12,9 +12,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim/%A_%a.err
 
 # Embedding Dimension Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 7 dims x 5 seeds = 35 configs, one per job
+# 2 dims x 5 seeds = 10 configs, one per job
 #
-# Dims: 64, 128, 256, 512, 1024, 2048, 4096
+# Dims: 256, 512
 # Fixed: Best LR from prior sweep, native image size, seeds=0,1,2,3,4, 50 epochs
 
 # Create log directory if it doesn't exist
@@ -49,7 +49,7 @@ python -u -m utils.reid opt_embedding_dim --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results/opt/embedding_dim \
     --device gpu \
-    --values 64 128 256 512 1024 2048 4096 \
+    --values 256 512 \
     --lr 0.0005 --image-size 224 \
     --epochs 50 --seeds 0 1 2 3 4
 
