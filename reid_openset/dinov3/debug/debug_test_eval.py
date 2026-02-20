@@ -14,12 +14,15 @@ Usage:
 import os
 import sys
 import json
+import math
 import time
+import random
 import argparse
 import numpy as np
 import torch
+from collections import defaultdict
 from datetime import datetime
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from tqdm import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -52,6 +55,69 @@ from utils.reid import (
 
 
 MODEL_NAME = "dinov3"
+
+
+class BalancedBatchSampler(Sampler):
+    """
+    Balanced batch sampler with persistent pointers across epochs.
+
+    Epoch length = ceil(min_class_size / k), so one epoch = one pass through
+    the rarest individual. Large classes are consumed sequentially across
+    epochs; a class is only reshuffled when its pointer wraps. Every image
+    is seen exactly once before any repeats.
+    """
+    def __init__(self, labels, batch_size=36):
+        super().__init__(None)
+        self.batch_size = batch_size
+        self.label_to_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            self.label_to_indices[label].append(idx)
+
+        self.n_classes = len(self.label_to_indices)
+        self.k = batch_size // self.n_classes
+        if self.k == 0:
+            self.k = 1
+        self.remainder = batch_size - (self.k * self.n_classes)
+        self.min_class_size = min(len(v) for v in self.label_to_indices.values())
+
+        # Persistent state across epochs
+        self.class_indices = {}
+        self.pointers = {}
+        for label, indices in self.label_to_indices.items():
+            shuffled = indices.copy()
+            random.shuffle(shuffled)
+            self.class_indices[label] = shuffled
+            self.pointers[label] = 0
+
+    def _next_from_class(self, label):
+        """Get next index, wrapping with reshuffle when exhausted."""
+        indices = self.class_indices[label]
+        ptr = self.pointers[label]
+        if ptr >= len(indices):
+            random.shuffle(indices)
+            self.class_indices[label] = indices
+            ptr = 0
+        idx = indices[ptr]
+        self.pointers[label] = ptr + 1
+        return idx
+
+    def __iter__(self):
+        labels = list(self.label_to_indices.keys())
+        n_batches = math.ceil(self.min_class_size / self.k)
+
+        for _ in range(n_batches):
+            batch = []
+            for label in labels:
+                for _ in range(self.k):
+                    batch.append(self._next_from_class(label))
+            if self.remainder > 0:
+                extra_labels = random.sample(labels, self.remainder)
+                for label in extra_labels:
+                    batch.append(self._next_from_class(label))
+            yield batch
+
+    def __len__(self):
+        return math.ceil(self.min_class_size / self.k)
 
 
 def main():
@@ -144,12 +210,15 @@ def main():
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
     train_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
 
-    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss
 
     sampler = BalancedBatchSampler(
         labels=train_torch.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
     )
+    print(f"  Sampler: {len(sampler)} batches/epoch, batch_size={TRAIN_BATCH_SIZE}, "
+          f"k={sampler.k}/class, min_class={sampler.min_class_size}, "
+          f"max_class={max(len(v) for v in sampler.label_to_indices.values())}")
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
