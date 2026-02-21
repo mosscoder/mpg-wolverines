@@ -10,10 +10,10 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug/%A_%a.err
 
-# Tune epoch count across 3 gallery conditions (3 nodes):
-#   idx=0: Unfiltered (all train minus val)
-#   idx=1: Best R@1 filtered (threshold + gallery_size from hygiene)
-#   idx=2: Best BA filtered (threshold + gallery_size from hygiene)
+# Tune epoch count across 3 gallery quality thresholds (3 nodes):
+#   idx=0: g>=0.00 (all training images, no cap)
+#   idx=1: g>=0.25 (quality filtered, 128/individual cap)
+#   idx=2: g>=0.50 (quality filtered, 128/individual cap)
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug
