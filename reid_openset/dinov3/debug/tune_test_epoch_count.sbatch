@@ -11,9 +11,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug/%A_%a.err
 
 # Tune epoch count across 3 gallery quality thresholds (3 nodes):
-#   idx=0: g>=0.00 (all training images, no cap)
-#   idx=1: g>=0.25 (quality filtered, 128/individual cap)
-#   idx=2: g>=0.50 (quality filtered, 128/individual cap)
+#   idx=0: g>=0.00 (all training images, no subsampling)
+#   idx=1: g>=0.25 (quality filtered, 64/ind/epoch subsample)
+#   idx=2: g>=0.50 (quality filtered, 64/ind/epoch subsample)
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug

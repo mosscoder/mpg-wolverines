@@ -1,9 +1,13 @@
 """
 Tune epoch count across three gallery quality thresholds.
 
-  idx=0  g>=0.00: all training images (no quality filter, no cap)
-  idx=1  g>=0.25: pelage_score >= 0.25, randomly sample 128/individual
-  idx=2  g>=0.50: pelage_score >= 0.50, randomly sample 128/individual
+  idx=0  g>=0.00: all training images, no subsampling
+  idx=1  g>=0.25: pelage_score >= 0.25, train on random 64/ind/epoch
+  idx=2  g>=0.50: pelage_score >= 0.50, train on random 64/ind/epoch
+
+Filtered conditions (idx 1-2) subsample 64 images per individual each
+epoch for training (fresh draw each epoch), but eval always uses the
+full quality-filtered gallery.
 
 Each eval computes R@1 and open-set BA at all query quality levels
 (q>=0.0, q>=0.25, q>=0.5).
@@ -53,13 +57,13 @@ from utils.reid import count_trainable_parameters, load_best_hyperparams
 
 
 MODEL_NAME = "dinov3"
-GALLERY_CAP = 128  # max images per individual for filtered conditions
+EPOCH_SAMPLE_SIZE = 64  # images per individual per epoch for filtered conditions
 
-# idx -> (label, gallery quality threshold, gallery_size or None for all)
+# idx -> (label, gallery quality threshold, epoch_sample_size or None)
 JOB_CONFIGS = {
-    0: ("g0.00", 0.0, None),         # all data, no cap
-    1: ("g0.25", 0.25, GALLERY_CAP), # filtered + capped at 128/individual
-    2: ("g0.50", 0.5, GALLERY_CAP),  # filtered + capped at 128/individual
+    0: ("g0.00", 0.0, None),                  # all data, cycle through all
+    1: ("g0.25", 0.25, EPOCH_SAMPLE_SIZE),     # filtered, 64/ind/epoch
+    2: ("g0.50", 0.5, EPOCH_SAMPLE_SIZE),      # filtered, 64/ind/epoch
 }
 
 
@@ -126,9 +130,75 @@ class BalancedBatchSampler(Sampler):
         return math.ceil(self.min_class_size / self.k)
 
 
+class EpochSubsampleSampler(Sampler):
+    """
+    Each epoch, randomly draw N images per individual from the full pool,
+    then yield balanced batches from that subsample. Fresh draw each epoch.
+    """
+    def __init__(self, labels, batch_size=36, epoch_sample_size=64):
+        super().__init__(None)
+        self.batch_size = batch_size
+        self.epoch_sample_size = epoch_sample_size
+
+        self.label_to_all_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            self.label_to_all_indices[label].append(idx)
+
+        self.n_classes = len(self.label_to_all_indices)
+        self.k = batch_size // self.n_classes
+        if self.k == 0:
+            self.k = 1
+        self.remainder = batch_size - (self.k * self.n_classes)
+
+    def __iter__(self):
+        # Fresh random subsample per class for this epoch
+        epoch_indices = {}
+        min_class_size = float('inf')
+        for label, all_indices in self.label_to_all_indices.items():
+            n = min(self.epoch_sample_size, len(all_indices))
+            sampled = random.sample(all_indices, n)
+            random.shuffle(sampled)
+            epoch_indices[label] = sampled
+            min_class_size = min(min_class_size, n)
+
+        labels = list(epoch_indices.keys())
+        n_batches = math.ceil(min_class_size / self.k)
+        pointers = {label: 0 for label in labels}
+
+        for _ in range(n_batches):
+            batch = []
+            for label in labels:
+                for _ in range(self.k):
+                    indices = epoch_indices[label]
+                    ptr = pointers[label]
+                    if ptr >= len(indices):
+                        random.shuffle(indices)
+                        ptr = 0
+                    batch.append(indices[ptr])
+                    pointers[label] = ptr + 1
+            if self.remainder > 0:
+                extra_labels = random.sample(labels, self.remainder)
+                for label in extra_labels:
+                    indices = epoch_indices[label]
+                    ptr = pointers[label]
+                    if ptr >= len(indices):
+                        random.shuffle(indices)
+                        ptr = 0
+                    batch.append(indices[ptr])
+                    pointers[label] = ptr + 1
+            yield batch
+
+    def __len__(self):
+        min_size = min(
+            min(self.epoch_sample_size, len(v))
+            for v in self.label_to_all_indices.values()
+        )
+        return math.ceil(min_size / self.k)
+
+
 def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibility_config,
-                         threshold, seed, gallery_size=None):
-    """Quality-filtered split with optional per-individual gallery cap."""
+                         threshold, seed):
+    """Quality-filtered split: all images passing threshold."""
     set_all_seeds(seed)
     id_to_indices = metadata_cache["id_to_indices"]
     validation_indices = feasibility_config.get("validation_indices", {})
@@ -148,9 +218,6 @@ def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibil
         all_ind_indices = list(id_to_indices.get(ind_id, []))
         train_only = [i for i in all_ind_indices if i not in val_idx_set]
         eligible = filter_training_pool_by_quality(metadata_cache, train_only, threshold)
-        if gallery_size is not None and len(eligible) > gallery_size:
-            random.shuffle(eligible)
-            eligible = eligible[:gallery_size]
         all_train_indices.extend(eligible)
         gallery_info[ind_id] = len(eligible)
 
@@ -173,7 +240,8 @@ def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibil
 def run_training(mode_label, train_dataset, val_dataset, individual_to_class, dataset_info,
                  dataset, metadata_cache, feasible_individuals, promoted_individuals,
                  excluded_individuals, best_lr, best_size, best_embedding_dim,
-                 gallery_threshold, epochs, eval_every, seed, device_str, output_path, overwrite):
+                 gallery_threshold, epoch_sample_size, epochs, eval_every, seed,
+                 device_str, output_path, overwrite):
     """Train + eval loop shared across all three conditions."""
     from utils.arcface import ArcFaceLoss
 
@@ -193,13 +261,26 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
-    sampler = BalancedBatchSampler(
-        labels=train_torch.get_labels(),
-        batch_size=TRAIN_BATCH_SIZE,
-    )
-    print(f"  Sampler: {len(sampler)} batches/epoch, batch_size={TRAIN_BATCH_SIZE}, "
-          f"k={sampler.k}/class, min_class={sampler.min_class_size}, "
-          f"max_class={max(len(v) for v in sampler.label_to_indices.values())}")
+    if epoch_sample_size is not None:
+        sampler = EpochSubsampleSampler(
+            labels=train_torch.get_labels(),
+            batch_size=TRAIN_BATCH_SIZE,
+            epoch_sample_size=epoch_sample_size,
+        )
+        class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
+        print(f"  Sampler: EpochSubsample, {len(sampler)} batches/epoch, "
+              f"sample={epoch_sample_size}/ind/epoch, batch_size={TRAIN_BATCH_SIZE}, "
+              f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
+              f"pool max={max(class_sizes.values())}")
+    else:
+        sampler = BalancedBatchSampler(
+            labels=train_torch.get_labels(),
+            batch_size=TRAIN_BATCH_SIZE,
+        )
+        print(f"  Sampler: BalancedBatch, {len(sampler)} batches/epoch, "
+              f"batch_size={TRAIN_BATCH_SIZE}, k={sampler.k}/class, "
+              f"min_class={sampler.min_class_size}, "
+              f"max_class={max(len(v) for v in sampler.label_to_indices.values())}")
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -281,7 +362,9 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
                 excluded_individuals=excluded_individuals,
             )
 
-            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}")
+            cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
+            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
+                  f"cos_thresh={cos_thresh:.3f}")
             epoch_entry = {
                 "epoch": epoch + 1,
                 "train_loss": train_loss,
@@ -329,6 +412,7 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
         "config": {
             "mode": mode_label,
             "gallery_threshold": gallery_threshold,
+            "epoch_sample_size": epoch_sample_size,
             "seed": seed,
             "epochs": epochs,
             "eval_every": eval_every,
@@ -375,7 +459,7 @@ def main():
         print(f"idx={idx} has no work assigned, exiting.")
         return
 
-    mode_label, gallery_threshold, gallery_size = JOB_CONFIGS[idx]
+    mode_label, gallery_threshold, epoch_sample_size = JOB_CONFIGS[idx]
     seed = args.seed
     epochs = args.epochs
     eval_every = args.eval_every
@@ -409,12 +493,12 @@ def main():
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
-    cap_str = f", cap={gallery_size}/ind" if gallery_size is not None else ", no cap"
-    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}{cap_str})")
+    sample_str = f", train {epoch_sample_size}/ind/epoch" if epoch_sample_size else ", all data"
+    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}{sample_str})")
 
     train_ds, val_ds, individual_to_class, dataset_info = build_filtered_split(
         dataset, metadata_cache, feasible_individuals, feasibility_config,
-        gallery_threshold, seed, gallery_size=gallery_size,
+        gallery_threshold, seed,
     )
     dataset_info["mode"] = mode_label
     dataset_info["gallery_threshold"] = gallery_threshold
@@ -434,6 +518,7 @@ def main():
         best_size=best_size,
         best_embedding_dim=best_embedding_dim,
         gallery_threshold=gallery_threshold,
+        epoch_sample_size=epoch_sample_size,
         epochs=epochs,
         eval_every=eval_every,
         seed=seed,
