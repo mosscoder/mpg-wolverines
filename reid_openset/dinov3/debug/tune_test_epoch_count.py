@@ -2,7 +2,7 @@
 Sweep gallery quality threshold × epoch sample size.
 
   3 gallery filters: g>=0.00, g>=0.25, g>=0.50
-  3 sample sizes:    32, 64, 128 images/individual/epoch
+  4 sample sizes:    32, 64, 128, 256 images/individual/epoch
 
 Each epoch, randomly draw N images per individual (with replacement if
 the individual has fewer than N). Eval always uses the full quality-
@@ -57,7 +57,7 @@ from utils.reid import count_trainable_parameters, load_best_hyperparams
 
 MODEL_NAME = "dinov3"
 GALLERY_THRESHOLDS = [0.0, 0.25, 0.5]
-SAMPLE_SIZES = [32, 64, 128]
+SAMPLE_SIZES = [32, 64, 128, 256]
 
 # idx -> (label, gallery quality threshold, epoch_sample_size)
 # 3 thresholds × 3 sample sizes = 9 jobs
@@ -377,7 +377,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Sweep gallery threshold × epoch sample size (9 configs)")
     parser.add_argument("--idx", type=int, required=True,
-                        help="Job index 0-8 (3 gallery thresholds × 3 sample sizes)")
+                        help="Job index 0-11 (3 gallery thresholds × 4 sample sizes)")
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)

@@ -2,7 +2,7 @@
 #SBATCH --job-name=tune_epoch_count
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-8
+#SBATCH --array=0-11
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,10 +11,10 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug/%A_%a.err
 
-# Sweep gallery threshold × epoch sample size (9 jobs):
-#   idx=0: g>=0.00, n=32    idx=1: g>=0.00, n=64    idx=2: g>=0.00, n=128
-#   idx=3: g>=0.25, n=32    idx=4: g>=0.25, n=64    idx=5: g>=0.25, n=128
-#   idx=6: g>=0.50, n=32    idx=7: g>=0.50, n=64    idx=8: g>=0.50, n=128
+# Sweep gallery threshold × epoch sample size (12 jobs):
+#   idx=0:  g>=0.00, n=32    idx=1:  g>=0.00, n=64    idx=2:  g>=0.00, n=128    idx=3:  g>=0.00, n=256
+#   idx=4:  g>=0.25, n=32    idx=5:  g>=0.25, n=64    idx=6:  g>=0.25, n=128    idx=7:  g>=0.25, n=256
+#   idx=8:  g>=0.50, n=32    idx=9:  g>=0.50, n=64    idx=10: g>=0.50, n=128    idx=11: g>=0.50, n=256
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/debug
