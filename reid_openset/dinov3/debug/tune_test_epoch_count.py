@@ -1,13 +1,12 @@
 """
-Tune epoch count across three gallery quality thresholds.
+Sweep gallery quality threshold × epoch sample size.
 
-  idx=0  g>=0.00: all training images, no subsampling
-  idx=1  g>=0.25: pelage_score >= 0.25, train on random 64/ind/epoch
-  idx=2  g>=0.50: pelage_score >= 0.50, train on random 64/ind/epoch
+  3 gallery filters: g>=0.00, g>=0.25, g>=0.50
+  3 sample sizes:    32, 64, 128 images/individual/epoch
 
-Filtered conditions (idx 1-2) subsample 64 images per individual each
-epoch for training (fresh draw each epoch), but eval always uses the
-full quality-filtered gallery.
+Each epoch, randomly draw N images per individual (with replacement if
+the individual has fewer than N). Eval always uses the full quality-
+filtered gallery.
 
 Each eval computes R@1 and open-set BA at all query quality levels
 (q>=0.0, q>=0.25, q>=0.5).
@@ -57,83 +56,25 @@ from utils.reid import count_trainable_parameters, load_best_hyperparams
 
 
 MODEL_NAME = "dinov3"
-EPOCH_SAMPLE_SIZE = 64  # images per individual per epoch for filtered conditions
+GALLERY_THRESHOLDS = [0.0, 0.25, 0.5]
+SAMPLE_SIZES = [32, 64, 128]
 
-# idx -> (label, gallery quality threshold, epoch_sample_size or None)
-JOB_CONFIGS = {
-    0: ("g0.00", 0.0, None),                  # all data, cycle through all
-    1: ("g0.25", 0.25, EPOCH_SAMPLE_SIZE),     # filtered, 64/ind/epoch
-    2: ("g0.50", 0.5, EPOCH_SAMPLE_SIZE),      # filtered, 64/ind/epoch
-}
-
-
-class BalancedBatchSampler(Sampler):
-    """
-    Balanced batch sampler with persistent pointers across epochs.
-
-    Epoch length = ceil(min_class_size / k), so one epoch = one pass through
-    the rarest individual. Large classes are consumed sequentially across
-    epochs; a class is only reshuffled when its pointer wraps. Every image
-    is seen exactly once before any repeats.
-    """
-    def __init__(self, labels, batch_size=36):
-        super().__init__(None)
-        self.batch_size = batch_size
-        self.label_to_indices = defaultdict(list)
-        for idx, label in enumerate(labels):
-            self.label_to_indices[label].append(idx)
-
-        self.n_classes = len(self.label_to_indices)
-        self.k = batch_size // self.n_classes
-        if self.k == 0:
-            self.k = 1
-        self.remainder = batch_size - (self.k * self.n_classes)
-        self.min_class_size = min(len(v) for v in self.label_to_indices.values())
-
-        # Persistent state across epochs
-        self.class_indices = {}
-        self.pointers = {}
-        for label, indices in self.label_to_indices.items():
-            shuffled = indices.copy()
-            random.shuffle(shuffled)
-            self.class_indices[label] = shuffled
-            self.pointers[label] = 0
-
-    def _next_from_class(self, label):
-        """Get next index, wrapping with reshuffle when exhausted."""
-        indices = self.class_indices[label]
-        ptr = self.pointers[label]
-        if ptr >= len(indices):
-            random.shuffle(indices)
-            self.class_indices[label] = indices
-            ptr = 0
-        idx = indices[ptr]
-        self.pointers[label] = ptr + 1
-        return idx
-
-    def __iter__(self):
-        labels = list(self.label_to_indices.keys())
-        n_batches = math.ceil(self.min_class_size / self.k)
-
-        for _ in range(n_batches):
-            batch = []
-            for label in labels:
-                for _ in range(self.k):
-                    batch.append(self._next_from_class(label))
-            if self.remainder > 0:
-                extra_labels = random.sample(labels, self.remainder)
-                for label in extra_labels:
-                    batch.append(self._next_from_class(label))
-            yield batch
-
-    def __len__(self):
-        return math.ceil(self.min_class_size / self.k)
+# idx -> (label, gallery quality threshold, epoch_sample_size)
+# 3 thresholds × 3 sample sizes = 9 jobs
+JOB_CONFIGS = {}
+idx = 0
+for gt in GALLERY_THRESHOLDS:
+    for ss in SAMPLE_SIZES:
+        label = f"g{gt:.2f}_n{ss}"
+        JOB_CONFIGS[idx] = (label, gt, ss)
+        idx += 1
 
 
 class EpochSubsampleSampler(Sampler):
     """
     Each epoch, randomly draw N images per individual from the full pool,
     then yield balanced batches from that subsample. Fresh draw each epoch.
+    Uses replacement for individuals with fewer than N images.
     """
     def __init__(self, labels, batch_size=36, epoch_sample_size=64):
         super().__init__(None)
@@ -152,17 +93,18 @@ class EpochSubsampleSampler(Sampler):
 
     def __iter__(self):
         # Fresh random subsample per class for this epoch
+        # With replacement if pool < N, without replacement otherwise
         epoch_indices = {}
-        min_class_size = float('inf')
         for label, all_indices in self.label_to_all_indices.items():
-            n = min(self.epoch_sample_size, len(all_indices))
-            sampled = random.sample(all_indices, n)
+            if len(all_indices) >= self.epoch_sample_size:
+                sampled = random.sample(all_indices, self.epoch_sample_size)
+            else:
+                sampled = random.choices(all_indices, k=self.epoch_sample_size)
             random.shuffle(sampled)
             epoch_indices[label] = sampled
-            min_class_size = min(min_class_size, n)
 
         labels = list(epoch_indices.keys())
-        n_batches = math.ceil(min_class_size / self.k)
+        n_batches = math.ceil(self.epoch_sample_size / self.k)
         pointers = {label: 0 for label in labels}
 
         for _ in range(n_batches):
@@ -189,11 +131,7 @@ class EpochSubsampleSampler(Sampler):
             yield batch
 
     def __len__(self):
-        min_size = min(
-            min(self.epoch_sample_size, len(v))
-            for v in self.label_to_all_indices.values()
-        )
-        return math.ceil(min_size / self.k)
+        return math.ceil(self.epoch_sample_size / self.k)
 
 
 def build_filtered_split(dataset, metadata_cache, feasible_individuals, feasibility_config,
@@ -242,7 +180,7 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
                  excluded_individuals, best_lr, best_size, best_embedding_dim,
                  gallery_threshold, epoch_sample_size, epochs, eval_every, seed,
                  device_str, output_path, overwrite):
-    """Train + eval loop shared across all three conditions."""
+    """Train + eval loop shared across all conditions."""
     from utils.arcface import ArcFaceLoss
 
     if os.path.exists(output_path) and not overwrite:
@@ -261,26 +199,18 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
     train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
-    if epoch_sample_size is not None:
-        sampler = EpochSubsampleSampler(
-            labels=train_torch.get_labels(),
-            batch_size=TRAIN_BATCH_SIZE,
-            epoch_sample_size=epoch_sample_size,
-        )
-        class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
-        print(f"  Sampler: EpochSubsample, {len(sampler)} batches/epoch, "
-              f"sample={epoch_sample_size}/ind/epoch, batch_size={TRAIN_BATCH_SIZE}, "
-              f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
-              f"pool max={max(class_sizes.values())}")
-    else:
-        sampler = BalancedBatchSampler(
-            labels=train_torch.get_labels(),
-            batch_size=TRAIN_BATCH_SIZE,
-        )
-        print(f"  Sampler: BalancedBatch, {len(sampler)} batches/epoch, "
-              f"batch_size={TRAIN_BATCH_SIZE}, k={sampler.k}/class, "
-              f"min_class={sampler.min_class_size}, "
-              f"max_class={max(len(v) for v in sampler.label_to_indices.values())}")
+    sampler = EpochSubsampleSampler(
+        labels=train_torch.get_labels(),
+        batch_size=TRAIN_BATCH_SIZE,
+        epoch_sample_size=epoch_sample_size,
+    )
+    class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
+    n_resampled = sum(1 for v in class_sizes.values() if v < epoch_sample_size)
+    print(f"  Sampler: EpochSubsample, {len(sampler)} batches/epoch, "
+          f"sample={epoch_sample_size}/ind/epoch, batch_size={TRAIN_BATCH_SIZE}, "
+          f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
+          f"pool max={max(class_sizes.values())}, "
+          f"resampled={n_resampled}/{len(class_sizes)} individuals")
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -444,9 +374,10 @@ def run_training(mode_label, train_dataset, val_dataset, individual_to_class, da
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tune epoch count: 3 gallery quality thresholds")
+    parser = argparse.ArgumentParser(
+        description="Sweep gallery threshold × epoch sample size (9 configs)")
     parser.add_argument("--idx", type=int, required=True,
-                        help="0=g>=0.00, 1=g>=0.25, 2=g>=0.50")
+                        help="Job index 0-8 (3 gallery thresholds × 3 sample sizes)")
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
@@ -492,9 +423,8 @@ def main():
     excluded_individuals = feasibility_config.get("excluded_entirely", [])
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
-
-    sample_str = f", train {epoch_sample_size}/ind/epoch" if epoch_sample_size else ", all data"
-    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}{sample_str})")
+    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}, "
+          f"train {epoch_sample_size}/ind/epoch)")
 
     train_ds, val_ds, individual_to_class, dataset_info = build_filtered_split(
         dataset, metadata_cache, feasible_individuals, feasibility_config,
