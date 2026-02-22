@@ -193,8 +193,8 @@ def load_best_hyperparams(model_name):
 # Hygiene sweep: job distribution and training
 # ============================================================================
 
-ALPHAS = [0, 1, 2]
-GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
+ALPHAS = [0, 1, 2, 10, 100]
+GALLERY_SIZES = [2, 4, 8, 16, 32, 64, 128, 256]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 
 

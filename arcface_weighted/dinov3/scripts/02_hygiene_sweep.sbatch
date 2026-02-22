@@ -12,9 +12,9 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/hygiene/%A_%a.err
 
 # Open-Set DINOv3 + Weighted ArcFace + Raw Cosine Gallery Hygiene Sweep
-# 3 alphas x 6 gallery sizes x 8 seeds = 144 configs across 24 jobs (6/job)
+# 5 alphas x 8 gallery sizes x 8 seeds = 320 configs across 24 jobs (~13/job)
 #
-# Alphas: 0 (unweighted baseline), 1 (moderate), 2 (strong quality emphasis)
+# Alphas: 0 (unweighted baseline), 1 (moderate), 2 (strong), 10 (very strong), 100 (extreme quality emphasis)
 # Weight formula: weight = 1 + quality * alpha
 # Gallery: always threshold=0.0 (no quality filtering), quality handled by loss weighting
 # Evaluates Balanced Accuracy = (Known Accept + Unknown Reject) / 2

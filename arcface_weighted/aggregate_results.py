@@ -7,7 +7,7 @@ The shared plotting module expects results with a float 'threshold' config key
 and filenames matching threshold=*_gallery=*_seed=*.json.  This script:
 
 1. Loads arcface_weighted results and injects a synthetic threshold field
-   (alpha=0 -> 0.0, alpha=1 -> 0.5, alpha=2 -> 1.0)
+   (alpha value used directly as threshold)
 2. Writes patched copies with the expected filename pattern to a temp dir
 3. Runs full per-backbone diagnostics (tables + diagnostic figures)
 4. Runs cross-backbone aggregate analysis (faceted figures + tables)
@@ -33,8 +33,10 @@ from utils.reid_config import MODEL_CONFIGS
 
 ALPHA_TO_THRESHOLD = {
     0: 0.0,
-    1: 0.5,
-    2: 1.0,
+    1: 1.0,
+    2: 2.0,
+    10: 10.0,
+    100: 100.0,
 }
 
 BASE_DIR = "arcface_weighted"
