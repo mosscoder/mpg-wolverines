@@ -1,9 +1,15 @@
 """
-Shared utilities for AdaFace open-set experiments across all backbones.
+Shared utilities for Weighted ArcFace open-set experiments across all backbones.
 
-Parallel to utils/reid.py but replaces ArcFace loss with QualityAdaFaceLoss.
-Instead of filtering gallery by quality thresholds, the loss function itself
-scales angular margin based on each image's pelage_score.
+Parallel to utils/adaface_reid.py but replaces QualityAdaFaceLoss with standard
+ArcFace loss + per-sample weighting based on pelage quality.
+
+Weight formula: weight = 1 + (quality * alpha)
+- alpha=0 -> weight=1 for all (unweighted baseline, same as standard ArcFace)
+- alpha=1 -> weights in [1, 2] (moderate quality emphasis)
+- alpha=2 -> weights in [1, 3] (strong quality emphasis)
+
+Opt scripts (LR, embedding_dim sweeps) use alpha=0. Hygiene sweep varies alpha.
 """
 
 import os
@@ -47,15 +53,15 @@ from utils.reid_evaluation import (  # noqa: F401
 
 
 # ============================================================================
-# AdaFace experiment directory mapping
+# Weighted ArcFace experiment directory mapping
 # ============================================================================
 
-def _adaface_experiment_dir(model_name):
-    """Return adaface experiment dir for a model (parallel to reid_openset/)."""
+def _weighted_experiment_dir(model_name):
+    """Return arcface_weighted experiment dir for a model (parallel to reid_openset/)."""
     config = MODEL_CONFIGS[model_name]
-    # reid_openset/dinov3 -> adaface/dinov3
+    # reid_openset/dinov3 -> arcface_weighted/dinov3
     original = config["experiment_dir"]
-    return original.replace("reid_openset/", "adaface/", 1)
+    return original.replace("reid_openset/", "arcface_weighted/", 1)
 
 
 # ============================================================================
@@ -67,9 +73,18 @@ def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def train_epoch_adaface(model, train_loader, optimizer, criterion, device,
-                        quality_aware=True):
-    """Train for one epoch with QualityAdaFace loss."""
+def train_epoch_weighted(model, train_loader, optimizer, criterion, device, alpha):
+    """Train for one epoch with weighted ArcFace loss.
+
+    Args:
+        model: The model to train
+        train_loader: DataLoader yielding (images, labels, quality) tuples
+        optimizer: Optimizer
+        criterion: ArcFaceLoss instance
+        device: Device string or torch.device
+        alpha: Quality weighting strength. 0 = unweighted (standard ArcFace),
+               >0 = weight = 1 + quality * alpha
+    """
     model.train()
     criterion.train()
     total_loss = 0
@@ -80,13 +95,14 @@ def train_epoch_adaface(model, train_loader, optimizer, criterion, device,
         labels = batch[1].to(device)
         quality = batch[2].to(device)
 
-        if not quality_aware:
-            quality = torch.ones_like(quality)
-
         embeddings = model(images)
 
         optimizer.zero_grad()
-        loss = criterion(embeddings, labels, quality)
+        if alpha > 0:
+            weights = 1.0 + quality * alpha
+            loss = criterion(embeddings, labels, sample_weights=weights)
+        else:
+            loss = criterion(embeddings, labels)
         loss.backward()
         optimizer.step()
 
@@ -138,13 +154,13 @@ def _select_best_param(results_dir, glob_pattern, param_key):
 
 def load_best_hyperparams(model_name):
     """
-    Load best LR, image size, and embedding dim from AdaFace optimization sweep results.
+    Load best LR, image size, and embedding dim from Weighted ArcFace optimization sweep results.
     Falls back to defaults if results not found.
 
     Returns: (best_lr, best_size, best_embedding_dim)
     """
     config = MODEL_CONFIGS[model_name]
-    experiment_dir = _adaface_experiment_dir(model_name)
+    experiment_dir = _weighted_experiment_dir(model_name)
 
     best_lr = config["default_lr"]
     best_size = config["native_size"]
@@ -177,18 +193,18 @@ def load_best_hyperparams(model_name):
 # Hygiene sweep: job distribution and training
 # ============================================================================
 
-LOSS_MODES = ["quality_aware", "quality_ignorant"]
+ALPHAS = [0, 1, 2]
 GALLERY_SIZES = [2, 4, 8, 16, 32, 64]
 SEEDS = [0, 1, 2, 3, 4, 5, 6, 7]
 
 
 def get_job_combinations(job_idx, max_jobs=24):
-    """Map job index to list of (loss_mode, gallery_size, seed) tuples."""
+    """Map job index to list of (alpha, gallery_size, seed) tuples."""
     all_combinations = []
-    for loss_mode in LOSS_MODES:
+    for alpha in ALPHAS:
         for gallery_size in GALLERY_SIZES:
             for seed in SEEDS:
-                all_combinations.append((loss_mode, gallery_size, seed))
+                all_combinations.append((alpha, gallery_size, seed))
 
     total = len(all_combinations)
     configs_per_job = total // max_jobs
@@ -210,20 +226,18 @@ def get_job_combinations(job_idx, max_jobs=24):
     return all_combinations[start:min(end, total)]
 
 
-def train_single_config(model_name, loss_mode, gallery_size, seed, args,
+def train_single_config(model_name, alpha, gallery_size, seed, args,
                          dataset, config, metadata_cache,
                          learning_rate, image_size, embedding_dim, epochs=50):
     """Train one hygiene sweep configuration and return results."""
-    from utils.adaface import QualityAdaFaceLoss
-    from utils.arcface import BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
 
     model_config = MODEL_CONFIGS[model_name]
-    quality_aware = (loss_mode == "quality_aware")
 
     set_all_seeds(seed)
 
-    filename = f"mode={loss_mode}_gallery={gallery_size}_seed={seed}.json"
+    filename = f"alpha={alpha}_gallery={gallery_size}_seed={seed}.json"
     output_path = os.path.join(args.output_dir, filename)
 
     if check_result_exists(output_path) and not args.overwrite:
@@ -231,7 +245,7 @@ def train_single_config(model_name, loss_mode, gallery_size, seed, args,
         return None
 
     print(f"\n{'='*60}")
-    print(f"Training: loss_mode={loss_mode}, gallery_size={gallery_size}, seed={seed}")
+    print(f"Training: alpha={alpha}, gallery_size={gallery_size}, seed={seed}")
     print(f"{'='*60}")
 
     # Get qualified individuals from config (preprocessing already enforces criteria)
@@ -284,26 +298,25 @@ def train_single_config(model_name, loss_mode, gallery_size, seed, args,
         collate_fn=collate_fn
     )
 
-    # Create QualityAdaFace loss
-    criterion = QualityAdaFaceLoss(
+    # Create ArcFace loss (standard — weighting handled in train loop)
+    criterion = ArcFaceLoss(
         num_classes=len(feasible_individuals),
         embedding_size=emb_dim,
         margin=ARCFACE_MARGIN,
         scale=ARCFACE_SCALE,
-        use_quality_scaling=quality_aware
     ).to(device)
 
     head_params = count_trainable_parameters(model.head)
-    adaface_params = count_trainable_parameters(criterion)
+    arcface_params = count_trainable_parameters(criterion)
     trainable_params = {
         'head': head_params,
-        'adaface': adaface_params,
-        'total': head_params + adaface_params
+        'arcface': arcface_params,
+        'total': head_params + arcface_params
     }
 
     print(f"  Model parameters (trainable):")
     print(f"  Projection head: {trainable_params['head']:,}")
-    print(f"  AdaFace centers: {trainable_params['adaface']:,}")
+    print(f"  ArcFace centers: {trainable_params['arcface']:,}")
     print(f"  Total: {trainable_params['total']:,}")
 
     optimizer = torch.optim.AdamW(
@@ -322,8 +335,8 @@ def train_single_config(model_name, loss_mode, gallery_size, seed, args,
     best_hm_epoch = 0
 
     for epoch in range(epochs):
-        train_loss = train_epoch_adaface(model, train_loader, optimizer, criterion,
-                                          device, quality_aware=quality_aware)
+        train_loss = train_epoch_weighted(model, train_loader, optimizer, criterion,
+                                          device, alpha=alpha)
 
         query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, transform, device,
@@ -382,10 +395,10 @@ def train_single_config(model_name, loss_mode, gallery_size, seed, args,
 
     result = {
         'config': {
-            'loss_mode': loss_mode,
+            'alpha': alpha,
             'gallery_size': gallery_size,
             'seed': seed,
-            'loss': 'QualityAdaFace',
+            'loss': 'WeightedArcFace',
             'arcface_margin': ARCFACE_MARGIN,
             'arcface_scale': ARCFACE_SCALE,
             'embedding_dim': emb_dim,
@@ -435,7 +448,7 @@ def train_single_config(model_name, loss_mode, gallery_size, seed, args,
 
 def run_hygiene_sweep(model_name, args):
     """
-    Main entry point for running an AdaFace hygiene sweep experiment.
+    Main entry point for running a Weighted ArcFace hygiene sweep experiment.
 
     Loads dataset, config, best hyperparams, distributes work across SLURM jobs,
     and trains each configuration.
@@ -443,7 +456,7 @@ def run_hygiene_sweep(model_name, args):
     config = MODEL_CONFIGS[model_name]
 
     print("=" * 80)
-    print(f"Open-Set {config['backbone_label']} + QualityAdaFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
+    print(f"Open-Set {config['backbone_label']} + Weighted ArcFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
     # Load best hyperparameters
@@ -459,15 +472,15 @@ def run_hygiene_sweep(model_name, args):
         print("Failed to load feasibility config")
         return
 
-    total_combinations = len(LOSS_MODES) * len(GALLERY_SIZES) * len(SEEDS)
+    total_combinations = len(ALPHAS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
-    print(f"  Model: {config['backbone_label']} + Projection Head ({best_embedding_dim}-d) + QualityAdaFace")
-    print(f"  Loss: QualityAdaFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE})")
+    print(f"  Model: {config['backbone_label']} + Projection Head ({best_embedding_dim}-d) + Weighted ArcFace")
+    print(f"  Loss: ArcFace (margin={ARCFACE_MARGIN}, scale={ARCFACE_SCALE}) + quality weighting")
     print(f"  Score Normalization: Raw Cosine Similarity (L2-normalized)")
     print(f"  Optimizer: AdamW (lr={best_lr}, default settings)")
     print(f"  Embedding: {best_embedding_dim}-d (trainable projection)")
     print(f"  Image size: {best_size}")
-    print(f"  Loss modes: {LOSS_MODES}")
+    print(f"  Alphas: {ALPHAS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")
     print(f"  Total combinations: {total_combinations}")
@@ -481,17 +494,17 @@ def run_hygiene_sweep(model_name, args):
         return
 
     print(f"\nJob {args.idx} processing {len(combinations)} configurations:")
-    for loss_mode, gallery_size, seed in combinations[:5]:
-        print(f"  loss_mode={loss_mode}, gallery_size={gallery_size}, seed={seed}")
+    for alpha, gallery_size, seed in combinations[:5]:
+        print(f"  alpha={alpha}, gallery_size={gallery_size}, seed={seed}")
     if len(combinations) > 5:
         print(f"  ... and {len(combinations) - 5} more")
 
     results_summary = []
-    for i, (loss_mode, gallery_size, seed) in enumerate(combinations):
+    for i, (alpha, gallery_size, seed) in enumerate(combinations):
         print(f"\n--- Configuration {i+1}/{len(combinations)} ---")
         try:
             result = train_single_config(
-                model_name, loss_mode, gallery_size, seed, args,
+                model_name, alpha, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
                 embedding_dim=best_embedding_dim
@@ -521,10 +534,9 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     """
     Shared training loop for all opt sweep scripts (LR, embedding_dim).
 
-    Uses QualityAdaFaceLoss with quality_aware=True and 3-tuple collate.
+    Uses standard ArcFace loss with alpha=0 (no quality weighting).
     """
-    from utils.adaface import QualityAdaFaceLoss
-    from utils.arcface import BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
 
     model_config = MODEL_CONFIGS[model_name]
     if learning_rate is None:
@@ -599,18 +611,17 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         collate_fn=collate_fn
     )
 
-    # Create QualityAdaFace loss
-    criterion = QualityAdaFaceLoss(
+    # Create standard ArcFace loss (no quality weighting for opt sweeps)
+    criterion = ArcFaceLoss(
         num_classes=len(qualified_individuals),
         embedding_size=emb_dim,
         margin=ARCFACE_MARGIN,
         scale=ARCFACE_SCALE,
-        use_quality_scaling=True
     ).to(device)
 
     head_params = count_trainable_parameters(model.head)
-    adaface_params = count_trainable_parameters(criterion)
-    print(f"  Trainable params: head={head_params:,}, adaface={adaface_params:,}")
+    arcface_params = count_trainable_parameters(criterion)
+    print(f"  Trainable params: head={head_params:,}, arcface={arcface_params:,}")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -618,15 +629,15 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         lr=learning_rate
     )
 
-    # Training loop
+    # Training loop — alpha=0 (standard ArcFace, no weighting)
     start_time = time.time()
     epoch_history = []
     best_recall = 0.0
     best_epoch = 0
 
     for epoch in range(epochs):
-        train_loss = train_epoch_adaface(model, train_loader, optimizer, criterion,
-                                          device, quality_aware=True)
+        train_loss = train_epoch_weighted(model, train_loader, optimizer, criterion,
+                                          device, alpha=0)
 
         recall_at_1 = evaluate_recall_simple(
             model, train_dataset, test_dataset, individual_to_class, transform, device
@@ -653,7 +664,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
             'epochs': epochs,
             'seed': seed,
             'backbone': model_config['backbone_label'],
-            'loss': 'QualityAdaFace',
+            'loss': 'ArcFace',
             'target_samples_per_individual': TARGET_SAMPLES_PER_INDIVIDUAL,
             'image_size': image_size,
             'embedding_dim': embedding_dim,
@@ -694,25 +705,25 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 # Final test evaluation
 # ============================================================================
 
-def load_best_hygiene_config(model_name, criterion='harmonic_mean', loss_mode_filter=None):
+def load_best_hygiene_config(model_name, criterion='harmonic_mean', alpha_filter=None):
     """
     Read all hygiene sweep results for a backbone and select the best operating point.
 
-    Groups by (loss_mode, gallery_size), extracts best epoch per seed by criterion,
-    averages across seeds, returns the (loss_mode, gallery_size, epoch) with highest mean.
+    Groups by (alpha, gallery_size), extracts best epoch per seed by criterion,
+    averages across seeds, returns the (alpha, gallery_size, epoch) with highest mean.
 
     Args:
         model_name: Key in MODEL_CONFIGS
         criterion: 'recall', 'balanced_accuracy', or 'harmonic_mean'
-        loss_mode_filter: If set, only consider groups with this loss_mode value
+        alpha_filter: None = any alpha, 'weighted' = alpha > 0 only
 
     Returns:
-        dict with {loss_mode, gallery_size, best_epoch, score}
+        dict with {alpha, gallery_size, best_epoch, score}
     """
-    experiment_dir = _adaface_experiment_dir(model_name)
+    experiment_dir = _weighted_experiment_dir(model_name)
     results_dir = os.path.join(experiment_dir, 'results', 'hygiene')
 
-    files = glob.glob(os.path.join(results_dir, 'mode=*_gallery=*_seed=*.json'))
+    files = glob.glob(os.path.join(results_dir, 'alpha=*_gallery=*_seed=*.json'))
     if not files:
         raise FileNotFoundError(f"No hygiene results found in {results_dir}")
 
@@ -722,28 +733,28 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', loss_mode_fi
         with open(f, 'r') as fp:
             results.append(json.load(fp))
 
-    # Group by (loss_mode, gallery_size)
+    # Group by (alpha, gallery_size)
     groups = defaultdict(list)
     for r in results:
-        key = (r['config']['loss_mode'], r['config']['gallery_size'])
+        key = (r['config']['alpha'], r['config']['gallery_size'])
         groups[key].append(r)
 
-    # Optionally filter to a specific loss_mode
-    if loss_mode_filter is not None:
-        groups = {k: v for k, v in groups.items() if k[0] == loss_mode_filter}
+    # Optionally filter by alpha
+    if alpha_filter == 'weighted':
+        groups = {k: v for k, v in groups.items() if k[0] > 0}
         if not groups:
-            raise ValueError(f"No hygiene results with loss_mode={loss_mode_filter} in {results_dir}")
+            raise ValueError(f"No hygiene results with alpha > 0 in {results_dir}")
 
     best_overall_score = -1.0
     best_config = None
 
-    # For quality_ignorant mode, only evaluate at q>=0.0
-    if loss_mode_filter is not None and loss_mode_filter == "quality_ignorant":
-        q_thresholds_to_search = [0.0]
+    # For alpha=0, only evaluate at q>=0.0
+    if alpha_filter is None:
+        q_thresholds_to_search = QUERY_QUALITY_THRESHOLDS
     else:
         q_thresholds_to_search = QUERY_QUALITY_THRESHOLDS
 
-    for (loss_mode, gallery_size), group_results in groups.items():
+    for (alpha, gallery_size), group_results in groups.items():
         for q_thresh in q_thresholds_to_search:
             q_key = f"q>={q_thresh}"
 
@@ -799,7 +810,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', loss_mode_fi
             if best_mean > best_overall_score:
                 best_overall_score = best_mean
                 best_config = {
-                    'loss_mode': loss_mode,
+                    'alpha': alpha,
                     'gallery_size': gallery_size,
                     'query_quality_threshold': q_thresh,
                     'best_epoch': best_epoch_num,
@@ -810,7 +821,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', loss_mode_fi
                     'per_individual_thresholds': mean_per_individual,
                 }
 
-    print(f"Best hygiene config ({criterion}): loss_mode={best_config['loss_mode']}, "
+    print(f"Best hygiene config ({criterion}): alpha={best_config['alpha']}, "
           f"gallery_size={best_config['gallery_size']}, "
           f"query_q>={best_config['query_quality_threshold']}, "
           f"epoch={best_config['best_epoch']}, "
@@ -819,25 +830,24 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', loss_mode_fi
     return best_config
 
 
-# Each task selects its own optimal (loss_mode, gallery_size, epoch) from the
-# hygiene sweep using the criterion and loss_mode constraint that match its goal.
+# Each task selects its own optimal (alpha, gallery_size, epoch) from the
+# hygiene sweep using the criterion and alpha constraint that match its goal.
 #
-# "Filtered" tasks use threshold=0.0 (all data, no quality filtering).
-# "Matched" tasks also use threshold=0.0 (all data).
-# The quality-aware vs quality-ignorant distinction is handled by the loss function.
+# "Filtered" tasks consider any alpha (including 0 = unweighted baseline).
+# "Weighted" tasks only consider alpha > 0 (quality-weighted loss).
 TEST_TASKS = {
-    'closed_filtered': {'criterion': 'recall',            'loss_mode_filter': None},             # idx 0
-    'closed_matched':  {'criterion': 'recall',            'loss_mode_filter': 'quality_aware'},   # idx 1
-    'open_filtered':   {'criterion': 'balanced_accuracy', 'loss_mode_filter': None},             # idx 2
-    'open_matched':    {'criterion': 'balanced_accuracy', 'loss_mode_filter': 'quality_aware'},   # idx 3
+    'closed_filtered': {'criterion': 'recall',            'alpha_filter': None},        # idx 0
+    'closed_weighted': {'criterion': 'recall',            'alpha_filter': 'weighted'},   # idx 1
+    'open_filtered':   {'criterion': 'balanced_accuracy', 'alpha_filter': None},        # idx 2
+    'open_weighted':   {'criterion': 'balanced_accuracy', 'alpha_filter': 'weighted'},   # idx 3
 }
 
 
 def run_final_test(model_name, args, seed, task_name):
     """
-    Final test evaluation using the best operating point from AdaFace hygiene sweep.
+    Final test evaluation using the best operating point from Weighted ArcFace hygiene sweep.
 
-    Gallery always uses threshold=0.0 (all data). Quality adaptation is in the loss.
+    Gallery always uses threshold=0.0 (all data). Quality weighting is in the loss.
 
     Args:
         model_name: Key in MODEL_CONFIGS
@@ -845,35 +855,32 @@ def run_final_test(model_name, args, seed, task_name):
         seed: Random seed for gallery sampling and training
         task_name: Key in TEST_TASKS
     """
-    from utils.adaface import QualityAdaFaceLoss
-    from utils.arcface import BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
 
     task_cfg = TEST_TASKS[task_name]
     criterion = task_cfg['criterion']
-    loss_mode_filter = task_cfg['loss_mode_filter']
+    alpha_filter = task_cfg['alpha_filter']
 
     model_config = MODEL_CONFIGS[model_name]
-    experiment_dir = _adaface_experiment_dir(model_name)
+    experiment_dir = _weighted_experiment_dir(model_name)
 
     # Load best hygiene config
-    if loss_mode_filter is not None:
-        # For matched tasks, load both the unconstrained and constrained configs
+    if alpha_filter is not None:
+        # For weighted tasks, load both the unconstrained and constrained configs
         unconstrained_config = load_best_hygiene_config(model_name, criterion=criterion,
-                                                         loss_mode_filter=None)
+                                                         alpha_filter=None)
         best_config = load_best_hygiene_config(model_name, criterion=criterion,
-                                                loss_mode_filter=loss_mode_filter)
-        best_loss_mode = best_config['loss_mode']
+                                                alpha_filter=alpha_filter)
+        best_alpha = best_config['alpha']
         best_epoch = best_config['best_epoch']
         query_quality_threshold = best_config['query_quality_threshold']
     else:
         best_config = load_best_hygiene_config(model_name, criterion=criterion,
-                                                loss_mode_filter=loss_mode_filter)
-        best_loss_mode = best_config['loss_mode']
+                                                alpha_filter=alpha_filter)
+        best_alpha = best_config['alpha']
         best_epoch = best_config['best_epoch']
         query_quality_threshold = best_config['query_quality_threshold']
-
-    quality_aware = (best_loss_mode == "quality_aware")
 
     set_all_seeds(seed)
 
@@ -888,9 +895,9 @@ def run_final_test(model_name, args, seed, task_name):
 
     print(f"\n{'='*60}")
     print(f"Final Test Evaluation: seed={seed}, task={task_name}")
-    print(f"  criterion={criterion}, loss_mode={best_loss_mode}, "
+    print(f"  criterion={criterion}, alpha={best_alpha}, "
           f"query_q>={query_quality_threshold}, epochs={best_epoch}")
-    print(f"  gallery: threshold=0.0 (all data, quality handled by loss)")
+    print(f"  gallery: threshold=0.0 (all data, quality handled by loss weighting)")
     print(f"{'='*60}")
 
     # Load best hyperparameters
@@ -982,28 +989,27 @@ def run_final_test(model_name, args, seed, task_name):
         collate_fn=collate_fn
     )
 
-    # Create QualityAdaFace loss
-    adaface_loss = QualityAdaFaceLoss(
+    # Create standard ArcFace loss (weighting applied in train loop)
+    arcface_loss = ArcFaceLoss(
         num_classes=len(feasible_individuals),
         embedding_size=emb_dim,
         margin=ARCFACE_MARGIN,
         scale=ARCFACE_SCALE,
-        use_quality_scaling=quality_aware
     ).to(device)
 
     optimizer = torch.optim.AdamW(
-        list(model.get_trainable_parameters()) + list(adaface_loss.parameters()),
+        list(model.get_trainable_parameters()) + list(arcface_loss.parameters()),
         lr=best_lr
     )
 
     # Train for exactly best_epoch epochs
-    print(f"\nTraining for {best_epoch} epochs (loss_mode={best_loss_mode})...")
+    print(f"\nTraining for {best_epoch} epochs (alpha={best_alpha})...")
     start_time = time.time()
     epoch_history = []
 
     for epoch in range(best_epoch):
-        train_loss = train_epoch_adaface(model, train_loader, optimizer, adaface_loss,
-                                          device, quality_aware=quality_aware)
+        train_loss = train_epoch_weighted(model, train_loader, optimizer, arcface_loss,
+                                          device, alpha=best_alpha)
         print(f"Epoch {epoch+1:3d}/{best_epoch}: Loss={train_loss:.4f}")
         epoch_history.append({'epoch': epoch + 1, 'train_loss': train_loss})
 
@@ -1029,13 +1035,13 @@ def run_final_test(model_name, args, seed, task_name):
     gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
     gallery_labels = torch.tensor(gallery_labels).to(device)
 
-    # Compute fresh per-individual thresholds from this model's AdaFace centers
+    # Compute fresh per-individual thresholds from this model's ArcFace centers
     class_to_name = {v: k for k, v in individual_to_class.items()}
     per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
-        gallery_embeddings, gallery_labels, adaface_loss, class_to_name, device
+        gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
     )
 
-    print(f"\nFresh AdaFace center p2 thresholds (global mean={global_threshold:.4f}):")
+    print(f"\nFresh ArcFace center p2 thresholds (global mean={global_threshold:.4f}):")
     for name, t in sorted(per_individual_thresholds.items()):
         print(f"    {name}: {t:.4f}")
 
@@ -1066,15 +1072,15 @@ def run_final_test(model_name, args, seed, task_name):
         'seed': seed,
         'task': task_name,
         'criterion': criterion,
-        'loss_mode': best_loss_mode,
-        'loss_mode_filter': loss_mode_filter,
+        'alpha': best_alpha,
+        'alpha_filter': alpha_filter,
         'query_quality_threshold': query_quality_threshold,
         'best_epoch': best_epoch,
         'hygiene_score': best_config['score'],
         'learning_rate': best_lr,
         'image_size': best_size,
         'embedding_dim': best_embedding_dim,
-        'loss': 'QualityAdaFace',
+        'loss': 'WeightedArcFace',
         'arcface_margin': ARCFACE_MARGIN,
         'arcface_scale': ARCFACE_SCALE,
         'backbone': model_config['backbone_label'],
@@ -1232,7 +1238,7 @@ if __name__ == "__main__":
     os.environ["HF_DATASETS_OFFLINE"] = "1"
     os.environ["HF_HOME"] = "/data/hf_cache"
 
-    parser = argparse.ArgumentParser(description="AdaFace open-set experiments")
+    parser = argparse.ArgumentParser(description="Weighted ArcFace open-set experiments")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Common arguments for all subcommands
@@ -1282,7 +1288,7 @@ if __name__ == "__main__":
         total_configs = len(lrs) * len(seeds)
 
         print("=" * 80)
-        print(f"AdaFace LR Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print(f"Weighted ArcFace LR Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
         print(f"  {len(lrs)} LRs x {len(seeds)} seeds = {total_configs} configs")
         print("=" * 80)
 
@@ -1321,7 +1327,7 @@ if __name__ == "__main__":
         total_configs = len(dims) * len(seeds)
 
         print("=" * 80)
-        print(f"AdaFace Embedding Dim Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print(f"Weighted ArcFace Embedding Dim Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
         print(f"  {len(dims)} dims x {len(seeds)} seeds = {total_configs} configs")
         print("=" * 80)
 
@@ -1358,7 +1364,7 @@ if __name__ == "__main__":
         seed = 0  # single seed
 
         print("=" * 80)
-        print(f"Final Test Evaluation - {config['backbone_label']} AdaFace Re-ID - Job {args.idx}")
+        print(f"Final Test Evaluation - {config['backbone_label']} Weighted ArcFace Re-ID - Job {args.idx}")
         print(f"  {len(task_names)} tasks (one per SLURM node), seed={seed}")
         print(f"  Tasks: {', '.join(f'{i}={name}' for i, name in enumerate(task_names))}")
         print("=" * 80)

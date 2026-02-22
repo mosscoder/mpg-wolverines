@@ -1,12 +1,12 @@
 """
-Aggregate AdaFace hygiene sweep results.
+Aggregate Weighted ArcFace hygiene sweep results.
 
 The shared plotting module (utils.reid_plotting) expects results with a float
 'threshold' config key and hardcodes output paths to reid_openset/. This script:
-1. Loads adaface results and injects a synthetic threshold field
-   (quality_aware=1.0, quality_ignorant=0.0)
+1. Loads arcface_weighted results and injects a synthetic threshold field
+   (alpha=0 -> 0.0, alpha=1 -> 0.5, alpha=2 -> 1.0)
 2. Writes patched copies with the expected filename pattern to a temp dir
-3. Calls the individual plotting functions with adaface/ output paths
+3. Calls the individual plotting functions with arcface_weighted/ output paths
 """
 
 import os
@@ -18,34 +18,35 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-LOSS_MODE_TO_THRESHOLD = {
-    "quality_aware": 1.0,
-    "quality_ignorant": 0.0,
+ALPHA_TO_THRESHOLD = {
+    0: 0.0,
+    1: 0.5,
+    2: 1.0,
 }
 
 MODEL_NAME = "dinov3"
 
 
 def main():
-    src_dir = "adaface/dinov3/results/hygiene"
+    src_dir = "arcface_weighted/dinov3/results/hygiene"
 
-    src_files = glob.glob(os.path.join(src_dir, "mode=*_gallery=*_seed=*.json"))
+    src_files = glob.glob(os.path.join(src_dir, "alpha=*_gallery=*_seed=*.json"))
     if not src_files:
-        print(f"No adaface hygiene results found in {src_dir}")
+        print(f"No arcface_weighted hygiene results found in {src_dir}")
         sys.exit(1)
 
-    print(f"Found {len(src_files)} adaface hygiene result files")
+    print(f"Found {len(src_files)} arcface_weighted hygiene result files")
 
     # Create temp dir with patched copies
-    tmp_dir = tempfile.mkdtemp(prefix="adaface_plot_")
+    tmp_dir = tempfile.mkdtemp(prefix="arcface_weighted_plot_")
 
     try:
         for src_file in src_files:
             with open(src_file, 'r') as f:
                 data = json.load(f)
 
-            loss_mode = data['config']['loss_mode']
-            threshold = LOSS_MODE_TO_THRESHOLD[loss_mode]
+            alpha = data['config']['alpha']
+            threshold = ALPHA_TO_THRESHOLD[alpha]
             gallery_size = data['config']['gallery_size']
             seed = data['config']['seed']
 
@@ -80,8 +81,8 @@ def main():
 
         print_summary_table(results)
 
-        # Tables -> adaface/tables/dinov3/
-        tables_dir = os.path.join("adaface", "tables", MODEL_NAME)
+        # Tables -> arcface_weighted/tables/dinov3/
+        tables_dir = os.path.join("arcface_weighted", "tables", MODEL_NAME)
         os.makedirs(tables_dir, exist_ok=True)
 
         strategies = collect_strategies_data(results)
@@ -89,8 +90,8 @@ def main():
         save_thresholds_table(strategies, tables_dir)
         save_summary_table(results, tables_dir)
 
-        # Figures -> adaface/figures/dinov3/
-        figures_dir = os.path.join("adaface", "figures", MODEL_NAME)
+        # Figures -> arcface_weighted/figures/dinov3/
+        figures_dir = os.path.join("arcface_weighted", "figures", MODEL_NAME)
         os.makedirs(figures_dir, exist_ok=True)
 
         plot_recall_curves(results, os.path.join(figures_dir, "recall_curves.png"))
@@ -111,10 +112,10 @@ def main():
             }
         }
 
-        cross_figures_dir = os.path.join("adaface", "figures")
+        cross_figures_dir = os.path.join("arcface_weighted", "figures")
         os.makedirs(cross_figures_dir, exist_ok=True)
 
-        cross_tables_dir = os.path.join("adaface", "tables")
+        cross_tables_dir = os.path.join("arcface_weighted", "tables")
         os.makedirs(cross_tables_dir, exist_ok=True)
 
         print(f"\nGenerating cross-backbone figures...")

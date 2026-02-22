@@ -1,25 +1,26 @@
 #!/bin/bash
-#SBATCH --job-name=adaface_opt_emb_dim
+#SBATCH --job-name=warcface_hygiene
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-9
+#SBATCH --array=0-23
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=4:00:00
+#SBATCH --time=48:00:00
 #SBATCH --exclude=babel-l5-[16,20,24],babel-y5-16
-#SBATCH --output=/home/kdoherty/logs/wolverines/adaface/DINOv3/embedding_dim/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/adaface/DINOv3/embedding_dim/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/hygiene/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/hygiene/%A_%a.err
 
-# AdaFace Embedding Dimension Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 2 dims x 5 seeds = 10 configs, one per job
+# Open-Set DINOv3 + Weighted ArcFace + Raw Cosine Gallery Hygiene Sweep
+# 3 alphas x 6 gallery sizes x 8 seeds = 144 configs across 24 jobs (6/job)
 #
-# Dims: 256, 512
-# Fixed: Best LR from prior sweep, native image size, seeds=0,1,2,3,4, 20 epochs
-# Loss: QualityAdaFace (quality-adaptive margin)
+# Alphas: 0 (unweighted baseline), 1 (moderate), 2 (strong quality emphasis)
+# Weight formula: weight = 1 + quality * alpha
+# Gallery: always threshold=0.0 (no quality filtering), quality handled by loss weighting
+# Evaluates Balanced Accuracy = (Known Accept + Unknown Reject) / 2
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/adaface/DINOv3/embedding_dim
+mkdir -p /home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/hygiene
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -44,15 +45,11 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run the AdaFace embedding dim sweep script
-# NOTE: Update --lr and --image-size from sweep 00 results
-python -u -m utils.adaface_reid opt_embedding_dim --model dinov3 \
+# Run the Weighted ArcFace hygiene sweep script
+python -u -m utils.arcface_weighted_reid hygiene --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir adaface/dinov3/results/opt/embedding_dim \
-    --device gpu \
-    --values 256 512 \
-    --lr 0.0005 --image-size 224 \
-    --epochs 20 --seeds 0 1 2 3 4
+    --output_dir arcface_weighted/dinov3/results/hygiene \
+    --device gpu
 
 # Print completion info
 echo "========================================"

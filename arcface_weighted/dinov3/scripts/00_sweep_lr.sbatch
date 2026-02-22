@@ -1,23 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=adaface_tune_epoch
-#SBATCH --partition=general
-#SBATCH --array=0-7
+#SBATCH --job-name=warcface_opt_lr
+#SBATCH --partition=preempt
+#SBATCH --requeue
+#SBATCH --array=0-19
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=48:00:00
+#SBATCH --time=4:00:00
 #SBATCH --exclude=babel-l5-[16,20,24],babel-y5-16
-#SBATCH --output=/home/kdoherty/logs/wolverines/adaface/DINOv3/debug/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/adaface/DINOv3/debug/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/lr/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/lr/%A_%a.err
 
-# Sweep loss mode × epoch sample size (8 jobs):
-#   idx=0: quality_aware,    n=32     idx=1: quality_aware,    n=64
-#   idx=2: quality_aware,    n=128    idx=3: quality_aware,    n=256
-#   idx=4: quality_ignorant, n=32     idx=5: quality_ignorant, n=64
-#   idx=6: quality_ignorant, n=128    idx=7: quality_ignorant, n=256
+# Weighted ArcFace Learning Rate Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
+# 4 LRs x 5 seeds = 20 configs, one per job
+#
+# LRs: 0.0001, 0.0005, 0.001, 0.005
+# Fixed: 224px images, seeds=0,1,2,3,4, 20 epochs
+# Loss: Standard ArcFace (alpha=0, no quality weighting for opt sweeps)
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/adaface/DINOv3/debug
+mkdir -p /home/kdoherty/logs/wolverines/arcface_weighted/DINOv3/lr
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -42,9 +44,14 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-python -u adaface/dinov3/debug/tune_test_epoch_count.py \
+# Run the Weighted ArcFace LR sweep script
+python -u -m utils.arcface_weighted_reid opt_lr --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
-    --device gpu --epochs 200 --eval-every 5 --seed 0
+    --output_dir arcface_weighted/dinov3/results/opt/lr \
+    --device gpu \
+    --values 0.0001 0.0005 0.001 0.005 \
+    --image-size 224 \
+    --embedding-dim 256 --epochs 20 --seeds 0 1 2 3 4
 
 # Print completion info
 echo "========================================"

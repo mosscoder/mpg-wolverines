@@ -61,13 +61,16 @@ class ArcFaceLoss(nn.Module):
         self.th = math.cos(math.pi - margin)
         self.mm = math.sin(math.pi - margin) * margin
 
-    def forward(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def forward(self, embeddings: torch.Tensor, labels: torch.Tensor,
+                sample_weights: torch.Tensor = None) -> torch.Tensor:
         """
         Compute ArcFace loss.
 
         Args:
             embeddings: L2-normalized embeddings (batch_size, embedding_size)
             labels: Ground truth class labels (batch_size,)
+            sample_weights: Optional per-sample weights (batch_size,).
+                If provided, computes weighted mean of per-sample losses.
 
         Returns:
             Scalar loss value
@@ -92,6 +95,8 @@ class ArcFaceLoss(nn.Module):
         output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
         output *= self.scale
 
+        if sample_weights is not None:
+            return (F.cross_entropy(output, labels, reduction='none') * sample_weights).mean()
         return F.cross_entropy(output, labels)
 
 
