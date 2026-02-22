@@ -2,9 +2,11 @@
 Aggregate AdaFace hygiene sweep results.
 
 The shared plotting module (utils.reid_plotting) expects results with a float
-'threshold' config key. This script loads adaface results, injects a synthetic
-threshold field (quality_aware=1.0, quality_ignorant=0.0), writes them to a
-temp directory with the expected filename pattern, then invokes the plotter.
+'threshold' config key and hardcodes output paths to reid_openset/. This script:
+1. Loads adaface results and injects a synthetic threshold field
+   (quality_aware=1.0, quality_ignorant=0.0)
+2. Writes patched copies with the expected filename pattern to a temp dir
+3. Calls the individual plotting functions with adaface/ output paths
 """
 
 import os
@@ -21,10 +23,11 @@ LOSS_MODE_TO_THRESHOLD = {
     "quality_ignorant": 0.0,
 }
 
+MODEL_NAME = "dinov3"
+
 
 def main():
     src_dir = "adaface/dinov3/results/hygiene"
-    output_dir = "adaface"
 
     src_files = glob.glob(os.path.join(src_dir, "mode=*_gallery=*_seed=*.json"))
     if not src_files:
@@ -57,9 +60,42 @@ def main():
 
         print(f"Wrote {len(src_files)} patched files to {tmp_dir}")
 
-        # Invoke the shared plotter
-        from utils.reid_plotting import run_single_model
-        run_single_model("dinov3", tmp_dir, output_dir)
+        # Import plotting components individually to control output paths
+        from utils.reid_plotting import (
+            load_hygiene_results, print_summary_table,
+            collect_strategies_data, save_scores_table,
+            save_thresholds_table, save_summary_table,
+            plot_recall_curves, plot_validation_loss_curves,
+            plot_cosine_threshold,
+        )
+
+        results = load_hygiene_results(tmp_dir)
+        if len(results) == 0:
+            print("No results loaded. Exiting.")
+            return
+
+        print_summary_table(results)
+
+        # Tables -> adaface/tables/dinov3/
+        tables_dir = os.path.join("adaface", "tables", MODEL_NAME)
+        os.makedirs(tables_dir, exist_ok=True)
+
+        strategies = collect_strategies_data(results)
+        save_scores_table(strategies, tables_dir)
+        save_thresholds_table(strategies, tables_dir)
+        save_summary_table(results, tables_dir)
+
+        # Figures -> adaface/figures/dinov3/
+        figures_dir = os.path.join("adaface", "figures", MODEL_NAME)
+        os.makedirs(figures_dir, exist_ok=True)
+
+        plot_recall_curves(results, os.path.join(figures_dir, "recall_curves.png"))
+        plot_validation_loss_curves(results, os.path.join(figures_dir, "validation_loss_curves.png"))
+        plot_cosine_threshold(results, os.path.join(figures_dir, "cosine_threshold.png"))
+
+        print(f"\nDiagnostics complete for {MODEL_NAME}!")
+        print(f"  Tables:  {tables_dir}")
+        print(f"  Figures: {figures_dir}")
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
