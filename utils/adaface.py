@@ -39,14 +39,15 @@ class QualityAdaFaceLoss(nn.Module):
         nn.init.xavier_uniform_(self.weight)
 
     def forward(self, embeddings: torch.Tensor, labels: torch.Tensor,
-                quality_scores: torch.Tensor) -> torch.Tensor:
+                quality_scores: torch.Tensor = None) -> torch.Tensor:
         """
         Compute quality-adaptive AdaFace loss.
 
         Args:
             embeddings: L2-normalized embeddings (B, embedding_size)
             labels: Ground truth class labels (B,)
-            quality_scores: Pelage quality scores in [0, 1] (B,)
+            quality_scores: Pelage quality scores in [0, 1] (B,).
+                If None, defaults to all-ones (standard ArcFace margin).
 
         Returns:
             Scalar loss value
@@ -62,7 +63,7 @@ class QualityAdaFaceLoss(nn.Module):
         theta = torch.acos(cos_theta.clamp(-1.0 + 1e-7, 1.0 - 1e-7))
 
         # Per-sample adaptive margin
-        if self.use_quality_scaling:
+        if self.use_quality_scaling and quality_scores is not None:
             # g(q) maps [0, 1] -> [-1, 1]
             g_q = (2.0 * quality_scores - 1.0).detach()  # (B,)
             margin_dynamic = g_q * self.margin  # (B,)
