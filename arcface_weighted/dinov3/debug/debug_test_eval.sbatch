@@ -47,7 +47,7 @@ ALPHA=${ALPHAS[$SLURM_ARRAY_TASK_ID]}
 echo "Alpha: $ALPHA"
 
 python -u arcface_weighted/dinov3/debug/debug_test_eval.py \
-    --device gpu --epochs 20 --seed 0 --alpha $ALPHA
+    --device gpu --epochs 200 --eval-every 5 --seed 0 --alpha $ALPHA
 
 # Print completion info
 echo "========================================"

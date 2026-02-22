@@ -1,9 +1,9 @@
 """
-Debug test eval: Weighted ArcFace DINOv3, all training samples, open-set BA.
+Debug test eval: Weighted ArcFace DINOv3, all training samples, periodic eval.
 
 No quality filtering, no gallery_size cap, no event-matched subsampling.
-Trains on ALL training images for qualified individuals, then evaluates once
-on the test split (R@1, open-set BA).
+Trains on ALL training images for qualified individuals, evaluates every
+N epochs with full R@1 + open-set BA across all query quality thresholds.
 
 Two configs via --alpha:
   alpha=0  unweighted baseline (standard ArcFace)
@@ -12,7 +12,7 @@ Two configs via --alpha:
 Usage:
     cd /home/kdoherty/wolverines
     python -u arcface_weighted/dinov3/debug/debug_test_eval.py \
-        --device gpu --epochs 20 --seed 0 --alpha 0
+        --device gpu --epochs 200 --eval-every 5 --seed 0 --alpha 0
 """
 
 import os
@@ -45,14 +45,9 @@ from utils.reid_config import (
 from utils.reid_data import (
     ArcFaceDataset,
     load_feasibility_config, load_reidentification_dataset,
-    load_reidentification_test_dataset, build_metadata_cache,
-    get_rare_individual_indices,
+    build_metadata_cache,
 )
-from utils.reid_evaluation import (
-    compute_rare_embeddings, compute_cosine_similarity,
-    compute_arcface_center_thresholds,
-    compute_open_set_metrics_per_individual_threshold,
-)
+from utils.reid_evaluation import evaluate_recall_with_openset
 from utils.arcface_weighted_reid import (
     count_trainable_parameters, load_best_hyperparams,
 )
@@ -127,7 +122,8 @@ class BalancedBatchSampler(Sampler):
 def main():
     parser = argparse.ArgumentParser(description="Debug test eval: Weighted ArcFace DINOv3")
     parser.add_argument("--device", type=str, choices=["gpu", "cpu"], default="gpu")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--alpha", type=int, required=True, choices=[0, 2],
                         help="Quality weighting strength: 0=unweighted, 2=strong")
@@ -136,6 +132,7 @@ def main():
 
     seed = args.seed
     epochs = args.epochs
+    eval_every = args.eval_every
     alpha = args.alpha
     set_all_seeds(seed)
 
@@ -159,12 +156,10 @@ def main():
     # Load best hyperparams from opt sweeps
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(MODEL_NAME)
 
-    # Load datasets
-    print("\nLoading datasets...")
-    train_dataset = load_reidentification_dataset()
-    train_metadata_cache = build_metadata_cache(train_dataset)
-    test_dataset = load_reidentification_test_dataset()
-    test_metadata_cache = build_metadata_cache(test_dataset)
+    # Load dataset (single split — gallery = train, query = validation held out by feasibility config)
+    print("\nLoading dataset...")
+    dataset = load_reidentification_dataset()
+    metadata_cache = build_metadata_cache(dataset)
 
     feasibility_config = load_feasibility_config()
     if not feasibility_config:
@@ -178,40 +173,31 @@ def main():
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
 
     # Gallery: ALL training images for qualified individuals (no filtering)
-    id_to_indices = train_metadata_cache["id_to_indices"]
+    id_to_indices = metadata_cache["id_to_indices"]
+    validation_indices = feasibility_config.get("validation_indices", {})
     individual_to_class = {ind: i for i, ind in enumerate(sorted(feasible_individuals))}
-    class_to_name = {v: k for k, v in individual_to_class.items()}
 
-    all_gallery_indices = []
+    all_train_indices = []
+    all_val_indices = []
     gallery_info = {}
-    for ind_id in feasible_individuals:
-        ind_indices = list(id_to_indices.get(ind_id, []))
-        all_gallery_indices.extend(ind_indices)
-        gallery_info[ind_id] = len(ind_indices)
-        print(f"  {ind_id}: {len(ind_indices)} gallery (all, unfiltered)")
-
-    gallery_dataset = train_dataset.select(all_gallery_indices)
-
-    # Query (known): ALL test images for qualified individuals
-    test_id_to_indices = test_metadata_cache["id_to_indices"]
-    all_query_indices = []
     query_info = {}
+
     for ind_id in feasible_individuals:
-        test_indices = test_id_to_indices.get(ind_id, [])
-        all_query_indices.extend(test_indices)
-        query_info[ind_id] = len(test_indices)
+        val_idx = validation_indices.get(ind_id, {}).get("indices", [])
+        val_idx_set = set(val_idx)
+        all_val_indices.extend(val_idx)
+        query_info[ind_id] = len(val_idx)
 
-    query_dataset = test_dataset.select(all_query_indices)
-    print(f"\nTotal: {len(all_gallery_indices)} gallery, {len(all_query_indices)} query (known)")
+        all_ind_indices = list(id_to_indices.get(ind_id, []))
+        train_only = [i for i in all_ind_indices if i not in val_idx_set]
+        all_train_indices.extend(train_only)
+        gallery_info[ind_id] = len(train_only)
 
-    # Rare/Unknown from TEST split
-    rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
-        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
-        promoted_individuals=promoted_individuals,
-        excluded_individuals=excluded_individuals,
-    )
-    print(f"Unknown pool: {len(rare_indices) if rare_indices else 0} images, "
-          f"{len(set(rare_labels_str)) if rare_labels_str else 0} individuals")
+        print(f"  {ind_id}: {len(train_only)} train, {len(val_idx)} val")
+
+    train_dataset = dataset.select(all_train_indices)
+    val_dataset = dataset.select(all_val_indices)
+    print(f"\nTotal: {len(all_train_indices)} train, {len(all_val_indices)} val")
 
     # Create model
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
@@ -221,7 +207,7 @@ def main():
 
     # Transforms and training dataloader
     transform = create_transform_for_model(MODEL_NAME, size=best_size)
-    train_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
+    train_torch = ArcFaceDataset(train_dataset, transform, individual_to_class)
 
     from utils.arcface import ArcFaceLoss
 
@@ -266,11 +252,20 @@ def main():
     del _warmup_iter, _warmup_batch
     print("Dataloader ready.")
 
-    # Training loop — weighted ArcFace
-    print(f"\nTraining for {epochs} epochs (alpha={alpha})...")
+    # Training loop with periodic eval
+    print(f"\nTraining for {epochs} epochs (eval every {eval_every} epochs, alpha={alpha})...")
     use_amp = (device == "cuda") or (isinstance(device, torch.device) and device.type == "cuda")
     start_time = time.time()
     epoch_history = []
+
+    # Track best R@1 and BA per query quality level
+    q_keys = [f"q>={q}" for q in QUERY_QUALITY_THRESHOLDS]
+    best_metrics = {}
+    for q_key in q_keys:
+        best_metrics[q_key] = {
+            "best_recall": 0.0, "best_recall_epoch": 0,
+            "best_ba": 0.0, "best_ba_epoch": 0,
+        }
 
     for epoch in range(epochs):
         model.train()
@@ -301,109 +296,70 @@ def main():
             pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
         train_loss = total_loss / max(num_batches, 1)
-        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}")
-        epoch_history.append({"epoch": epoch + 1, "train_loss": train_loss})
+
+        is_eval_epoch = ((epoch + 1) % eval_every == 0) or (epoch + 1 == epochs)
+
+        if is_eval_epoch:
+            query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
+                model, train_dataset, val_dataset, individual_to_class, transform, device,
+                dataset, feasible_individuals, metadata_cache,
+                criterion=arcface_loss, embedding_dim=emb_dim,
+                promoted_individuals=promoted_individuals,
+                excluded_individuals=excluded_individuals,
+            )
+
+            cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
+            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
+                  f"cos_thresh={cos_thresh:.3f}")
+            epoch_entry = {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "query_quality_metrics": query_quality_metrics,
+                "open_set_metrics": open_set_metrics,
+            }
+
+            for q_key in q_keys:
+                r1 = query_quality_metrics.get(q_key, {}).get("recall_at_1", 0.0)
+                os_q = open_set_metrics.get("by_quality", {}).get(q_key, {})
+                ba = os_q.get("balanced_accuracy", 0.0)
+                kar = os_q.get("known_accept_rate", 0.0)
+                urr = os_q.get("unknown_reject_rate", 0.0)
+                n_k = os_q.get("n_known_individuals", 0)
+                n_u = os_q.get("n_unknown_individuals", 0)
+
+                bm = best_metrics[q_key]
+                if r1 > bm["best_recall"]:
+                    bm["best_recall"] = r1
+                    bm["best_recall_epoch"] = epoch + 1
+                if ba > bm["best_ba"]:
+                    bm["best_ba"] = ba
+                    bm["best_ba_epoch"] = epoch + 1
+
+                print(f"  {q_key}: R@1={r1:.4f}, BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
+
+            epoch_history.append(epoch_entry)
+        else:
+            print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}")
+            epoch_history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+            })
 
     training_time = time.time() - start_time
 
-    # --- Evaluate once on test split ---
-    print("\nEvaluating on test split...")
-    model.eval()
-
-    # Gallery embeddings
-    gallery_loader = DataLoader(
-        ArcFaceDataset(gallery_dataset, transform, individual_to_class),
-        batch_size=EVAL_BATCH_SIZE, shuffle=False,
-        num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp,
-    )
-    g_emb, g_lab = [], []
-    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
-        for images, labels, _ in gallery_loader:
-            images = images.to(device, non_blocking=True)
-            g_emb.append(model(images))
-            g_lab.extend(labels.tolist())
-    g_emb = torch.cat(g_emb, dim=0).float()
-    g_lab = torch.tensor(g_lab).to(device)
-
-    # Query embeddings (known)
-    query_loader = DataLoader(
-        ArcFaceDataset(query_dataset, transform, individual_to_class),
-        batch_size=EVAL_BATCH_SIZE, shuffle=False,
-        num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp,
-    )
-    q_emb, q_lab, q_qual = [], [], []
-    with torch.no_grad(), torch.amp.autocast("cuda", enabled=use_amp):
-        for images, labels, quality in query_loader:
-            images = images.to(device, non_blocking=True)
-            q_emb.append(model(images))
-            q_lab.extend(labels.tolist())
-            q_qual.extend(quality.tolist())
-    q_emb = torch.cat(q_emb, dim=0).float()
-    q_lab_t = torch.tensor(q_lab).to(device)
-    q_qual_np = np.array(q_qual)
-    q_lab_np = np.array(q_lab)
-
-    # Cosine similarity (known queries)
-    scores_known = compute_cosine_similarity(q_emb, g_emb)
-
-    # Recall@1 (closed-set, q>=0.0)
-    pred_idx = scores_known.argmax(dim=1)
-    pred_labels = g_lab[pred_idx].cpu().numpy()
-    correct = (pred_labels == q_lab_np)
-    per_ind_recall = []
-    for label in np.unique(q_lab_np):
-        m = q_lab_np == label
-        per_ind_recall.append(correct[m].mean())
-    recall_at_1 = float(np.mean(per_ind_recall))
-
-    # Unknown embeddings
-    if rare_indices:
-        rare_emb, rare_qual_vals, rare_lab_arr = compute_rare_embeddings(
-            model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
-            transform, device, embedding_dim=emb_dim,
-        )
-        rare_emb = rare_emb.to(device)
-        scores_unknown = compute_cosine_similarity(rare_emb, g_emb)
-    else:
-        rare_qual_vals = np.array([])
-        rare_lab_arr = np.array([])
-        scores_unknown = torch.empty(0, g_emb.shape[0]).to(device)
-
-    # ArcFace center thresholds (p2)
-    per_ind_thresh, global_thresh = compute_arcface_center_thresholds(
-        g_emb, g_lab, arcface_loss, class_to_name, device,
-    )
-
-    # Open-set BA
-    ba_metrics = compute_open_set_metrics_per_individual_threshold(
-        known_query_labels=q_lab_t,
-        known_query_quality=q_qual_np,
-        known_scores=scores_known,
-        unknown_query_labels=rare_lab_arr,
-        unknown_query_quality=rare_qual_vals,
-        unknown_scores=scores_unknown,
-        per_individual_thresholds=per_ind_thresh,
-        quality_thresholds=[0.0],
-        gallery_labels=g_lab,
-        class_to_name=class_to_name,
-    )
-
-    ba_q0 = ba_metrics["q>=0.0"]
-    ba = ba_q0["balanced_accuracy"]
-    kar = ba_q0["known_accept_rate"]
-    urr = ba_q0["unknown_reject_rate"]
-
-    print(f"\nResults (alpha={alpha}):")
-    print(f"  R@1={recall_at_1:.4f}, BA={ba:.4f} (K={kar:.2f}, U={urr:.2f}), thresh={global_thresh:.3f}")
-    print(f"  Per-individual thresholds:")
-    for name, t in sorted(per_ind_thresh.items()):
-        print(f"    {name}: {t:.4f}")
+    print(f"\nBest metrics by query quality:")
+    for q_key in q_keys:
+        bm = best_metrics[q_key]
+        print(f"  {q_key}: R@1={bm['best_recall']:.4f} (ep {bm['best_recall_epoch']}), "
+              f"BA={bm['best_ba']:.4f} (ep {bm['best_ba_epoch']})")
 
     result = {
         "config": {
-            "seed": seed,
             "alpha": alpha,
+            "seed": seed,
             "epochs": epochs,
+            "eval_every": eval_every,
             "learning_rate": best_lr,
             "image_size": best_size,
             "embedding_dim": best_embedding_dim,
@@ -418,20 +374,11 @@ def main():
             "individuals": feasible_individuals,
             "gallery_info": gallery_info,
             "query_info": query_info,
-            "total_gallery": len(all_gallery_indices),
-            "total_query_known": len(all_query_indices),
-            "total_query_unknown": len(rare_indices) if rare_indices else 0,
-            "n_unknown_individuals": len(set(rare_labels_str)) if rare_labels_str else 0,
-        },
-        "results": {
-            "recall_at_1": recall_at_1,
-            "balanced_accuracy": ba,
-            "known_accept_rate": kar,
-            "unknown_reject_rate": urr,
-            "global_threshold": global_thresh,
-            "per_individual_thresholds": per_ind_thresh,
+            "total_train": len(all_train_indices),
+            "total_val": len(all_val_indices),
         },
         "epoch_history": epoch_history,
+        "best_metrics": best_metrics,
         "metadata": {
             "created_at": datetime.now().isoformat(),
             "training_time_seconds": training_time,
