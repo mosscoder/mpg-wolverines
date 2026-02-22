@@ -2,8 +2,8 @@
 Quality-adaptive AdaFace loss for wolverine re-identification.
 
 Extends ArcFace by scaling the angular margin per-sample based on pelage quality
-scores. High-quality images get the full margin; low-quality images get reduced
-or negative margin, preventing the model from overfitting to noisy samples.
+scores. High-quality images get the full margin; low-quality images get zero
+margin (ignored), preventing the model from overfitting to noisy samples.
 """
 
 import math
@@ -16,9 +16,9 @@ class QualityAdaFaceLoss(nn.Module):
     """
     AdaFace loss with quality-adaptive angular margin.
 
-    For each sample, the margin is scaled by g(q) = 2*q - 1, mapping quality
-    scores in [0, 1] to [-1, 1]. High-quality samples (q~1) get full +m margin,
-    low-quality samples (q~0) get -m margin (relaxed).
+    For each sample, the margin is scaled by g(q) = q (identity), keeping quality
+    scores in [0, 1]. High-quality samples (q~1) get full +m margin,
+    low-quality samples (q~0) get zero margin (ignored).
 
     When use_quality_scaling=False, applies fixed margin +m to all samples
     (equivalent to standard ArcFace, saves compute).
@@ -64,8 +64,8 @@ class QualityAdaFaceLoss(nn.Module):
 
         # Per-sample adaptive margin
         if self.use_quality_scaling and quality_scores is not None:
-            # g(q) maps [0, 1] -> [-1, 1]
-            g_q = (2.0 * quality_scores - 1.0).detach()  # (B,)
+            # g(q) = q, keeps [0, 1] range: q=1 -> +m, q=0 -> 0
+            g_q = quality_scores.detach()  # (B,)
             margin_dynamic = g_q * self.margin  # (B,)
         else:
             # Fixed margin (standard ArcFace behavior)
