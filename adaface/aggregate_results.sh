@@ -1,5 +1,4 @@
 #!/bin/bash
+# Aggregate AdaFace hygiene sweep results using the shared plotting module.
 cd /home/kdoherty/wolverines
-python -u -m utils.reid_plotting --model dinov3 \
-    --results_dir adaface/dinov3/results/hygiene \
-    --output_dir adaface
+python -u adaface/aggregate_results.py "$@"
