@@ -67,7 +67,11 @@ def main():
             save_thresholds_table, save_summary_table,
             plot_recall_curves, plot_validation_loss_curves,
             plot_cosine_threshold,
+            create_rank1_figure, create_novelty_detection_figure,
+            create_rank1_thresholds_table, create_novelty_thresholds_table,
+            create_test_performance_table,
         )
+        from utils.reid_config import MODEL_CONFIGS
 
         results = load_hygiene_results(tmp_dir)
         if len(results) == 0:
@@ -93,9 +97,39 @@ def main():
         plot_validation_loss_curves(results, os.path.join(figures_dir, "validation_loss_curves.png"))
         plot_cosine_threshold(results, os.path.join(figures_dir, "cosine_threshold.png"))
 
-        print(f"\nDiagnostics complete for {MODEL_NAME}!")
+        print(f"\nPer-model diagnostics complete for {MODEL_NAME}!")
         print(f"  Tables:  {tables_dir}")
         print(f"  Figures: {figures_dir}")
+
+        # Cross-backbone figures (rank@1.png, novelty_detection.png)
+        # Even with a single backbone, these produce the summary figures
+        model_data = {
+            MODEL_NAME: {
+                'strategies': strategies,
+                'results': results,
+                'label': MODEL_CONFIGS[MODEL_NAME]['backbone_label'],
+            }
+        }
+
+        cross_figures_dir = os.path.join("adaface", "figures")
+        os.makedirs(cross_figures_dir, exist_ok=True)
+
+        cross_tables_dir = os.path.join("adaface", "tables")
+        os.makedirs(cross_tables_dir, exist_ok=True)
+
+        print(f"\nGenerating cross-backbone figures...")
+        create_rank1_figure(model_data, cross_figures_dir)
+        create_novelty_detection_figure(model_data, cross_figures_dir)
+        create_rank1_thresholds_table(model_data, cross_tables_dir)
+        create_novelty_thresholds_table(model_data, cross_tables_dir)
+
+        print(f"\nGenerating test performance tables...")
+        create_test_performance_table(model_data, cross_tables_dir, 'closedset')
+        create_test_performance_table(model_data, cross_tables_dir, 'openset')
+
+        print(f"\nAggregate analysis complete!")
+        print(f"  Cross-backbone figures: {cross_figures_dir}")
+        print(f"  Cross-backbone tables:  {cross_tables_dir}")
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
