@@ -178,11 +178,13 @@ def load_best_augmentation(model_name):
         return default
 
     # Group by condition label (e.g. "none", "blur", "jitter", "ir_sim")
+    # Label is parsed from filename: augmentation={label}_seed={seed}.json
     groups = {}
     for f in files:
         with open(f, 'r') as fp:
             result = json.load(fp)
-        label = result['config']['augmentation']
+        basename = os.path.basename(f)
+        label = basename.split('augmentation=')[1].split('_seed=')[0]
         groups.setdefault(label, []).append(result)
 
     def _best_mean_r1(results):
