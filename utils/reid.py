@@ -327,7 +327,8 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=50):
+                         learning_rate, image_size, embedding_dim, epochs=50,
+                         aug_flags=None):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
@@ -345,6 +346,11 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
     print(f"\n{'='*60}")
     print(f"Training: threshold={threshold}, gallery_size={gallery_size}, seed={seed}")
+    if aug_flags and any(aug_flags.values()):
+        active = [k for k, v in aug_flags.items() if v]
+        print(f"  Augmentations: {', '.join(active)}")
+    else:
+        print(f"  Augmentations: none")
     print(f"{'='*60}")
 
     # Get qualified individuals from config (preprocessing already enforces criteria)
@@ -375,8 +381,12 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     print(f"Using device: {device}")
 
     # Create transforms and dataset
-    transform = create_transform_for_model(model_name, size=image_size)
-    train_torch_dataset = ArcFaceDataset(train_dataset, transform, individual_to_class)
+    eval_transform = create_transform_for_model(model_name, size=image_size)
+    if aug_flags and any(aug_flags.values()):
+        train_transform = create_train_transform_for_model(model_name, size=image_size, **aug_flags)
+    else:
+        train_transform = eval_transform
+    train_torch_dataset = ArcFaceDataset(train_dataset, train_transform, individual_to_class)
 
     # Create balanced batch sampler
     sampler = BalancedBatchSampler(
@@ -437,7 +447,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
 
         query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
-            model, train_dataset, val_dataset, individual_to_class, transform, device,
+            model, train_dataset, val_dataset, individual_to_class, eval_transform, device,
             dataset, feasible_individuals, metadata_cache,
             criterion=criterion, embedding_dim=emb_dim,
             promoted_individuals=promoted_individuals,
@@ -506,7 +516,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'epochs': epochs,
             'batch_size': TRAIN_BATCH_SIZE,
             'backbone': model_config['backbone_label'],
-            'score_normalization': 'Raw Cosine'
+            'score_normalization': 'Raw Cosine',
+            'augmentations': aug_flags or {"blur": False, "jitter": False, "ir_sim": False}
         },
         'trainable_params': trainable_params,
         'dataset': {
@@ -557,8 +568,9 @@ def run_hygiene_sweep(model_name, args):
     print(f"Open-Set {config['backbone_label']} + ArcFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
-    # Load best hyperparameters
+    # Load best hyperparameters and augmentation settings
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+    best_aug = load_best_augmentation(model_name)
 
     # Load datasets and config
     print("\nLoading datasets...")
@@ -578,6 +590,7 @@ def run_hygiene_sweep(model_name, args):
     print(f"  Optimizer: AdamW (lr={best_lr}, default settings)")
     print(f"  Embedding: {best_embedding_dim}-d (trainable projection)")
     print(f"  Image size: {best_size}")
+    print(f"  Augmentations: {best_aug}")
     print(f"  Thresholds: {THRESHOLDS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")
@@ -605,7 +618,7 @@ def run_hygiene_sweep(model_name, args):
                 model_name, threshold, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim
+                embedding_dim=best_embedding_dim, aug_flags=best_aug
             )
             if result:
                 results_summary.append(result)
@@ -1034,8 +1047,9 @@ def run_final_test(model_name, args, seed, task_name):
         print(f"  gallery_mode=full_filtered (all images >= {quality_threshold})")
     print(f"{'='*60}")
 
-    # Load best hyperparameters
+    # Load best hyperparameters and augmentation settings
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+    best_aug = load_best_augmentation(model_name)
 
     # Load datasets
     print("\nLoading datasets...")
@@ -1124,8 +1138,12 @@ def run_final_test(model_name, args, seed, task_name):
     print(f"Using device: {device}")
 
     # Create transforms and training dataset
-    transform = create_transform_for_model(model_name, size=best_size)
-    train_torch_dataset = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
+    eval_transform = create_transform_for_model(model_name, size=best_size)
+    if any(best_aug.values()):
+        train_transform = create_train_transform_for_model(model_name, size=best_size, **best_aug)
+    else:
+        train_transform = eval_transform
+    train_torch_dataset = ArcFaceDataset(gallery_dataset, train_transform, individual_to_class)
 
     # Create balanced batch sampler
     sampler = BalancedBatchSampler(
@@ -1177,7 +1195,7 @@ def run_final_test(model_name, args, seed, task_name):
     use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
 
     # Gallery embeddings
-    gallery_torch = ArcFaceDataset(gallery_dataset, transform, individual_to_class)
+    gallery_torch = ArcFaceDataset(gallery_dataset, eval_transform, individual_to_class)
     gallery_loader = DataLoader(gallery_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
                                 num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
@@ -1202,7 +1220,7 @@ def run_final_test(model_name, args, seed, task_name):
         print(f"    {name}: {t:.4f}")
 
     # Query embeddings (known individuals from test split)
-    query_torch = ArcFaceDataset(query_dataset, transform, individual_to_class)
+    query_torch = ArcFaceDataset(query_dataset, eval_transform, individual_to_class)
     query_loader = DataLoader(query_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
                               num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
 
@@ -1312,7 +1330,7 @@ def run_final_test(model_name, args, seed, task_name):
         if rare_indices:
             rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
                 model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
-                transform, device, embedding_dim=emb_dim
+                eval_transform, device, embedding_dim=emb_dim
             )
             rare_emb = rare_emb.to(device)
         else:
@@ -1466,6 +1484,7 @@ def run_step_count_sweep(model_name, args):
     print("=" * 70)
 
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+    best_aug = load_best_augmentation(model_name)
 
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
@@ -1500,8 +1519,12 @@ def run_step_count_sweep(model_name, args):
                                            image_size=best_size, device=device)
     print(f"Using device: {device}")
 
-    transform = create_transform_for_model(model_name, size=best_size)
-    train_torch = ArcFaceDataset(train_ds, transform, individual_to_class)
+    eval_transform = create_transform_for_model(model_name, size=best_size)
+    if any(best_aug.values()):
+        train_transform = create_train_transform_for_model(model_name, size=best_size, **best_aug)
+    else:
+        train_transform = eval_transform
+    train_torch = ArcFaceDataset(train_ds, train_transform, individual_to_class)
 
     sampler = ContinuousSubsampleSampler(
         labels=train_torch.get_labels(),
@@ -1592,7 +1615,7 @@ def run_step_count_sweep(model_name, args):
             train_loss = running_loss / max(running_batches, 1)
 
             query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
-                model, train_ds, val_ds, individual_to_class, transform, device,
+                model, train_ds, val_ds, individual_to_class, eval_transform, device,
                 dataset, feasible_individuals, metadata_cache,
                 criterion=arcface_loss, embedding_dim=emb_dim,
                 promoted_individuals=promoted_individuals,
@@ -1662,6 +1685,7 @@ def run_step_count_sweep(model_name, args):
             "learning_rate": best_lr,
             "image_size": best_size,
             "embedding_dim": best_embedding_dim,
+            "augmentations": best_aug,
             "loss": "ArcFace",
             "arcface_margin": ARCFACE_MARGIN,
             "arcface_scale": ARCFACE_SCALE,
