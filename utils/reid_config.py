@@ -80,7 +80,7 @@ def create_arcface_model(model_name, embedding_dim=128, image_size=None, device=
 # ============================================================================
 
 def create_reid_transform(size, mean, std):
-    """Create backbone-specific transform pipeline."""
+    """Create backbone-specific transform pipeline (no augmentation)."""
     return T.Compose([
         T.Resize(size=(size, size), interpolation=Image.LANCZOS),
         T.ToTensor(),
@@ -88,9 +88,43 @@ def create_reid_transform(size, mean, std):
     ])
 
 
+def create_reid_train_transform(size, mean, std, blur=False, jitter=False, ir_sim=False):
+    """Create training transform with optional augmentations.
+
+    Augmentations are applied before ToTensor/Normalize, each with p=0.5:
+      - blur: Light Gaussian blur (kernel=5, sigma 0.1-2.0)
+      - jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.1)
+      - ir_sim: Grayscale conversion to simulate IR camera images
+
+    Returns the base (no-augmentation) transform if all flags are False.
+    """
+    ops = [T.Resize(size=(size, size), interpolation=Image.LANCZOS)]
+
+    if blur:
+        ops.append(T.RandomApply([T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5))
+    if jitter:
+        ops.append(T.RandomApply([T.ColorJitter(brightness=0.3, contrast=0.3,
+                                                 saturation=0.3, hue=0.1)], p=0.5))
+    if ir_sim:
+        ops.append(T.RandomGrayscale(p=0.5))
+
+    ops.extend([T.ToTensor(), T.Normalize(mean=mean, std=std)])
+    return T.Compose(ops)
+
+
 def create_transform_for_model(model_name, size=None):
-    """Create transform using MODEL_CONFIGS defaults."""
+    """Create eval transform using MODEL_CONFIGS defaults (no augmentation)."""
     config = MODEL_CONFIGS[model_name]
     if size is None:
         size = config["native_size"]
     return create_reid_transform(size, config["norm_mean"], config["norm_std"])
+
+
+def create_train_transform_for_model(model_name, size=None,
+                                      blur=False, jitter=False, ir_sim=False):
+    """Create training transform with optional augmentations."""
+    config = MODEL_CONFIGS[model_name]
+    if size is None:
+        size = config["native_size"]
+    return create_reid_train_transform(size, config["norm_mean"], config["norm_std"],
+                                        blur=blur, jitter=jitter, ir_sim=ir_sim)

@@ -27,6 +27,7 @@ from utils.reid_config import (  # noqa: F401
     TARGET_SAMPLES_PER_INDIVIDUAL, QUERY_QUALITY_THRESHOLDS,
     EVAL_BATCH_SIZE, EVAL_NUM_WORKERS,
     create_arcface_model, create_reid_transform, create_transform_for_model,
+    create_train_transform_for_model,
 )
 from utils.reid_data import (  # noqa: F401
     ArcFaceDataset, RareIndividualsDataset,
@@ -154,6 +155,132 @@ def load_best_hyperparams(model_name):
         print(f"No embedding dim sweep results found, using default: {best_embedding_dim}")
 
     return best_lr, best_size, best_embedding_dim
+
+
+def load_best_augmentation(model_name):
+    """
+    Load best augmentation settings from sweep results.
+    Falls back to no augmentation if results not found.
+
+    Each augmentation (blur, jitter, ir_sim) is independently compared against
+    the no-augmentation baseline.  An augmentation is adopted only if it
+    improves cross-seed best-epoch mean R@1 over baseline.
+
+    Returns: dict with keys blur, jitter, ir_sim (bool)
+    """
+    config = MODEL_CONFIGS[model_name]
+    experiment_dir = config["experiment_dir"]
+    default = {"blur": False, "jitter": False, "ir_sim": False}
+
+    aug_results_dir = os.path.join(experiment_dir, 'results/opt/augmentation')
+    files = glob.glob(os.path.join(aug_results_dir, 'augmentation=*_seed=*.json'))
+    if not files:
+        print(f"No augmentation sweep results found, using defaults: {default}")
+        return default
+
+    # Group by augmentation label
+    groups = {}
+    for f in files:
+        with open(f, 'r') as fp:
+            result = json.load(fp)
+        label = result['config']['augmentation']
+        groups.setdefault(label, []).append(result)
+
+    def _best_mean_r1(results):
+        histories = [r['results']['epoch_history'] for r in results]
+        n_epochs = len(histories[0])
+        best_mean = 0.0
+        for i in range(n_epochs):
+            mean_r1 = sum(h[i]['test_recall_at_1'] for h in histories) / len(histories)
+            if mean_r1 > best_mean:
+                best_mean = mean_r1
+        return best_mean
+
+    # Baseline: no-augmentation results come from the LR or embedding_dim sweep
+    # (those always train without augmentation).  If a "none" condition was included
+    # in the augmentation sweep itself, use that; otherwise fall back to 0.
+    baseline_score = 0.0
+    if "none" in groups:
+        baseline_score = _best_mean_r1(groups["none"])
+        print(f"  Baseline (none): R@1={baseline_score:.4f}")
+
+    best_aug = dict(default)
+    for aug_name, flag_key in [("blur", "blur"), ("jitter", "jitter"), ("ir_sim", "ir_sim")]:
+        if aug_name in groups:
+            score = _best_mean_r1(groups[aug_name])
+            adopted = score > baseline_score
+            best_aug[flag_key] = adopted
+            marker = "ADOPTED" if adopted else "rejected"
+            print(f"  {aug_name}: R@1={score:.4f} ({marker} vs baseline {baseline_score:.4f})")
+        else:
+            print(f"  {aug_name}: no results found, skipping")
+
+    print(f"Best augmentation config: {best_aug}")
+    return best_aug
+
+
+# Individual augmentations to sweep (each tested independently)
+AUGMENTATIONS = [
+    ("blur",   {"blur": True,  "jitter": False, "ir_sim": False}),
+    ("jitter", {"blur": False, "jitter": True,  "ir_sim": False}),
+    ("ir_sim", {"blur": False, "jitter": False, "ir_sim": True}),
+]
+
+
+def run_augmentation_sweep(model_name, args):
+    """
+    Entry point for augmentation optimization sweep.
+
+    Each job runs all 3 augmentations for a single seed.
+    idx maps directly to seed index.
+    """
+    model_config = MODEL_CONFIGS[model_name]
+
+    seeds = args.seeds
+
+    print("=" * 80)
+    print(f"Augmentation Sweep - {model_config['backbone_label']} Re-ID - Job {args.idx}")
+    print(f"  3 augmentations × {len(seeds)} seeds, 1 job per seed")
+    print(f"  Augmentations: blur, jitter, ir_sim")
+    print("=" * 80)
+
+    if args.idx >= len(seeds):
+        print(f"Job {args.idx} has no work (only {len(seeds)} seeds)")
+        return
+
+    seed = seeds[args.idx]
+
+    best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+
+    print("\nLoading datasets...")
+    dataset = load_reidentification_dataset()
+    metadata_cache = build_metadata_cache(dataset)
+    feasibility_config = load_feasibility_config()
+    if not feasibility_config:
+        return
+
+    for aug_label, aug_flags in AUGMENTATIONS:
+        print(f"\n--- Augmentation: {aug_label} (seed={seed}) ---")
+
+        train_transform = create_train_transform_for_model(
+            model_name, size=best_size, **aug_flags,
+        )
+
+        try:
+            run_opt_training(
+                model_name, "augmentation", aug_label, args, dataset,
+                feasibility_config, metadata_cache,
+                learning_rate=best_lr, image_size=best_size,
+                embedding_dim=best_embedding_dim,
+                epochs=args.epochs, seed=seed,
+                train_transform=train_transform,
+            )
+        except Exception as e:
+            print(f"Error ({aug_label}): {e}")
+            import traceback
+            traceback.print_exc()
+
+    print(f"\nJob {args.idx} (opt_augmentation) completed!")
 
 
 # ============================================================================
@@ -496,13 +623,13 @@ def run_hygiene_sweep(model_name, args):
 def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
                      dataset, config, metadata_cache,
                      learning_rate=None, image_size=None, embedding_dim=128,
-                     epochs=20, seed=0):
+                     epochs=20, seed=0, train_transform=None):
     """
-    Shared training loop for all opt sweep scripts (LR, resize, embedding_dim).
+    Shared training loop for all opt sweep scripts (LR, resize, embedding_dim, augmentation).
 
     Args:
         model_name: Key in MODEL_CONFIGS
-        sweep_param_name: Name of swept param ('lr', 'resize', 'embedding_dim')
+        sweep_param_name: Name of swept param ('lr', 'resize', 'embedding_dim', 'augmentation')
         sweep_param_value: Value of swept param
         args: Argparse namespace (needs .output_dir, .overwrite, .device, .idx)
         dataset: HuggingFace dataset
@@ -513,6 +640,8 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         embedding_dim: Embedding dimension
         epochs: Number of training epochs
         seed: Random seed
+        train_transform: Optional augmented transform for training data.
+            If None, uses the same (clean) eval transform for both.
 
     Returns:
         filename if saved, None if skipped
@@ -569,9 +698,10 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
                                            image_size=image_size, device=device)
     print(f"Using device: {device}")
 
-    # Create transforms and dataset
-    transform = create_transform_for_model(model_name, size=image_size)
-    train_torch_dataset = ArcFaceDataset(train_dataset, transform, individual_to_class)
+    # Create transforms: eval is always clean, train may have augmentations
+    eval_transform = create_transform_for_model(model_name, size=image_size)
+    t_transform = train_transform if train_transform is not None else eval_transform
+    train_torch_dataset = ArcFaceDataset(train_dataset, t_transform, individual_to_class)
 
     # Create balanced batch sampler
     sampler = BalancedBatchSampler(
@@ -619,7 +749,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
 
         recall_at_1 = evaluate_recall_simple(
-            model, train_dataset, test_dataset, individual_to_class, transform, device
+            model, train_dataset, test_dataset, individual_to_class, eval_transform, device
         )
 
         if recall_at_1 > best_recall:
@@ -1611,6 +1741,13 @@ if __name__ == "__main__":
     sub_step.add_argument("--dry-run", action="store_true",
                           help="Print config and exit without training")
 
+    # opt_augmentation subcommand
+    sub_aug = subparsers.add_parser("opt_augmentation",
+                                     help="Augmentation sweep (blur × jitter × IR sim)")
+    add_common_args(sub_aug)
+    sub_aug.add_argument("--epochs", type=int, default=20)
+    sub_aug.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
+
     args = parser.parse_args()
     model_name = args.model
     config = MODEL_CONFIGS[model_name]
@@ -1734,3 +1871,6 @@ if __name__ == "__main__":
             traceback.print_exc()
 
         print(f"\nJob {args.idx} (tune_step_count) completed!")
+
+    elif args.command == "opt_augmentation":
+        run_augmentation_sweep(model_name, args)
