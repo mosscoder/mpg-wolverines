@@ -93,7 +93,7 @@ def create_reid_train_transform(size, mean, std, blur=False, jitter=False, ir_si
 
     Augmentations are applied before ToTensor/Normalize, each with p=0.5:
       - blur: Light Gaussian blur (kernel=5, sigma 0.1-2.0)
-      - jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.1)
+      - jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.01)
       - ir_sim: Grayscale conversion to simulate IR camera images
 
     Returns the base (no-augmentation) transform if all flags are False.
@@ -104,7 +104,7 @@ def create_reid_train_transform(size, mean, std, blur=False, jitter=False, ir_si
         ops.append(T.RandomApply([T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5))
     if jitter:
         ops.append(T.RandomApply([T.ColorJitter(brightness=0.3, contrast=0.3,
-                                                 saturation=0.3, hue=0.1)], p=0.5))
+                                                 saturation=0.3, hue=0.01)], p=0.5))
     if ir_sim:
         ops.append(T.RandomGrayscale(p=0.5))
 

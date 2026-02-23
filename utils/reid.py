@@ -252,7 +252,10 @@ def run_augmentation_sweep(model_name, args):
     aug_label, aug_flags = AUG_CONDITIONS[condition_idx]
     seed = seeds[seed_idx]
 
-    best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+    config = MODEL_CONFIGS[model_name]
+    default_lr = config["default_lr"]
+    default_size = config["native_size"]
+    default_embedding_dim = 128
 
     print("\nLoading datasets...")
     dataset = load_reidentification_dataset()
@@ -262,17 +265,18 @@ def run_augmentation_sweep(model_name, args):
         return
 
     print(f"\nCondition: {aug_label}, Seed: {seed}, Epochs: {args.epochs}")
+    print(f"Using defaults: lr={default_lr}, size={default_size}, embedding_dim={default_embedding_dim}")
 
     train_transform = create_train_transform_for_model(
-        model_name, size=best_size, **aug_flags,
+        model_name, size=default_size, **aug_flags,
     )
 
     try:
         run_opt_training(
             model_name, "augmentation", aug_label, args, dataset,
             feasibility_config, metadata_cache,
-            learning_rate=best_lr, image_size=best_size,
-            embedding_dim=best_embedding_dim,
+            learning_rate=default_lr, image_size=default_size,
+            embedding_dim=default_embedding_dim,
             epochs=args.epochs, seed=seed,
             train_transform=train_transform,
         )
