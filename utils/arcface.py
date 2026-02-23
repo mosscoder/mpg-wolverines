@@ -164,6 +164,88 @@ class BalancedBatchSampler(Sampler):
         return math.ceil(self.max_class_size / self.k)
 
 
+class ContinuousSubsampleSampler(Sampler):
+    """
+    Yield balanced batches indefinitely from repeated resamples.
+
+    Each resample:
+      1. Draw N images per individual (without replacement if pool >= N,
+         with replacement otherwise)
+      2. Yield ceil(N/k) balanced batches from that draw
+      3. Redraw and repeat
+
+    The training loop pulls one batch at a time, increments a global step
+    counter, and breaks when the budget is exhausted.  No epoch concept.
+    """
+    def __init__(self, labels, batch_size=36, sample_size=64):
+        super().__init__(None)
+        self.batch_size = batch_size
+        self.sample_size = sample_size
+
+        self.label_to_all_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            self.label_to_all_indices[label].append(idx)
+
+        self.n_classes = len(self.label_to_all_indices)
+        self.k = batch_size // self.n_classes
+        if self.k == 0:
+            self.k = 1
+        self.remainder = batch_size - (self.k * self.n_classes)
+
+    @property
+    def steps_per_resample(self):
+        return math.ceil(self.sample_size / self.k)
+
+    def _resample(self):
+        """Draw a fresh subsample of N images per individual."""
+        epoch_indices = {}
+        for label, all_indices in self.label_to_all_indices.items():
+            if len(all_indices) >= self.sample_size:
+                sampled = random.sample(all_indices, self.sample_size)
+            else:
+                sampled = random.choices(all_indices, k=self.sample_size)
+            random.shuffle(sampled)
+            epoch_indices[label] = sampled
+        return epoch_indices
+
+    def _yield_batches(self, epoch_indices):
+        """Yield balanced batches from a single resample."""
+        labels = list(epoch_indices.keys())
+        n_batches = math.ceil(self.sample_size / self.k)
+        pointers = {label: 0 for label in labels}
+
+        for _ in range(n_batches):
+            batch = []
+            for label in labels:
+                for _ in range(self.k):
+                    indices = epoch_indices[label]
+                    ptr = pointers[label]
+                    if ptr >= len(indices):
+                        random.shuffle(indices)
+                        ptr = 0
+                    batch.append(indices[ptr])
+                    pointers[label] = ptr + 1
+            if self.remainder > 0:
+                extra_labels = random.sample(labels, self.remainder)
+                for label in extra_labels:
+                    indices = epoch_indices[label]
+                    ptr = pointers[label]
+                    if ptr >= len(indices):
+                        random.shuffle(indices)
+                        ptr = 0
+                    batch.append(indices[ptr])
+                    pointers[label] = ptr + 1
+            yield batch
+
+    def __iter__(self):
+        while True:
+            epoch_indices = self._resample()
+            yield from self._yield_batches(epoch_indices)
+
+    def __len__(self):
+        return self.steps_per_resample
+
+
 def create_megadescriptor_arcface_model(
     model_name: str = "hf-hub:BVRA/MegaDescriptor-L-384",
     embedding_dim: int = 128,

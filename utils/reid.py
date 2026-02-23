@@ -1250,6 +1250,308 @@ def run_final_test(model_name, args, seed, task_name):
 
 
 # ============================================================================
+# Step-count sweep: fixed step budget training
+# ============================================================================
+
+STEP_COUNT_GALLERY_THRESHOLDS = [0.0, 0.25, 0.5]
+STEP_COUNT_SAMPLE_SIZES = [64, 128]
+STEP_COUNT_BUDGET = 2200
+STEP_COUNT_EVAL_EVERY = 110
+
+
+def _build_step_count_job_configs():
+    """Build idx -> (label, gallery_threshold, sample_size) mapping."""
+    configs = {}
+    idx = 0
+    for gt in STEP_COUNT_GALLERY_THRESHOLDS:
+        for ss in STEP_COUNT_SAMPLE_SIZES:
+            configs[idx] = (f"g{gt:.2f}_n{ss}", gt, ss)
+            idx += 1
+    return configs
+
+
+def run_step_count_sweep(model_name, args):
+    """
+    Main entry point for step-budget training sweep.
+
+    Fixed gradient step budget with periodic evaluation.  The sampler
+    continuously redraws N images per individual and yields balanced batches.
+    """
+    from utils.arcface import ArcFaceLoss, ContinuousSubsampleSampler
+    from tqdm import tqdm
+
+    model_config = MODEL_CONFIGS[model_name]
+    experiment_dir = model_config["experiment_dir"]
+
+    job_configs = _build_step_count_job_configs()
+    total_configs = len(job_configs)
+
+    step_budget = args.step_budget
+    eval_every = args.eval_every
+    seed = args.seed
+
+    if args.idx not in job_configs:
+        print(f"idx={args.idx} has no work assigned ({total_configs} configs), exiting.")
+        return
+
+    mode_label, gallery_threshold, sample_size = job_configs[args.idx]
+
+    output_path = os.path.join(
+        args.output_dir,
+        f"g{gallery_threshold:.2f}_n{sample_size}_seed={seed}.json",
+    )
+
+    if args.dry_run:
+        print("=" * 70)
+        print("DRY RUN — config only, no training")
+        print("=" * 70)
+        print(f"  idx:                {args.idx}")
+        print(f"  mode:               {mode_label}")
+        print(f"  gallery_threshold:  {gallery_threshold}")
+        print(f"  sample_size:        {sample_size}")
+        print(f"  step_budget:        {step_budget}")
+        print(f"  eval_every:         {eval_every}")
+        print(f"  seed:               {seed}")
+        print(f"  output_path:        {output_path}")
+        print(f"\nAll {total_configs} configs:")
+        for i, (lbl, gt, ss) in sorted(job_configs.items()):
+            marker = " <-- this job" if i == args.idx else ""
+            print(f"  idx={i}: {lbl}{marker}")
+        return
+
+    if os.path.exists(output_path) and not args.overwrite:
+        print(f"Result exists: {output_path}. Use --overwrite to replace.")
+        return
+
+    set_all_seeds(seed)
+
+    print("=" * 70)
+    print(f"Tune Step Count [{mode_label}]: {model_config['backbone_label']}, seed={seed}, idx={args.idx}")
+    print(f"  step_budget={step_budget}, eval_every={eval_every}")
+    print("=" * 70)
+
+    best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
+
+    print("\nLoading dataset...")
+    dataset = load_reidentification_dataset()
+    metadata_cache = build_metadata_cache(dataset)
+
+    feasibility_config = load_feasibility_config()
+    if not feasibility_config:
+        print("Failed to load feasibility config")
+        return
+
+    feasible_individuals = feasibility_config.get("qualified_individuals", [])
+    promoted_individuals = feasibility_config.get("promoted_to_rare", [])
+    excluded_individuals = feasibility_config.get("excluded_entirely", [])
+
+    print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
+    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}, "
+          f"sample {sample_size}/ind/resample)")
+
+    train_ds, val_ds, individual_to_class, dataset_info = create_filtered_gallery_dataset(
+        dataset, feasible_individuals, gallery_size=None, threshold=gallery_threshold,
+        seed=seed, metadata_cache=metadata_cache, config=feasibility_config,
+    )
+    dataset_info["mode"] = mode_label
+    dataset_info["gallery_threshold"] = gallery_threshold
+
+    if train_ds is None or len(train_ds) == 0:
+        print(f"No training data for {mode_label}, skipping.")
+        return
+
+    device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
+    model, emb_dim = create_arcface_model(model_name, embedding_dim=best_embedding_dim,
+                                           image_size=best_size, device=device)
+    print(f"Using device: {device}")
+
+    transform = create_transform_for_model(model_name, size=best_size)
+    train_torch = ArcFaceDataset(train_ds, transform, individual_to_class)
+
+    sampler = ContinuousSubsampleSampler(
+        labels=train_torch.get_labels(),
+        batch_size=TRAIN_BATCH_SIZE,
+        sample_size=sample_size,
+    )
+    class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
+    n_resampled = sum(1 for v in class_sizes.values() if v < sample_size)
+    steps_per_resample = sampler.steps_per_resample
+    print(f"  Sampler: ContinuousSubsample, {steps_per_resample} steps/resample, "
+          f"sample={sample_size}/ind/resample, batch_size={TRAIN_BATCH_SIZE}, "
+          f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
+          f"pool max={max(class_sizes.values())}, "
+          f"resampled={n_resampled}/{len(class_sizes)} individuals")
+    print(f"  Step budget: {step_budget}, eval every {eval_every} steps")
+
+    def collate_fn(batch):
+        images = torch.stack([item[0] for item in batch])
+        labels = torch.tensor([item[1] for item in batch])
+        quality = torch.tensor([item[2] for item in batch])
+        return images, labels, quality
+
+    train_loader = DataLoader(train_torch, batch_sampler=sampler,
+                              num_workers=0, collate_fn=collate_fn)
+
+    arcface_loss = ArcFaceLoss(
+        num_classes=len(feasible_individuals),
+        embedding_size=emb_dim,
+        margin=ARCFACE_MARGIN,
+        scale=ARCFACE_SCALE,
+    ).to(device)
+
+    head_params = count_trainable_parameters(model.head)
+    arcface_params = count_trainable_parameters(arcface_loss)
+    print(f"Trainable: head={head_params:,}, arcface={arcface_params:,}")
+
+    optimizer = torch.optim.AdamW(
+        list(model.get_trainable_parameters()) + list(arcface_loss.parameters()),
+        lr=best_lr,
+    )
+
+    # Warm up dataloader
+    print("\nWarming up dataloader (first batch)...", flush=True)
+    train_iter = iter(train_loader)
+    _warmup_batch = next(train_iter)
+    del _warmup_batch
+    print("Dataloader ready.")
+
+    print(f"\nTraining for {step_budget} steps (eval every {eval_every} steps)...")
+    start_time = time.time()
+    step_history = []
+
+    q_keys = [f"q>={q}" for q in QUERY_QUALITY_THRESHOLDS]
+    best_metrics = {}
+    for q_key in q_keys:
+        best_metrics[q_key] = {
+            "best_recall": 0.0, "best_recall_step": 0,
+            "best_ba": 0.0, "best_ba_step": 0,
+        }
+
+    global_step = 0
+    running_loss = 0.0
+    running_batches = 0
+
+    model.train()
+    arcface_loss.train()
+
+    pbar = tqdm(total=step_budget, desc="Training", leave=True)
+    for batch in train_iter:
+        images = batch[0].to(device)
+        labels = batch[1].to(device)
+
+        embeddings = model(images)
+        optimizer.zero_grad()
+        loss = arcface_loss(embeddings, labels)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        running_batches += 1
+        global_step += 1
+        pbar.update(1)
+        pbar.set_postfix(loss=f"{running_loss / running_batches:.4f}", step=global_step)
+
+        is_eval_step = (global_step % eval_every == 0) or (global_step == step_budget)
+
+        if is_eval_step:
+            train_loss = running_loss / max(running_batches, 1)
+
+            query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
+                model, train_ds, val_ds, individual_to_class, transform, device,
+                dataset, feasible_individuals, metadata_cache,
+                criterion=arcface_loss, embedding_dim=emb_dim,
+                promoted_individuals=promoted_individuals,
+                excluded_individuals=excluded_individuals,
+            )
+
+            cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
+            print(f"\nStep {global_step:5d}/{step_budget}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
+                  f"cos_thresh={cos_thresh:.3f}")
+
+            step_entry = {
+                "step": global_step,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "query_quality_metrics": query_quality_metrics,
+                "open_set_metrics": open_set_metrics,
+            }
+
+            for q_key in q_keys:
+                r1 = query_quality_metrics.get(q_key, {}).get("recall_at_1", 0.0)
+                os_q = open_set_metrics.get("by_quality", {}).get(q_key, {})
+                ba = os_q.get("balanced_accuracy", 0.0)
+                kar = os_q.get("known_accept_rate", 0.0)
+                urr = os_q.get("unknown_reject_rate", 0.0)
+                n_k = os_q.get("n_known_individuals", 0)
+                n_u = os_q.get("n_unknown_individuals", 0)
+
+                bm = best_metrics[q_key]
+                if r1 > bm["best_recall"]:
+                    bm["best_recall"] = r1
+                    bm["best_recall_step"] = global_step
+                if ba > bm["best_ba"]:
+                    bm["best_ba"] = ba
+                    bm["best_ba_step"] = global_step
+
+                print(f"  {q_key}: R@1={r1:.4f}, BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
+
+            step_history.append(step_entry)
+
+            running_loss = 0.0
+            running_batches = 0
+
+            model.train()
+            arcface_loss.train()
+
+        if global_step >= step_budget:
+            break
+
+    pbar.close()
+    training_time = time.time() - start_time
+
+    print(f"\nBest metrics by query quality:")
+    for q_key in q_keys:
+        bm = best_metrics[q_key]
+        print(f"  {q_key}: R@1={bm['best_recall']:.4f} (step {bm['best_recall_step']}), "
+              f"BA={bm['best_ba']:.4f} (step {bm['best_ba_step']})")
+
+    result = {
+        "config": {
+            "mode": mode_label,
+            "gallery_threshold": gallery_threshold,
+            "sample_size": sample_size,
+            "step_budget": step_budget,
+            "eval_every": eval_every,
+            "steps_per_resample": steps_per_resample,
+            "seed": seed,
+            "learning_rate": best_lr,
+            "image_size": best_size,
+            "embedding_dim": best_embedding_dim,
+            "loss": "ArcFace",
+            "arcface_margin": ARCFACE_MARGIN,
+            "arcface_scale": ARCFACE_SCALE,
+            "backbone": model_config["backbone_label"],
+        },
+        "dataset": dataset_info,
+        "step_history": step_history,
+        "best_metrics": best_metrics,
+        "metadata": {
+            "created_at": datetime.now().isoformat(),
+            "training_time_seconds": training_time,
+        },
+    }
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2,
+                  default=lambda o: float(o) if isinstance(o, np.floating)
+                  else int(o) if isinstance(o, np.integer) else o)
+
+    print(f"\nSaved: {output_path}")
+    print(f"Training time: {training_time:.1f}s")
+
+
+# ============================================================================
 # CLI entry point
 # ============================================================================
 
@@ -1296,6 +1598,18 @@ if __name__ == "__main__":
     # test_eval subcommand
     sub_test = subparsers.add_parser("test_eval", help="Final test evaluation")
     add_common_args(sub_test)
+
+    # tune_step_count subcommand
+    sub_step = subparsers.add_parser("tune_step_count",
+                                      help="Step-budget training sweep (gallery threshold × sample size)")
+    add_common_args(sub_step)
+    sub_step.add_argument("--step-budget", type=int, default=STEP_COUNT_BUDGET,
+                          help=f"Total gradient steps (default: {STEP_COUNT_BUDGET})")
+    sub_step.add_argument("--eval-every", type=int, default=STEP_COUNT_EVAL_EVERY,
+                          help=f"Evaluate every N steps (default: {STEP_COUNT_EVAL_EVERY})")
+    sub_step.add_argument("--seed", type=int, default=0)
+    sub_step.add_argument("--dry-run", action="store_true",
+                          help="Print config and exit without training")
 
     args = parser.parse_args()
     model_name = args.model
@@ -1406,3 +1720,17 @@ if __name__ == "__main__":
             traceback.print_exc()
 
         print(f"\nJob {args.idx} (test_eval) completed!")
+
+    elif args.command == "tune_step_count":
+        print("=" * 80)
+        print(f"Step-Budget Training Sweep - {config['backbone_label']} Re-ID - Job {args.idx}")
+        print("=" * 80)
+
+        try:
+            run_step_count_sweep(model_name, args)
+        except Exception as e:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print(f"\nJob {args.idx} (tune_step_count) completed!")

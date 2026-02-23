@@ -241,8 +241,12 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
     """
     Create gallery/query split with filtered gallery using train-split validation.
 
-    Gallery: Training samples (excluding validation indices) filtered by pelage_score >= threshold, then sampled
+    Gallery: Training samples (excluding validation indices) filtered by pelage_score >= threshold,
+             then sampled down to gallery_size per individual (or all if gallery_size is None).
     Query: Validation indices from greedy temporal split (from train dataset)
+
+    Args:
+        gallery_size: Max images per individual for gallery, or None to use all eligible images.
 
     Returns:
         train_dataset, val_dataset, individual_to_class, dataset_info
@@ -281,8 +285,9 @@ def create_filtered_gallery_dataset(dataset, individuals, gallery_size, threshol
         if len(eligible_pool) == 0:
             print(f"  WARNING: {ind_id} has NO samples above threshold {threshold}")
             train_sampled = []
-        elif len(eligible_pool) < gallery_size:
-            print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible samples (need {gallery_size}), using all")
+        elif gallery_size is None or len(eligible_pool) <= gallery_size:
+            if gallery_size is not None and len(eligible_pool) < gallery_size:
+                print(f"  WARNING: {ind_id} has only {len(eligible_pool)} eligible samples (need {gallery_size}), using all")
             train_sampled = eligible_pool
         else:
             random.shuffle(eligible_pool)
