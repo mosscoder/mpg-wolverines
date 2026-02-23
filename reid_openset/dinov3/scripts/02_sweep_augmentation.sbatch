@@ -2,7 +2,7 @@
 #SBATCH --job-name=opt_augmentation_sweep
 #SBATCH --partition=preempt
 #SBATCH --requeue
-#SBATCH --array=0-4
+#SBATCH --array=0-19
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -12,12 +12,13 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/augmentation/%A_%a.err
 
 # Augmentation Sweep for DINOv3 Re-ID with Temporal (ymdh) Split
-# 3 augmentations per job × 5 seeds = 5 jobs (idx=seed)
+# 4 conditions × 5 seeds = 20 configs, one per job
 #
-# Each job trains 3 configs for its seed:
-#   blur:   Gaussian blur (kernel=5, sigma 0.1-2.0, p=0.5)
-#   jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.1, p=0.5)
-#   ir_sim: Grayscale conversion to simulate IR camera (p=0.5)
+# 1 shared baseline + 3 individual augmentations:
+#   idx  0-4:  none    (baseline)
+#   idx  5-9:  blur
+#   idx 10-14: jitter
+#   idx 15-19: ir_sim
 #
 # Fixed: Best LR, image size, embedding dim from prior sweeps, 20 epochs
 

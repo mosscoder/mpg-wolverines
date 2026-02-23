@@ -162,9 +162,8 @@ def load_best_augmentation(model_name):
     Load best augmentation settings from sweep results.
     Falls back to no augmentation if results not found.
 
-    Each augmentation (blur, jitter, ir_sim) is independently compared against
-    the no-augmentation baseline.  An augmentation is adopted only if it
-    improves cross-seed best-epoch mean R@1 over baseline.
+    Each augmentation's cross-seed best-epoch mean R@1 is compared against the
+    shared "none" baseline.  An augmentation is adopted when it beats baseline.
 
     Returns: dict with keys blur, jitter, ir_sim (bool)
     """
@@ -178,7 +177,7 @@ def load_best_augmentation(model_name):
         print(f"No augmentation sweep results found, using defaults: {default}")
         return default
 
-    # Group by augmentation label
+    # Group by condition label (e.g. "none", "blur", "jitter", "ir_sim")
     groups = {}
     for f in files:
         with open(f, 'r') as fp:
@@ -196,31 +195,32 @@ def load_best_augmentation(model_name):
                 best_mean = mean_r1
         return best_mean
 
-    # Baseline: no-augmentation results come from the LR or embedding_dim sweep
-    # (those always train without augmentation).  If a "none" condition was included
-    # in the augmentation sweep itself, use that; otherwise fall back to 0.
-    baseline_score = 0.0
-    if "none" in groups:
-        baseline_score = _best_mean_r1(groups["none"])
-        print(f"  Baseline (none): R@1={baseline_score:.4f}")
+    if "none" not in groups:
+        print(f"  baseline 'none' condition missing, using defaults")
+        return default
+
+    baseline_score = _best_mean_r1(groups["none"])
+    print(f"  baseline (none): {baseline_score:.4f}")
 
     best_aug = dict(default)
-    for aug_name, flag_key in [("blur", "blur"), ("jitter", "jitter"), ("ir_sim", "ir_sim")]:
+    for aug_name in ["blur", "jitter", "ir_sim"]:
         if aug_name in groups:
-            score = _best_mean_r1(groups[aug_name])
-            adopted = score > baseline_score
-            best_aug[flag_key] = adopted
+            aug_score = _best_mean_r1(groups[aug_name])
+            adopted = aug_score > baseline_score
+            best_aug[aug_name] = adopted
             marker = "ADOPTED" if adopted else "rejected"
-            print(f"  {aug_name}: R@1={score:.4f} ({marker} vs baseline {baseline_score:.4f})")
+            print(f"  {aug_name}: {aug_score:.4f} vs baseline={baseline_score:.4f} ({marker})")
         else:
-            print(f"  {aug_name}: no results found, skipping")
+            print(f"  {aug_name}: missing results, defaulting to off")
 
     print(f"Best augmentation config: {best_aug}")
     return best_aug
 
 
-# Individual augmentations to sweep (each tested independently)
-AUGMENTATIONS = [
+# Augmentation conditions: 1 baseline + 3 individual augmentations = 4 configs
+# Each condition is one array job, repeated across seeds.
+AUG_CONDITIONS = [
+    ("none",   {"blur": False, "jitter": False, "ir_sim": False}),
     ("blur",   {"blur": True,  "jitter": False, "ir_sim": False}),
     ("jitter", {"blur": False, "jitter": True,  "ir_sim": False}),
     ("ir_sim", {"blur": False, "jitter": False, "ir_sim": True}),
@@ -231,24 +231,26 @@ def run_augmentation_sweep(model_name, args):
     """
     Entry point for augmentation optimization sweep.
 
-    Each job runs all 3 augmentations for a single seed.
-    idx maps directly to seed index.
+    4 conditions × N seeds, one config per array job.
+    idx maps to (condition, seed) via divmod.
     """
     model_config = MODEL_CONFIGS[model_name]
 
     seeds = args.seeds
+    total_configs = len(AUG_CONDITIONS) * len(seeds)
 
     print("=" * 80)
     print(f"Augmentation Sweep - {model_config['backbone_label']} Re-ID - Job {args.idx}")
-    print(f"  3 augmentations × {len(seeds)} seeds, 1 job per seed")
-    print(f"  Augmentations: blur, jitter, ir_sim")
+    print(f"  {len(AUG_CONDITIONS)} conditions × {len(seeds)} seeds = {total_configs} configs")
     print("=" * 80)
 
-    if args.idx >= len(seeds):
-        print(f"Job {args.idx} has no work (only {len(seeds)} seeds)")
+    if args.idx >= total_configs:
+        print(f"Job {args.idx} has no work (only {total_configs} configs)")
         return
 
-    seed = seeds[args.idx]
+    condition_idx, seed_idx = divmod(args.idx, len(seeds))
+    aug_label, aug_flags = AUG_CONDITIONS[condition_idx]
+    seed = seeds[seed_idx]
 
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
 
@@ -259,26 +261,25 @@ def run_augmentation_sweep(model_name, args):
     if not feasibility_config:
         return
 
-    for aug_label, aug_flags in AUGMENTATIONS:
-        print(f"\n--- Augmentation: {aug_label} (seed={seed}) ---")
+    print(f"\nCondition: {aug_label}, Seed: {seed}, Epochs: {args.epochs}")
 
-        train_transform = create_train_transform_for_model(
-            model_name, size=best_size, **aug_flags,
+    train_transform = create_train_transform_for_model(
+        model_name, size=best_size, **aug_flags,
+    )
+
+    try:
+        run_opt_training(
+            model_name, "augmentation", aug_label, args, dataset,
+            feasibility_config, metadata_cache,
+            learning_rate=best_lr, image_size=best_size,
+            embedding_dim=best_embedding_dim,
+            epochs=args.epochs, seed=seed,
+            train_transform=train_transform,
         )
-
-        try:
-            run_opt_training(
-                model_name, "augmentation", aug_label, args, dataset,
-                feasibility_config, metadata_cache,
-                learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim,
-                epochs=args.epochs, seed=seed,
-                train_transform=train_transform,
-            )
-        except Exception as e:
-            print(f"Error ({aug_label}): {e}")
-            import traceback
-            traceback.print_exc()
+    except Exception as e:
+        print(f"Error ({aug_label}): {e}")
+        import traceback
+        traceback.print_exc()
 
     print(f"\nJob {args.idx} (opt_augmentation) completed!")
 
