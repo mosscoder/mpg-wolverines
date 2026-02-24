@@ -12,9 +12,10 @@
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/test_eval/%A_%a.err
 
 # Final test evaluation from step-count sweep (6 jobs):
-#   idx=0: recall, g>=0.00    idx=3: ba, g>=0.00
-#   idx=1: recall, g>=0.25    idx=4: ba, g>=0.25
-#   idx=2: recall, g>=0.50    idx=5: ba, g>=0.50
+#   idx=0: g>=0.00, n=64     idx=1: g>=0.00, n=128
+#   idx=2: g>=0.25, n=64     idx=3: g>=0.25, n=128
+#   idx=4: g>=0.50, n=64     idx=5: g>=0.50, n=128
+# Each job evaluates only the (metric, query_q) combos where it won the sweep.
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/test_eval

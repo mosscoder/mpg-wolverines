@@ -1583,118 +1583,312 @@ def run_step_count_sweep(model_name, args):
 # Test evaluation from step-count sweep
 # ============================================================================
 
-STEP_TEST_METRICS = ['recall', 'recall', 'recall', 'ba', 'ba', 'ba']
-STEP_TEST_GALLERY_Q = [0.0, 0.25, 0.5, 0.0, 0.25, 0.5]
-
-
-def load_best_step_count_config(model_name, metric, gallery_threshold):
+def load_eval_schedule(model_name, gallery_threshold, focal_sample_size):
     """
-    Read step-count sweep results and pick the best sample_size for a given
-    metric and gallery_threshold.
+    Determine which (metric, query_q, step) evals this (gallery_q, sample_size) job owns.
 
-    For metric='recall': picks the sample_size with higher best_recall at q>=0.0,
-                         returns its best_recall_step.
-    For metric='ba':     picks the sample_size with higher best_ba at q>=0.0,
-                         returns its best_ba_step.
+    For each of the 6 (metric, query_q) combos, compare focal vs alternative
+    sample_size's sweep score. Focal wins on ties.
 
-    Returns dict: {gallery_threshold, sample_size, best_step, score}
+    Returns: list of (metric, q_thresh, step, sweep_score)
     """
     config = MODEL_CONFIGS[model_name]
-    experiment_dir = config["experiment_dir"]
-    results_dir = os.path.join(experiment_dir, "results", "step_count")
+    results_dir = os.path.join(config["experiment_dir"], "results", "step_count")
 
-    best_sample_size = None
-    best_step = None
-    best_score = -1.0
+    alt_ss = 128 if focal_sample_size == 64 else 64
+    focal_path = os.path.join(results_dir, f"g{gallery_threshold:.2f}_n{focal_sample_size}_seed=0.json")
+    alt_path = os.path.join(results_dir, f"g{gallery_threshold:.2f}_n{alt_ss}_seed=0.json")
 
-    for ss in STEP_COUNT_SAMPLE_SIZES:
-        pattern = os.path.join(results_dir, f"g{gallery_threshold:.2f}_n{ss}_seed=*.json")
-        files = glob.glob(pattern)
-        if not files:
-            print(f"  No results for g{gallery_threshold:.2f}_n{ss}")
-            continue
+    with open(focal_path) as f:
+        focal = json.load(f)
+    with open(alt_path) as f:
+        alt = json.load(f)
 
-        # Average across seeds
-        scores = []
-        steps = []
-        for f in files:
-            with open(f, 'r') as fp:
-                result = json.load(fp)
-            bm = result["best_metrics"]["q>=0.0"]
+    schedule = []
+    for metric in ['recall', 'ba']:
+        for q_thresh in QUERY_QUALITY_THRESHOLDS:
+            q_key = f"q>={q_thresh}"
+            bm_focal = focal['best_metrics'][q_key]
+            bm_alt = alt['best_metrics'][q_key]
+
             if metric == 'recall':
-                scores.append(bm["best_recall"])
-                steps.append(bm["best_recall_step"])
+                focal_score, focal_step = bm_focal['best_recall'], bm_focal['best_recall_step']
+                alt_score = bm_alt['best_recall']
             else:
-                scores.append(bm["best_ba"])
-                steps.append(bm["best_ba_step"])
+                focal_score, focal_step = bm_focal['best_ba'], bm_focal['best_ba_step']
+                alt_score = bm_alt['best_ba']
 
-        avg_score = sum(scores) / len(scores)
-        # Use the step from the first seed (typically only seed=0)
-        step = steps[0]
+            if focal_score >= alt_score:
+                schedule.append((metric, q_thresh, focal_step, focal_score))
 
-        if avg_score > best_score:
-            best_score = avg_score
-            best_sample_size = ss
-            best_step = step
+    return schedule
 
-    if best_sample_size is None:
-        raise FileNotFoundError(
-            f"No step-count sweep results found for g{gallery_threshold:.2f} "
-            f"in {results_dir}"
+
+def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
+                       test_dataset, test_metadata_cache, eval_transform,
+                       individual_to_class, feasible_individuals,
+                       promoted_individuals, excluded_individuals,
+                       device, emb_dim, schedule_entries, output_dir,
+                       gallery_threshold, sample_size, step_history,
+                       training_time, best_lr, best_size, best_embedding_dim,
+                       aug_flags, model_config, seed, gallery_info, query_info,
+                       all_gallery_indices, all_query_indices, rare_indices_cache):
+    """
+    Evaluate at a scheduled step and save one JSON per (metric, query_q) combo.
+
+    schedule_entries: list of (metric, q_thresh, step, sweep_score) for this step.
+    rare_indices_cache: dict with pre-fetched rare/unknown data.
+    """
+    model.eval()
+    arcface_loss.eval()
+    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
+
+    class_to_name = {v: k for k, v in individual_to_class.items()}
+
+    # Gallery embeddings
+    gallery_torch = ArcFaceDataset(gallery_dataset, eval_transform, individual_to_class)
+    gallery_loader = DataLoader(gallery_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
+                                num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
+
+    gallery_embeddings = []
+    gallery_labels = []
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
+        for images, labels, _ in gallery_loader:
+            images = images.to(device, non_blocking=True)
+            gallery_embeddings.append(model(images))
+            gallery_labels.extend(labels.tolist())
+    gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
+    gallery_labels = torch.tensor(gallery_labels).to(device)
+
+    # Per-individual thresholds from ArcFace centers
+    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
+        gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
+    )
+
+    print(f"\n  ArcFace center thresholds (global mean={global_threshold:.4f}):")
+    for name, t in sorted(per_individual_thresholds.items()):
+        print(f"      {name}: {t:.4f}")
+
+    # Query embeddings (known individuals from test split)
+    query_torch = ArcFaceDataset(query_dataset, eval_transform, individual_to_class)
+    query_loader = DataLoader(query_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
+                              num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
+
+    query_embeddings = []
+    query_labels = []
+    query_quality = []
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
+        for images, labels, quality in query_loader:
+            images = images.to(device, non_blocking=True)
+            query_embeddings.append(model(images))
+            query_labels.extend(labels.tolist())
+            query_quality.extend(quality.tolist())
+    query_embeddings = torch.cat(query_embeddings, dim=0).float()
+    query_labels = torch.tensor(query_labels).to(device)
+    query_quality = np.array(query_quality)
+    query_labels_np = query_labels.cpu().numpy()
+
+    # Cosine similarity: query vs gallery
+    scores_known = compute_cosine_similarity(query_embeddings, gallery_embeddings)
+
+    # Rare/Unknown from TEST split (use cached indices, recompute embeddings)
+    rare_indices = rare_indices_cache['rare_indices']
+    rare_labels_str = rare_indices_cache['rare_labels_str']
+
+    # Compute rare embeddings with current model state
+    if rare_indices:
+        rare_quality_arr = rare_indices_cache['rare_quality_arr']
+        rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
+            model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
+            eval_transform, device, embedding_dim=emb_dim
+        )
+        rare_emb = rare_emb.to(device)
+    else:
+        rare_emb = torch.empty(0, emb_dim).to(device)
+        rare_quality_vals = np.array([])
+        rare_labels_arr = np.array([])
+
+    if len(rare_emb) > 0:
+        scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
+    else:
+        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
+
+    # Evaluate each (metric, q_thresh) combo at this step
+    for metric, q_thresh, step, sweep_score in schedule_entries:
+        q_key = f"q>={q_thresh}"
+
+        # ---- R@1 (closed-set, macro-averaged) ----
+        q_mask = query_quality >= q_thresh
+        mask_indices = np.where(q_mask)[0]
+        n_query = int(q_mask.sum())
+
+        if n_query > 0:
+            pred_indices = scores_known[mask_indices].argmax(dim=1)
+            pred_labels = gallery_labels[pred_indices].cpu().numpy()
+            true_labels = query_labels_np[mask_indices]
+            correct = (pred_labels == true_labels)
+
+            individual_correct = {}
+            individual_total = {}
+            for label in np.unique(true_labels):
+                label_mask = (true_labels == label)
+                individual_total[label] = int(label_mask.sum())
+                individual_correct[label] = int(correct[label_mask].sum())
+
+            per_ind_recall = [
+                individual_correct.get(label, 0) / individual_total[label]
+                for label in individual_total
+            ]
+            recall_at_1 = float(np.mean(per_ind_recall)) if per_ind_recall else 0.0
+        else:
+            recall_at_1 = 0.0
+
+        # ---- BA (open-set) ----
+        ba_metrics = compute_open_set_metrics_per_individual_threshold(
+            known_query_labels=query_labels,
+            known_query_quality=query_quality,
+            known_scores=scores_known,
+            unknown_query_labels=rare_labels_arr,
+            unknown_query_quality=rare_quality_vals,
+            unknown_scores=scores_unknown,
+            per_individual_thresholds=per_individual_thresholds,
+            quality_thresholds=[q_thresh],
+            gallery_labels=gallery_labels,
+            class_to_name=class_to_name
         )
 
-    metric_label = "R@1" if metric == "recall" else "BA"
-    print(f"  Best for {metric_label} @ g>={gallery_threshold:.2f}: "
-          f"n{best_sample_size}, step={best_step}, score={best_score:.4f}")
+        ba_data = ba_metrics.get(q_key, {})
+        ba = ba_data.get('balanced_accuracy', 0.0)
+        kar = ba_data.get('known_accept_rate', 0.0)
+        urr = ba_data.get('unknown_reject_rate', 0.0)
+        n_known = ba_data.get('n_known_individuals', 0)
+        n_unknown = ba_data.get('n_unknown_individuals', 0)
 
-    return {
-        "gallery_threshold": gallery_threshold,
-        "sample_size": best_sample_size,
-        "best_step": best_step,
-        "score": best_score,
-    }
+        print(f"    {metric} {q_key}: R@1={recall_at_1:.4f} (n={n_query}), "
+              f"BA={ba:.4f} (K={kar:.2f}[{n_known}], U={urr:.2f}[{n_unknown}])")
+
+        # ---- Save JSON ----
+        result = {
+            "config": {
+                "metric": metric,
+                "gallery_threshold": gallery_threshold,
+                "query_threshold": q_thresh,
+                "sample_size": sample_size,
+                "best_step": step,
+                "sweep_score": sweep_score,
+                "learning_rate": best_lr,
+                "image_size": best_size,
+                "embedding_dim": best_embedding_dim,
+                "backbone": model_config["backbone_label"],
+                "augmentations": aug_flags,
+                "loss": "ArcFace",
+                "arcface_margin": ARCFACE_MARGIN,
+                "arcface_scale": ARCFACE_SCALE,
+                "seed": seed,
+                "cosine_threshold": global_threshold,
+                "per_individual_thresholds": per_individual_thresholds,
+            },
+            "dataset": {
+                "individuals": feasible_individuals,
+                "gallery_info": gallery_info,
+                "query_info": query_info,
+                "total_gallery": len(all_gallery_indices),
+                "total_query_known": len(all_query_indices),
+                "total_query_unknown": len(rare_indices) if rare_indices else 0,
+                "n_unknown_individuals": len(set(rare_labels_str)) if rare_labels_str else 0,
+            },
+            "results": {
+                "recall_at_1": recall_at_1,
+                "balanced_accuracy": ba,
+                "known_accept_rate": kar,
+                "unknown_reject_rate": urr,
+                "n_query": n_query,
+                "n_known_individuals": n_known,
+                "n_unknown_individuals": n_unknown,
+            },
+            "step_history": step_history,
+            "metadata": {
+                "created_at": datetime.now().isoformat(),
+                "training_time_seconds": training_time,
+            },
+        }
+
+        output_path = os.path.join(output_dir, f"{metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
+        os.makedirs(output_dir, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(result, f, indent=2,
+                      default=lambda o: float(o) if isinstance(o, np.floating)
+                      else int(o) if isinstance(o, np.integer) else o)
+        print(f"    Saved: {output_path}")
+
+    model.train()
+    arcface_loss.train()
 
 
-def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
+def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
     """
-    Final test evaluation using step-count sweep results.
+    Final test evaluation using per-(metric, query_q) optimal checkpoints.
 
-    Trains with the best sample_size/step for the given metric and gallery_threshold,
-    then evaluates BOTH R@1 and BA at all query quality thresholds.
+    Trains up to the max scheduled step, evaluating at each scheduled step
+    for only the (metric, query_q) combos where this (gallery_q, sample_size)
+    was the sweep winner.
     """
     from utils.arcface import ArcFaceLoss, ContinuousSubsampleSampler
     from tqdm import tqdm
 
     model_config = MODEL_CONFIGS[model_name]
     experiment_dir = model_config["experiment_dir"]
+    output_dir = os.path.join(experiment_dir, "results", "test_eval")
 
     seed = args.seed
 
-    output_dir = os.path.join(experiment_dir, "results", "test_eval")
-    output_path = os.path.join(output_dir, f"{metric_name}_g{gallery_threshold:.2f}.json")
+    # Load eval schedule
+    print(f"\nLoading eval schedule for g>={gallery_threshold:.2f}, n={sample_size}:")
+    schedule = load_eval_schedule(model_name, gallery_threshold, sample_size)
 
-    if os.path.exists(output_path) and not args.overwrite:
-        print(f"Result exists: {output_path}. Use --overwrite to replace.")
+    if not schedule:
+        print(f"  No combos won for this config. Exiting gracefully.")
         return
+
+    for metric, q_thresh, step, score in schedule:
+        print(f"  {metric} q>={q_thresh}: step={step}, sweep_score={score:.4f}")
+
+    # Check for already-completed outputs and filter schedule
+    remaining = []
+    for entry in schedule:
+        metric, q_thresh, step, score = entry
+        out_path = os.path.join(output_dir, f"{metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
+        if os.path.exists(out_path) and not args.overwrite:
+            print(f"  SKIP (exists): {out_path}")
+        else:
+            remaining.append(entry)
+
+    if not remaining:
+        print("All outputs exist. Use --overwrite to replace.")
+        return
+
+    schedule = remaining
+
+    # Group schedule by step
+    step_to_evals = defaultdict(list)
+    for entry in schedule:
+        metric, q_thresh, step, score = entry
+        step_to_evals[step].append(entry)
+    eval_steps = sorted(step_to_evals.keys())
+    max_step = max(eval_steps)
 
     set_all_seeds(seed)
 
     print("=" * 70)
     print(f"Test Step Eval: {model_config['backbone_label']}, "
-          f"metric={metric_name}, gallery_q>={gallery_threshold:.2f}, seed={seed}")
+          f"g>={gallery_threshold:.2f}, n={sample_size}, seed={seed}")
+    print(f"  {len(schedule)} combos across {len(eval_steps)} eval steps, "
+          f"max_step={max_step}")
     print("=" * 70)
 
     # Load best hyperparameters
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
     aug_flags = {"blur": True, "jitter": True, "ir_sim": True, "hflip": True, "rotation": True}
-
-    # Load best step-count config for this metric/threshold
-    print(f"\nSelecting best step-count config for metric={metric_name}, "
-          f"gallery_q>={gallery_threshold:.2f}:")
-    step_config = load_best_step_count_config(model_name, metric_name, gallery_threshold)
-    sample_size = step_config["sample_size"]
-    best_step = step_config["best_step"]
-    sweep_score = step_config["score"]
 
     print(f"\nLoading datasets...")
     train_dataset = load_reidentification_dataset()
@@ -1757,6 +1951,18 @@ def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
     query_dataset = test_dataset.select(all_query_indices)
     print(f"\nTotal: {len(all_gallery_indices)} gallery, {len(all_query_indices)} query (known)")
 
+    # ---- Pre-fetch rare/unknown indices (used at every eval step) ----
+    rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
+        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals
+    )
+    rare_indices_cache = {
+        'rare_indices': rare_indices,
+        'rare_quality_arr': rare_quality_arr,
+        'rare_labels_str': rare_labels_str,
+    }
+
     # ---- Create model ----
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
     model, emb_dim = create_arcface_model(model_name, embedding_dim=best_embedding_dim,
@@ -1783,7 +1989,8 @@ def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
           f"batch_size={TRAIN_BATCH_SIZE}, "
           f"pool min={min(class_sizes.values())}, pool max={max(class_sizes.values())}, "
           f"resampled={n_resampled}/{len(class_sizes)} individuals")
-    print(f"  Training for {best_step} gradient steps")
+    print(f"  Training for up to {max_step} gradient steps "
+          f"(eval at steps: {eval_steps})")
 
     def collate_fn(batch):
         images = torch.stack([item[0] for item in batch])
@@ -1811,14 +2018,14 @@ def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
         lr=best_lr,
     )
 
-    # ---- Training loop (step-based) ----
+    # ---- Training loop (step-based, with mid-training eval) ----
     print("\nWarming up dataloader (first batch)...", flush=True)
     train_iter = iter(train_loader)
     _warmup_batch = next(train_iter)
     del _warmup_batch
     print("Dataloader ready.")
 
-    print(f"\nTraining for {best_step} steps...")
+    print(f"\nTraining for up to {max_step} steps...")
     start_time = time.time()
     step_history = []
 
@@ -1829,7 +2036,7 @@ def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
     model.train()
     arcface_loss.train()
 
-    pbar = tqdm(total=best_step, desc="Training", leave=True)
+    pbar = tqdm(total=max_step, desc="Training", leave=True)
     for batch in train_iter:
         images = batch[0].to(device)
         labels = batch[1].to(device)
@@ -1847,205 +2054,40 @@ def run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold):
         pbar.set_postfix(loss=f"{running_loss / running_batches:.4f}", step=global_step)
 
         # Log periodically
-        if global_step % 50 == 0 or global_step == best_step:
+        if global_step % 50 == 0 or global_step == max_step:
             train_loss = running_loss / max(running_batches, 1)
             step_history.append({"step": global_step, "train_loss": train_loss})
 
-        if global_step >= best_step:
+        # Evaluate at scheduled steps
+        if global_step in step_to_evals:
+            elapsed = time.time() - start_time
+            print(f"\n  Evaluating at step {global_step} "
+                  f"({len(step_to_evals[global_step])} combos, "
+                  f"{elapsed:.1f}s elapsed)...")
+            _evaluate_and_save(
+                model, arcface_loss, gallery_dataset, query_dataset,
+                test_dataset, test_metadata_cache, eval_transform,
+                individual_to_class, feasible_individuals,
+                promoted_individuals, excluded_individuals,
+                device, emb_dim, step_to_evals[global_step], output_dir,
+                gallery_threshold, sample_size, list(step_history),
+                elapsed, best_lr, best_size, best_embedding_dim,
+                aug_flags, model_config, seed, gallery_info, query_info,
+                all_gallery_indices, all_query_indices, rare_indices_cache,
+            )
+
+        if global_step >= max_step:
             break
 
     pbar.close()
     training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.1f}s")
+    print(f"\nTraining completed in {training_time:.1f}s")
 
-    # ---- Evaluation: compute BOTH R@1 and BA at all query quality thresholds ----
-    print("\nEvaluating on test split...")
-    model.eval()
-    use_amp = (device.type == 'cuda') if isinstance(device, torch.device) else (device == 'cuda')
-
-    # Gallery embeddings
-    gallery_torch = ArcFaceDataset(gallery_dataset, eval_transform, individual_to_class)
-    gallery_loader = DataLoader(gallery_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
-                                num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
-
-    gallery_embeddings = []
-    gallery_labels = []
-    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
-        for images, labels, _ in gallery_loader:
-            images = images.to(device, non_blocking=True)
-            gallery_embeddings.append(model(images))
-            gallery_labels.extend(labels.tolist())
-    gallery_embeddings = torch.cat(gallery_embeddings, dim=0).float()
-    gallery_labels = torch.tensor(gallery_labels).to(device)
-
-    # Per-individual thresholds from ArcFace centers
-    class_to_name = {v: k for k, v in individual_to_class.items()}
-    per_individual_thresholds, global_threshold = compute_arcface_center_thresholds(
-        gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
-    )
-
-    print(f"\nArcFace center thresholds (global mean={global_threshold:.4f}):")
-    for name, t in sorted(per_individual_thresholds.items()):
-        print(f"    {name}: {t:.4f}")
-
-    # Query embeddings (known individuals from test split)
-    query_torch = ArcFaceDataset(query_dataset, eval_transform, individual_to_class)
-    query_loader = DataLoader(query_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
-                              num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
-
-    query_embeddings = []
-    query_labels = []
-    query_quality = []
-    with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
-        for images, labels, quality in query_loader:
-            images = images.to(device, non_blocking=True)
-            query_embeddings.append(model(images))
-            query_labels.extend(labels.tolist())
-            query_quality.extend(quality.tolist())
-    query_embeddings = torch.cat(query_embeddings, dim=0).float()
-    query_labels = torch.tensor(query_labels).to(device)
-    query_quality = np.array(query_quality)
-    query_labels_np = query_labels.cpu().numpy()
-
-    # Cosine similarity: query vs gallery
-    scores_known = compute_cosine_similarity(query_embeddings, gallery_embeddings)
-
-    # Rare/Unknown from TEST split
-    rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
-        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
-        promoted_individuals=promoted_individuals,
-        excluded_individuals=excluded_individuals
-    )
-
-    if rare_indices:
-        rare_emb, rare_quality_vals, rare_labels_arr = compute_rare_embeddings(
-            model, test_dataset, rare_indices, rare_quality_arr, rare_labels_str,
-            eval_transform, device, embedding_dim=emb_dim
-        )
-        rare_emb = rare_emb.to(device)
-    else:
-        rare_emb = torch.empty(0, emb_dim).to(device)
-        rare_quality_vals = np.array([])
-        rare_labels_arr = np.array([])
-
-    if len(rare_emb) > 0:
-        scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
-    else:
-        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
-
-    # Compute metrics at each query quality threshold
-    by_quality = {}
-
-    for q_thresh in QUERY_QUALITY_THRESHOLDS:
-        q_key = f"q>={q_thresh}"
-
-        # ---- R@1 (closed-set, macro-averaged) ----
-        q_mask = query_quality >= q_thresh
-        mask_indices = np.where(q_mask)[0]
-        n_query = int(q_mask.sum())
-
-        if n_query > 0:
-            pred_indices = scores_known[mask_indices].argmax(dim=1)
-            pred_labels = gallery_labels[pred_indices].cpu().numpy()
-            true_labels = query_labels_np[mask_indices]
-            correct = (pred_labels == true_labels)
-
-            individual_correct = {}
-            individual_total = {}
-            for label in np.unique(true_labels):
-                label_mask = (true_labels == label)
-                individual_total[label] = int(label_mask.sum())
-                individual_correct[label] = int(correct[label_mask].sum())
-
-            per_ind_recall = [
-                individual_correct.get(label, 0) / individual_total[label]
-                for label in individual_total
-            ]
-            recall_at_1 = float(np.mean(per_ind_recall)) if per_ind_recall else 0.0
-        else:
-            recall_at_1 = 0.0
-
-        # ---- BA (open-set) ----
-        ba_metrics = compute_open_set_metrics_per_individual_threshold(
-            known_query_labels=query_labels,
-            known_query_quality=query_quality,
-            known_scores=scores_known,
-            unknown_query_labels=rare_labels_arr,
-            unknown_query_quality=rare_quality_vals,
-            unknown_scores=scores_unknown,
-            per_individual_thresholds=per_individual_thresholds,
-            quality_thresholds=[q_thresh],
-            gallery_labels=gallery_labels,
-            class_to_name=class_to_name
-        )
-
-        ba_data = ba_metrics.get(q_key, {})
-        ba = ba_data.get('balanced_accuracy', 0.0)
-        kar = ba_data.get('known_accept_rate', 0.0)
-        urr = ba_data.get('unknown_reject_rate', 0.0)
-        n_known = ba_data.get('n_known_individuals', 0)
-        n_unknown = ba_data.get('n_unknown_individuals', 0)
-
-        by_quality[q_key] = {
-            "recall_at_1": recall_at_1,
-            "n_query": n_query,
-            "balanced_accuracy": ba,
-            "known_accept_rate": kar,
-            "unknown_reject_rate": urr,
-            "n_known_individuals": n_known,
-            "n_unknown_individuals": n_unknown,
-        }
-
-        print(f"  {q_key}: R@1={recall_at_1:.4f} (n={n_query}), "
-              f"BA={ba:.4f} (K={kar:.2f}[{n_known}], U={urr:.2f}[{n_unknown}])")
-
-    # ---- Save result JSON (full details) ----
-    result = {
-        "config": {
-            "metric": metric_name,
-            "gallery_threshold": gallery_threshold,
-            "sample_size": sample_size,
-            "best_step": best_step,
-            "sweep_score": sweep_score,
-            "learning_rate": best_lr,
-            "image_size": best_size,
-            "embedding_dim": best_embedding_dim,
-            "augmentations": aug_flags,
-            "loss": "ArcFace",
-            "arcface_margin": ARCFACE_MARGIN,
-            "arcface_scale": ARCFACE_SCALE,
-            "backbone": model_config["backbone_label"],
-            "seed": seed,
-            "cosine_threshold": global_threshold,
-            "per_individual_thresholds": per_individual_thresholds,
-        },
-        "dataset": {
-            "individuals": feasible_individuals,
-            "gallery_info": gallery_info,
-            "query_info": query_info,
-            "total_gallery": len(all_gallery_indices),
-            "total_query_known": len(all_query_indices),
-            "total_query_unknown": len(rare_indices) if rare_indices else 0,
-            "n_unknown_individuals": len(set(rare_labels_str)) if rare_labels_str else 0,
-            "query_source": "hf_test_split",
-        },
-        "results": {
-            "by_quality": by_quality,
-        },
-        "step_history": step_history,
-        "metadata": {
-            "created_at": datetime.now().isoformat(),
-            "training_time_seconds": training_time,
-        },
-    }
-
-    os.makedirs(output_dir, exist_ok=True)
-    with open(output_path, 'w') as f:
-        json.dump(result, f, indent=2,
-                  default=lambda o: float(o) if isinstance(o, np.floating)
-                  else int(o) if isinstance(o, np.integer) else o)
-
-    print(f"\nSaved: {output_path}")
+    # Summary
+    print(f"\nSummary: saved {len(schedule)} JSONs to {output_dir}")
+    for metric, q_thresh, step, score in schedule:
+        print(f"  {metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json "
+              f"(step={step}, sweep={score:.4f})")
 
 
 # ============================================================================
@@ -2239,20 +2281,20 @@ if __name__ == "__main__":
         print(f"\nJob {args.idx} (tune_step_count) completed!")
 
     elif args.command == "test_step_eval":
-        if args.idx >= 6:
-            print(f"Job {args.idx} has no work (only 6 configs)")
+        job_configs = _build_step_count_job_configs()
+        if args.idx not in job_configs:
+            print(f"Job {args.idx} has no work ({len(job_configs)} configs)")
             sys.exit(0)
 
-        metric_name = STEP_TEST_METRICS[args.idx]
-        gallery_threshold = STEP_TEST_GALLERY_Q[args.idx]
+        _, gallery_threshold, sample_size = job_configs[args.idx]
 
         print("=" * 80)
         print(f"Test Step Eval - {config['backbone_label']} Re-ID - Job {args.idx}")
-        print(f"  metric={metric_name}, gallery_q>={gallery_threshold:.2f}")
+        print(f"  gallery_q>={gallery_threshold:.2f}, sample_size={sample_size}")
         print("=" * 80)
 
         try:
-            run_test_from_step_sweep(model_name, args, metric_name, gallery_threshold)
+            run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size)
         except Exception as e:
             print(f"Error: {e}")
             import traceback
