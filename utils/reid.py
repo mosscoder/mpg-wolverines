@@ -157,139 +157,6 @@ def load_best_hyperparams(model_name):
     return best_lr, best_size, best_embedding_dim
 
 
-def load_best_augmentation(model_name):
-    """
-    Load best augmentation settings from sweep results.
-    Falls back to no augmentation if results not found.
-
-    Each augmentation's cross-seed best-epoch mean R@1 is compared against the
-    shared "none" baseline.  An augmentation is adopted when it beats baseline.
-
-    Returns: dict with keys blur, jitter, ir_sim (bool)
-    """
-    config = MODEL_CONFIGS[model_name]
-    experiment_dir = config["experiment_dir"]
-    default = {"blur": False, "jitter": False, "ir_sim": False}
-
-    aug_results_dir = os.path.join(experiment_dir, 'results/opt/augmentation')
-    files = glob.glob(os.path.join(aug_results_dir, 'augmentation=*_seed=*.json'))
-    if not files:
-        print(f"No augmentation sweep results found, using defaults: {default}")
-        return default
-
-    # Group by condition label (e.g. "none", "blur", "jitter", "ir_sim")
-    # Label is parsed from filename: augmentation={label}_seed={seed}.json
-    groups = {}
-    for f in files:
-        with open(f, 'r') as fp:
-            result = json.load(fp)
-        basename = os.path.basename(f)
-        label = basename.split('augmentation=')[1].split('_seed=')[0]
-        groups.setdefault(label, []).append(result)
-
-    def _best_mean_r1(results):
-        histories = [r['results']['epoch_history'] for r in results]
-        n_epochs = len(histories[0])
-        best_mean = 0.0
-        for i in range(n_epochs):
-            mean_r1 = sum(h[i]['test_recall_at_1'] for h in histories) / len(histories)
-            if mean_r1 > best_mean:
-                best_mean = mean_r1
-        return best_mean
-
-    if "none" not in groups:
-        print(f"  baseline 'none' condition missing, using defaults")
-        return default
-
-    baseline_score = _best_mean_r1(groups["none"])
-    print(f"  baseline (none): {baseline_score:.4f}")
-
-    best_aug = dict(default)
-    for aug_name in ["blur", "jitter", "ir_sim"]:
-        if aug_name in groups:
-            aug_score = _best_mean_r1(groups[aug_name])
-            adopted = aug_score > baseline_score
-            best_aug[aug_name] = adopted
-            marker = "ADOPTED" if adopted else "rejected"
-            print(f"  {aug_name}: {aug_score:.4f} vs baseline={baseline_score:.4f} ({marker})")
-        else:
-            print(f"  {aug_name}: missing results, defaulting to off")
-
-    print(f"Best augmentation config: {best_aug}")
-    return best_aug
-
-
-# Augmentation conditions: 1 baseline + 3 individual augmentations = 4 configs
-# Each condition is one array job, repeated across seeds.
-AUG_CONDITIONS = [
-    ("none",   {"blur": False, "jitter": False, "ir_sim": False}),
-    ("blur",   {"blur": True,  "jitter": False, "ir_sim": False}),
-    ("jitter", {"blur": False, "jitter": True,  "ir_sim": False}),
-    ("ir_sim", {"blur": False, "jitter": False, "ir_sim": True}),
-]
-
-
-def run_augmentation_sweep(model_name, args):
-    """
-    Entry point for augmentation optimization sweep.
-
-    4 conditions × N seeds, one config per array job.
-    idx maps to (condition, seed) via divmod.
-    """
-    model_config = MODEL_CONFIGS[model_name]
-
-    seeds = args.seeds
-    total_configs = len(AUG_CONDITIONS) * len(seeds)
-
-    print("=" * 80)
-    print(f"Augmentation Sweep - {model_config['backbone_label']} Re-ID - Job {args.idx}")
-    print(f"  {len(AUG_CONDITIONS)} conditions × {len(seeds)} seeds = {total_configs} configs")
-    print("=" * 80)
-
-    if args.idx >= total_configs:
-        print(f"Job {args.idx} has no work (only {total_configs} configs)")
-        return
-
-    condition_idx, seed_idx = divmod(args.idx, len(seeds))
-    aug_label, aug_flags = AUG_CONDITIONS[condition_idx]
-    seed = seeds[seed_idx]
-
-    config = MODEL_CONFIGS[model_name]
-    default_lr = config["default_lr"]
-    default_size = config["native_size"]
-    default_embedding_dim = 128
-
-    print("\nLoading datasets...")
-    dataset = load_reidentification_dataset()
-    metadata_cache = build_metadata_cache(dataset)
-    feasibility_config = load_feasibility_config()
-    if not feasibility_config:
-        return
-
-    print(f"\nCondition: {aug_label}, Seed: {seed}, Epochs: {args.epochs}")
-    print(f"Using defaults: lr={default_lr}, size={default_size}, embedding_dim={default_embedding_dim}")
-
-    train_transform = create_train_transform_for_model(
-        model_name, size=default_size, **aug_flags,
-    )
-
-    try:
-        run_opt_training(
-            model_name, "augmentation", aug_label, args, dataset,
-            feasibility_config, metadata_cache,
-            learning_rate=default_lr, image_size=default_size,
-            embedding_dim=default_embedding_dim,
-            epochs=args.epochs, seed=seed,
-            train_transform=train_transform,
-        )
-    except Exception as e:
-        print(f"Error ({aug_label}): {e}")
-        import traceback
-        traceback.print_exc()
-
-    print(f"\nJob {args.idx} (opt_augmentation) completed!")
-
-
 # ============================================================================
 # Hygiene sweep: job distribution and training
 # ============================================================================
@@ -329,7 +196,7 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=50,
+                         learning_rate, image_size, embedding_dim, epochs=100,
                          aug_flags=None):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
@@ -570,9 +437,9 @@ def run_hygiene_sweep(model_name, args):
     print(f"Open-Set {config['backbone_label']} + ArcFace + Raw Cosine Gallery Hygiene Sweep - Job {args.idx}")
     print("=" * 80)
 
-    # Load best hyperparameters and augmentation settings
+    # Load best hyperparameters; augmentations are always on
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
-    best_aug = load_best_augmentation(model_name)
+    aug_flags = {"blur": True, "jitter": True, "ir_sim": True, "hflip": True, "rotation": True}
 
     # Load datasets and config
     print("\nLoading datasets...")
@@ -592,7 +459,7 @@ def run_hygiene_sweep(model_name, args):
     print(f"  Optimizer: AdamW (lr={best_lr}, default settings)")
     print(f"  Embedding: {best_embedding_dim}-d (trainable projection)")
     print(f"  Image size: {best_size}")
-    print(f"  Augmentations: {best_aug}")
+    print(f"  Augmentations: always on (hflip, rotation, blur, jitter, ir_sim)")
     print(f"  Thresholds: {THRESHOLDS}")
     print(f"  Gallery sizes: {GALLERY_SIZES}")
     print(f"  Seeds: {SEEDS}")
@@ -620,7 +487,7 @@ def run_hygiene_sweep(model_name, args):
                 model_name, threshold, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim, aug_flags=best_aug
+                embedding_dim=best_embedding_dim, aug_flags=aug_flags
             )
             if result:
                 results_summary.append(result)
@@ -1049,9 +916,9 @@ def run_final_test(model_name, args, seed, task_name):
         print(f"  gallery_mode=full_filtered (all images >= {quality_threshold})")
     print(f"{'='*60}")
 
-    # Load best hyperparameters and augmentation settings
+    # Load best hyperparameters; augmentations are always on
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
-    best_aug = load_best_augmentation(model_name)
+    best_aug = {"blur": True, "jitter": True, "ir_sim": True, "hflip": True, "rotation": True}
 
     # Load datasets
     print("\nLoading datasets...")
@@ -1410,7 +1277,7 @@ def run_final_test(model_name, args, seed, task_name):
 
 STEP_COUNT_GALLERY_THRESHOLDS = [0.0, 0.25, 0.5]
 STEP_COUNT_SAMPLE_SIZES = [64, 128]
-STEP_COUNT_BUDGET = 2200
+STEP_COUNT_BUDGET = 3300
 STEP_COUNT_EVAL_EVERY = 110
 
 
@@ -1486,7 +1353,7 @@ def run_step_count_sweep(model_name, args):
     print("=" * 70)
 
     best_lr, best_size, best_embedding_dim = load_best_hyperparams(model_name)
-    best_aug = load_best_augmentation(model_name)
+    aug_flags = {"blur": True, "jitter": True, "ir_sim": True, "hflip": True, "rotation": True}
 
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
@@ -1522,8 +1389,8 @@ def run_step_count_sweep(model_name, args):
     print(f"Using device: {device}")
 
     eval_transform = create_transform_for_model(model_name, size=best_size)
-    if any(best_aug.values()):
-        train_transform = create_train_transform_for_model(model_name, size=best_size, **best_aug)
+    if any(aug_flags.values()):
+        train_transform = create_train_transform_for_model(model_name, size=best_size, **aug_flags)
     else:
         train_transform = eval_transform
     train_torch = ArcFaceDataset(train_ds, train_transform, individual_to_class)
@@ -1687,7 +1554,7 @@ def run_step_count_sweep(model_name, args):
             "learning_rate": best_lr,
             "image_size": best_size,
             "embedding_dim": best_embedding_dim,
-            "augmentations": best_aug,
+            "augmentations": aug_flags,
             "loss": "ArcFace",
             "arcface_margin": ARCFACE_MARGIN,
             "arcface_scale": ARCFACE_SCALE,
@@ -1771,13 +1638,6 @@ if __name__ == "__main__":
     sub_step.add_argument("--seed", type=int, default=0)
     sub_step.add_argument("--dry-run", action="store_true",
                           help="Print config and exit without training")
-
-    # opt_augmentation subcommand
-    sub_aug = subparsers.add_parser("opt_augmentation",
-                                     help="Augmentation sweep (blur × jitter × IR sim)")
-    add_common_args(sub_aug)
-    sub_aug.add_argument("--epochs", type=int, default=20)
-    sub_aug.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     args = parser.parse_args()
     model_name = args.model
@@ -1903,5 +1763,3 @@ if __name__ == "__main__":
 
         print(f"\nJob {args.idx} (tune_step_count) completed!")
 
-    elif args.command == "opt_augmentation":
-        run_augmentation_sweep(model_name, args)

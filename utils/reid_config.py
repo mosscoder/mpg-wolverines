@@ -88,23 +88,30 @@ def create_reid_transform(size, mean, std):
     ])
 
 
-def create_reid_train_transform(size, mean, std, blur=False, jitter=False, ir_sim=False):
+def create_reid_train_transform(size, mean, std, blur=False, jitter=False, ir_sim=False,
+                                 hflip=False, rotation=False):
     """Create training transform with optional augmentations.
 
     Augmentations are applied before ToTensor/Normalize, each with p=0.5:
+      - hflip: Random horizontal flip
+      - rotation: Random rotation up to 15 degrees
       - blur: Light Gaussian blur (kernel=5, sigma 0.1-2.0)
-      - jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.01)
+      - jitter: Color jitter (brightness/contrast/saturation=0.3, hue=0.1)
       - ir_sim: Grayscale conversion to simulate IR camera images
 
     Returns the base (no-augmentation) transform if all flags are False.
     """
     ops = [T.Resize(size=(size, size), interpolation=Image.LANCZOS)]
 
+    if hflip:
+        ops.append(T.RandomHorizontalFlip(p=0.5))
+    if rotation:
+        ops.append(T.RandomRotation(degrees=15))
     if blur:
         ops.append(T.RandomApply([T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5))
     if jitter:
         ops.append(T.RandomApply([T.ColorJitter(brightness=0.3, contrast=0.3,
-                                                 saturation=0.3, hue=0.01)], p=0.5))
+                                                 saturation=0.3, hue=0.1)], p=0.5))
     if ir_sim:
         ops.append(T.RandomGrayscale(p=0.5))
 
@@ -121,10 +128,12 @@ def create_transform_for_model(model_name, size=None):
 
 
 def create_train_transform_for_model(model_name, size=None,
-                                      blur=False, jitter=False, ir_sim=False):
+                                      blur=False, jitter=False, ir_sim=False,
+                                      hflip=False, rotation=False):
     """Create training transform with optional augmentations."""
     config = MODEL_CONFIGS[model_name]
     if size is None:
         size = config["native_size"]
     return create_reid_train_transform(size, config["norm_mean"], config["norm_std"],
-                                        blur=blur, jitter=jitter, ir_sim=ir_sim)
+                                        blur=blur, jitter=jitter, ir_sim=ir_sim,
+                                        hflip=hflip, rotation=rotation)

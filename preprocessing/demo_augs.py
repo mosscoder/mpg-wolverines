@@ -2,11 +2,12 @@
 """
 Demo augmentation effects on random samples from the reidentification dataset.
 
-Produces a single faceted image (10 rows × 4 columns):
-  rows = sampled images, cols = baseline | blur | jitter | ir_sim
+Produces a single faceted image (10 rows x 10 columns):
+  rows = sampled images
+  cols = baseline | blur | hflip | rotation x3 | jitter x3 | ir_sim
 
-Augmentations are applied deterministically (always on) so the effect is visible,
-matching the parameters used in the training pipeline (utils/reid_config.py).
+Each jitter column is a stochastic draw from ColorJitter(b=0.3, c=0.3, s=0.3, h=0.1),
+matching the training pipeline. Blur is shown at max sigma (2.0). IR sim is binary.
 """
 
 import os
@@ -16,39 +17,52 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image, ImageFilter
-from torchvision.transforms.functional import adjust_brightness, adjust_contrast, adjust_saturation, adjust_hue, to_pil_image, to_tensor
+import torchvision.transforms as T
 from datasets import load_dataset
 
 
 # Match training pipeline parameters (utils/reid_config.py)
 RESIZE = 224
-BLUR_KERNEL = 5
-BLUR_SIGMA = 2.0  # max of (0.1, 2.0) range
-JITTER_BRIGHTNESS = 1.3
-JITTER_CONTRAST = 1.3
-JITTER_SATURATION = 1.3
-JITTER_HUE = 0.01
+BLUR_SIGMA = 2.0
+N_JITTER_SAMPLES = 3
+N_ROTATION_SAMPLES = 3
+ROTATION_DEGREES = 15
 
-AUG_LABELS = ["baseline", "blur", "jitter", "ir_sim"]
+# Stochastic jitter matching the training pipeline exactly
+JITTER_TRANSFORM = T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)
+
+ROTATION_TRANSFORM = T.RandomRotation(degrees=ROTATION_DEGREES)
+
+COL_LABELS = [
+    "baseline", "blur", "hflip",
+    "rotation", "rotation", "rotation",
+    "jitter", "jitter", "jitter",
+    "ir_sim",
+]
 
 
 def apply_baseline(img):
     return img.resize((RESIZE, RESIZE), Image.LANCZOS)
 
 
-def apply_blur(img):
+def apply_blur(img, sigma):
     img = img.resize((RESIZE, RESIZE), Image.LANCZOS)
-    return img.filter(ImageFilter.GaussianBlur(radius=BLUR_SIGMA))
+    return img.filter(ImageFilter.GaussianBlur(radius=sigma))
 
 
 def apply_jitter(img):
     img = img.resize((RESIZE, RESIZE), Image.LANCZOS)
-    t = to_tensor(img)
-    t = adjust_brightness(t, JITTER_BRIGHTNESS)
-    t = adjust_contrast(t, JITTER_CONTRAST)
-    t = adjust_saturation(t, JITTER_SATURATION)
-    t = adjust_hue(t, JITTER_HUE)
-    return to_pil_image(t.clamp(0, 1))
+    return JITTER_TRANSFORM(img)
+
+
+def apply_hflip(img):
+    img = img.resize((RESIZE, RESIZE), Image.LANCZOS)
+    return img.transpose(Image.FLIP_LEFT_RIGHT)
+
+
+def apply_rotation(img):
+    img = img.resize((RESIZE, RESIZE), Image.LANCZOS)
+    return ROTATION_TRANSFORM(img)
 
 
 def apply_ir_sim(img):
@@ -56,7 +70,17 @@ def apply_ir_sim(img):
     return img.convert("L").convert("RGB")
 
 
-AUGMENTATIONS = [apply_baseline, apply_blur, apply_jitter, apply_ir_sim]
+def build_aug_row(img):
+    """Return list of 10 augmented images for one source image."""
+    results = [apply_baseline(img)]
+    results.append(apply_blur(img, BLUR_SIGMA))
+    results.append(apply_hflip(img))
+    for _ in range(N_ROTATION_SAMPLES):
+        results.append(apply_rotation(img))
+    for _ in range(N_JITTER_SAMPLES):
+        results.append(apply_jitter(img))
+    results.append(apply_ir_sim(img))
+    return results
 
 
 def main():
@@ -73,7 +97,7 @@ def main():
 
     indices = random.sample(range(len(dataset)), args.n)
     n_rows = args.n
-    n_cols = len(AUG_LABELS)
+    n_cols = len(COL_LABELS)
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.2, n_rows * 2.2))
 
@@ -82,14 +106,15 @@ def main():
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        for col, (label, aug_fn) in enumerate(zip(AUG_LABELS, AUGMENTATIONS)):
+        aug_images = build_aug_row(img)
+        for col, aug_img in enumerate(aug_images):
             ax = axes[row, col]
-            ax.imshow(np.array(aug_fn(img)))
+            ax.imshow(np.array(aug_img))
             ax.set_xticks([])
             ax.set_yticks([])
 
             if row == 0:
-                ax.set_title(label, fontsize=11, fontweight="bold")
+                ax.set_title(COL_LABELS[col], fontsize=9, fontweight="bold")
 
     plt.tight_layout(pad=0.5)
 
