@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=tune_step_count
-#SBATCH --partition=general
+#SBATCH --partition=preempt
 #SBATCH --requeue
 #SBATCH --array=0-14
 #SBATCH --cpus-per-task=16
