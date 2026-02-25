@@ -246,6 +246,79 @@ class ContinuousSubsampleSampler(Sampler):
         return self.steps_per_resample
 
 
+class CoverageSampler(Sampler):
+    """
+    Yield balanced batches indefinitely, guaranteeing full image coverage
+    per individual before repeats.
+
+    Each individual maintains an independent shuffled queue of ALL its images.
+    When an individual's queue is exhausted, reshuffle just that individual.
+    Batches are balanced: k samples per class, remainder filled randomly.
+    Tracks coverage statistics (resets per individual).
+    """
+    def __init__(self, labels, batch_size=36):
+        super().__init__(None)
+        self.batch_size = batch_size
+
+        self.label_to_all_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            self.label_to_all_indices[label].append(idx)
+
+        self.n_classes = len(self.label_to_all_indices)
+        self.k = max(1, batch_size // self.n_classes)
+        self.remainder = batch_size - (self.k * self.n_classes)
+
+        # Per-individual shuffled queues and coverage counters
+        self._queues = {}
+        self._coverage_resets = defaultdict(int)  # count of full-coverage reshuffles
+        for label, indices in self.label_to_all_indices.items():
+            q = list(indices)
+            random.shuffle(q)
+            self._queues[label] = q
+
+    def _next_for_label(self, label):
+        """Pop next index for this individual; reshuffle if exhausted."""
+        q = self._queues[label]
+        if not q:
+            q = list(self.label_to_all_indices[label])
+            random.shuffle(q)
+            self._queues[label] = q
+            self._coverage_resets[label] += 1
+        return q.pop()
+
+    @property
+    def coverage_stats(self):
+        """Return per-label coverage reset counts and pool sizes."""
+        return {
+            label: {
+                "pool_size": len(self.label_to_all_indices[label]),
+                "resets": self._coverage_resets[label],
+                "remaining": len(self._queues[label]),
+            }
+            for label in self.label_to_all_indices
+        }
+
+    def __iter__(self):
+        labels = list(self.label_to_all_indices.keys())
+        while True:
+            batch = []
+            for label in labels:
+                for _ in range(self.k):
+                    batch.append(self._next_for_label(label))
+            if self.remainder > 0:
+                extra_labels = random.sample(labels, self.remainder)
+                for label in extra_labels:
+                    batch.append(self._next_for_label(label))
+            yield batch
+
+    def __len__(self):
+        # Approximate: one full coverage pass
+        if not self.label_to_all_indices:
+            return 0
+        max_pool = max(len(v) for v in self.label_to_all_indices.values())
+        return math.ceil(max_pool / self.k)
+
+
 def create_megadescriptor_arcface_model(
     model_name: str = "hf-hub:BVRA/MegaDescriptor-L-384",
     embedding_dim: int = 128,

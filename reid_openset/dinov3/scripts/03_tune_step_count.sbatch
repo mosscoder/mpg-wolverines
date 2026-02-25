@@ -2,7 +2,7 @@
 #SBATCH --job-name=tune_step_count
 #SBATCH --partition=general
 #SBATCH --requeue
-#SBATCH --array=0-5
+#SBATCH --array=0-14
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -11,10 +11,10 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/step_count/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/step_count/%A_%a.err
 
-# Sweep gallery threshold × sample size with fixed step budget (6 jobs):
-#   idx=0: g>=0.00, n=64     idx=1: g>=0.00, n=128
-#   idx=2: g>=0.25, n=64     idx=3: g>=0.25, n=128
-#   idx=4: g>=0.50, n=64     idx=5: g>=0.50, n=128
+# Sweep gallery threshold × seed with CoverageSampler (15 jobs = 3 gallery_q × 5 seeds):
+#   idx= 0- 4: g>=0.00, seeds 0-4
+#   idx= 5- 9: g>=0.25, seeds 0-4
+#   idx=10-14: g>=0.50, seeds 0-4
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/DINOv3/step_count
@@ -45,7 +45,7 @@ echo "========================================"
 python -u -m utils.reid tune_step_count --model dinov3 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/dinov3/results/step_count \
-    --device gpu --seed 0
+    --device gpu
 
 # Print completion info
 echo "========================================"

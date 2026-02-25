@@ -1276,18 +1276,18 @@ def run_final_test(model_name, args, seed, task_name):
 # ============================================================================
 
 STEP_COUNT_GALLERY_THRESHOLDS = [0.0, 0.25, 0.5]
-STEP_COUNT_SAMPLE_SIZES = [64, 128]
-STEP_COUNT_BUDGET = 3300
-STEP_COUNT_EVAL_EVERY = 110
+STEP_COUNT_SEEDS = [0, 1, 2, 3, 4]
+STEP_COUNT_BUDGET = 3000
+STEP_COUNT_EVAL_EVERY = 100
 
 
 def _build_step_count_job_configs():
-    """Build idx -> (label, gallery_threshold, sample_size) mapping."""
+    """Build idx -> (label, gallery_threshold, seed) mapping."""
     configs = {}
     idx = 0
     for gt in STEP_COUNT_GALLERY_THRESHOLDS:
-        for ss in STEP_COUNT_SAMPLE_SIZES:
-            configs[idx] = (f"g{gt:.2f}_n{ss}", gt, ss)
+        for seed in STEP_COUNT_SEEDS:
+            configs[idx] = (f"g{gt:.2f}_seed{seed}", gt, seed)
             idx += 1
     return configs
 
@@ -1296,10 +1296,11 @@ def run_step_count_sweep(model_name, args):
     """
     Main entry point for step-budget training sweep.
 
-    Fixed gradient step budget with periodic evaluation.  The sampler
-    continuously redraws N images per individual and yields balanced batches.
+    Fixed gradient step budget with periodic evaluation.  The CoverageSampler
+    uses ALL images per individual, shuffled, and reshuffles per-individual
+    once coverage is complete.
     """
-    from utils.arcface import ArcFaceLoss, ContinuousSubsampleSampler
+    from utils.arcface import ArcFaceLoss, CoverageSampler
     from tqdm import tqdm
 
     model_config = MODEL_CONFIGS[model_name]
@@ -1308,19 +1309,18 @@ def run_step_count_sweep(model_name, args):
     job_configs = _build_step_count_job_configs()
     total_configs = len(job_configs)
 
-    step_budget = args.step_budget
-    eval_every = args.eval_every
-    seed = args.seed
+    step_budget = STEP_COUNT_BUDGET
+    eval_every = STEP_COUNT_EVAL_EVERY
 
     if args.idx not in job_configs:
         print(f"idx={args.idx} has no work assigned ({total_configs} configs), exiting.")
         return
 
-    mode_label, gallery_threshold, sample_size = job_configs[args.idx]
+    mode_label, gallery_threshold, seed = job_configs[args.idx]
 
     output_path = os.path.join(
         args.output_dir,
-        f"g{gallery_threshold:.2f}_n{sample_size}_seed={seed}.json",
+        f"g{gallery_threshold:.2f}_seed={seed}.json",
     )
 
     if args.dry_run:
@@ -1330,13 +1330,12 @@ def run_step_count_sweep(model_name, args):
         print(f"  idx:                {args.idx}")
         print(f"  mode:               {mode_label}")
         print(f"  gallery_threshold:  {gallery_threshold}")
-        print(f"  sample_size:        {sample_size}")
         print(f"  step_budget:        {step_budget}")
         print(f"  eval_every:         {eval_every}")
         print(f"  seed:               {seed}")
         print(f"  output_path:        {output_path}")
         print(f"\nAll {total_configs} configs:")
-        for i, (lbl, gt, ss) in sorted(job_configs.items()):
+        for i, (lbl, gt, s) in sorted(job_configs.items()):
             marker = " <-- this job" if i == args.idx else ""
             print(f"  idx={i}: {lbl}{marker}")
         return
@@ -1369,8 +1368,7 @@ def run_step_count_sweep(model_name, args):
     excluded_individuals = feasibility_config.get("excluded_entirely", [])
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
-    print(f"\nMode: {mode_label} (threshold>={gallery_threshold}, "
-          f"sample {sample_size}/ind/resample)")
+    print(f"\nMode: {mode_label} (threshold>={gallery_threshold})")
 
     train_ds, val_ds, individual_to_class, dataset_info = create_filtered_gallery_dataset(
         dataset, feasible_individuals, gallery_size=None, threshold=gallery_threshold,
@@ -1395,19 +1393,14 @@ def run_step_count_sweep(model_name, args):
         train_transform = eval_transform
     train_torch = ArcFaceDataset(train_ds, train_transform, individual_to_class)
 
-    sampler = ContinuousSubsampleSampler(
+    sampler = CoverageSampler(
         labels=train_torch.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
-        sample_size=sample_size,
     )
     class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
-    n_resampled = sum(1 for v in class_sizes.values() if v < sample_size)
-    steps_per_resample = sampler.steps_per_resample
-    print(f"  Sampler: ContinuousSubsample, {steps_per_resample} steps/resample, "
-          f"sample={sample_size}/ind/resample, batch_size={TRAIN_BATCH_SIZE}, "
+    print(f"  Sampler: CoverageSampler, batch_size={TRAIN_BATCH_SIZE}, "
           f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
-          f"pool max={max(class_sizes.values())}, "
-          f"resampled={n_resampled}/{len(class_sizes)} individuals")
+          f"pool max={max(class_sizes.values())}")
     print(f"  Step budget: {step_budget}, eval every {eval_every} steps")
 
     def collate_fn(batch):
@@ -1492,8 +1485,13 @@ def run_step_count_sweep(model_name, args):
             )
 
             cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
+
+            # Coverage stats summary
+            cstats = sampler.coverage_stats
+            min_resets = min(v["resets"] for v in cstats.values())
+            max_resets = max(v["resets"] for v in cstats.values())
             print(f"\nStep {global_step:5d}/{step_budget}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
-                  f"cos_thresh={cos_thresh:.3f}")
+                  f"cos_thresh={cos_thresh:.3f}, coverage_resets=[{min_resets},{max_resets}]")
 
             step_entry = {
                 "step": global_step,
@@ -1542,14 +1540,19 @@ def run_step_count_sweep(model_name, args):
         print(f"  {q_key}: R@1={bm['best_recall']:.4f} (step {bm['best_recall_step']}), "
               f"BA={bm['best_ba']:.4f} (step {bm['best_ba_step']})")
 
+    # Final coverage summary
+    final_coverage = sampler.coverage_stats
+    coverage_summary = {
+        label: {"pool_size": v["pool_size"], "resets": v["resets"]}
+        for label, v in final_coverage.items()
+    }
+
     result = {
         "config": {
             "mode": mode_label,
             "gallery_threshold": gallery_threshold,
-            "sample_size": sample_size,
             "step_budget": step_budget,
             "eval_every": eval_every,
-            "steps_per_resample": steps_per_resample,
             "seed": seed,
             "learning_rate": best_lr,
             "image_size": best_size,
@@ -1559,6 +1562,8 @@ def run_step_count_sweep(model_name, args):
             "arcface_margin": ARCFACE_MARGIN,
             "arcface_scale": ARCFACE_SCALE,
             "backbone": model_config["backbone_label"],
+            "sampler": "CoverageSampler",
+            "coverage_summary": coverage_summary,
         },
         "dataset": dataset_info,
         "step_history": step_history,
@@ -1583,43 +1588,50 @@ def run_step_count_sweep(model_name, args):
 # Test evaluation from step-count sweep
 # ============================================================================
 
-def load_eval_schedule(model_name, gallery_threshold, focal_sample_size):
+def load_eval_schedule(model_name, gallery_threshold):
     """
-    Determine which (metric, query_q, step) evals this (gallery_q, sample_size) job owns.
+    For each (metric, query_q), find the best step by max-mean-score
+    across 5 seeds from the step-count sweep.
 
-    For each of the 6 (metric, query_q) combos, compare focal vs alternative
-    sample_size's sweep score. Focal wins on ties.
-
-    Returns: list of (metric, q_thresh, step, sweep_score)
+    Returns: list of (metric, q_thresh, best_step, mean_score)
     """
     config = MODEL_CONFIGS[model_name]
     results_dir = os.path.join(config["experiment_dir"], "results", "step_count")
 
-    alt_ss = 128 if focal_sample_size == 64 else 64
-    focal_path = os.path.join(results_dir, f"g{gallery_threshold:.2f}_n{focal_sample_size}_seed=0.json")
-    alt_path = os.path.join(results_dir, f"g{gallery_threshold:.2f}_n{alt_ss}_seed=0.json")
-
-    with open(focal_path) as f:
-        focal = json.load(f)
-    with open(alt_path) as f:
-        alt = json.load(f)
+    # Load all seed results for this gallery_threshold
+    seed_results = []
+    for seed in STEP_COUNT_SEEDS:
+        path = os.path.join(results_dir, f"g{gallery_threshold:.2f}_seed={seed}.json")
+        with open(path) as f:
+            seed_results.append(json.load(f))
 
     schedule = []
     for metric in ['recall', 'ba']:
         for q_thresh in QUERY_QUALITY_THRESHOLDS:
             q_key = f"q>={q_thresh}"
-            bm_focal = focal['best_metrics'][q_key]
-            bm_alt = alt['best_metrics'][q_key]
 
-            if metric == 'recall':
-                focal_score, focal_step = bm_focal['best_recall'], bm_focal['best_recall_step']
-                alt_score = bm_alt['best_recall']
-            else:
-                focal_score, focal_step = bm_focal['best_ba'], bm_focal['best_ba_step']
-                alt_score = bm_alt['best_ba']
+            # Build step -> [score_seed0, score_seed1, ...] mapping
+            step_scores = defaultdict(list)
+            for sr in seed_results:
+                for entry in sr['step_history']:
+                    step = entry['step']
+                    if metric == 'recall':
+                        score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
+                    else:
+                        score = entry['open_set_metrics'].get('by_quality', {}).get(q_key, {}).get('balanced_accuracy', 0.0)
+                    step_scores[step].append(score)
 
-            if focal_score >= alt_score:
-                schedule.append((metric, q_thresh, focal_step, focal_score))
+            # Pick step with highest mean across seeds
+            best_step = None
+            best_mean = -1.0
+            for step, scores in step_scores.items():
+                mean_score = sum(scores) / len(scores)
+                if mean_score > best_mean:
+                    best_mean = mean_score
+                    best_step = step
+
+            if best_step is not None:
+                schedule.append((metric, q_thresh, best_step, best_mean))
 
     return schedule
 
@@ -1629,7 +1641,7 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
                        individual_to_class, feasible_individuals,
                        promoted_individuals, excluded_individuals,
                        device, emb_dim, schedule_entries, output_dir,
-                       gallery_threshold, sample_size, step_history,
+                       gallery_threshold, step_history,
                        training_time, best_lr, best_size, best_embedding_dim,
                        aug_flags, model_config, seed, gallery_info, query_info,
                        all_gallery_indices, all_query_indices, rare_indices_cache):
@@ -1773,7 +1785,6 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
                 "metric": metric,
                 "gallery_threshold": gallery_threshold,
                 "query_threshold": q_thresh,
-                "sample_size": sample_size,
                 "best_step": step,
                 "sweep_score": sweep_score,
                 "learning_rate": best_lr,
@@ -1825,15 +1836,15 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
     arcface_loss.train()
 
 
-def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
+def run_test_from_step_sweep(model_name, args, gallery_threshold):
     """
     Final test evaluation using per-(metric, query_q) optimal checkpoints.
 
     Trains up to the max scheduled step, evaluating at each scheduled step
-    for only the (metric, query_q) combos where this (gallery_q, sample_size)
-    was the sweep winner.
+    for the (metric, query_q) combos assigned to this gallery_threshold.
+    Best steps are selected by max-mean-score across 5 seeds.
     """
-    from utils.arcface import ArcFaceLoss, ContinuousSubsampleSampler
+    from utils.arcface import ArcFaceLoss, CoverageSampler
     from tqdm import tqdm
 
     model_config = MODEL_CONFIGS[model_name]
@@ -1843,8 +1854,8 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
     seed = args.seed
 
     # Load eval schedule
-    print(f"\nLoading eval schedule for g>={gallery_threshold:.2f}, n={sample_size}:")
-    schedule = load_eval_schedule(model_name, gallery_threshold, sample_size)
+    print(f"\nLoading eval schedule for g>={gallery_threshold:.2f}:")
+    schedule = load_eval_schedule(model_name, gallery_threshold)
 
     if not schedule:
         print(f"  No combos won for this config. Exiting gracefully.")
@@ -1881,7 +1892,7 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
 
     print("=" * 70)
     print(f"Test Step Eval: {model_config['backbone_label']}, "
-          f"g>={gallery_threshold:.2f}, n={sample_size}, seed={seed}")
+          f"g>={gallery_threshold:.2f}, seed={seed}")
     print(f"  {len(schedule)} combos across {len(eval_steps)} eval steps, "
           f"max_step={max_step}")
     print("=" * 70)
@@ -1977,18 +1988,15 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
         train_transform = eval_transform
     train_torch = ArcFaceDataset(gallery_dataset, train_transform, individual_to_class)
 
-    # ---- ContinuousSubsampleSampler ----
-    sampler = ContinuousSubsampleSampler(
+    # ---- CoverageSampler ----
+    sampler = CoverageSampler(
         labels=train_torch.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
-        sample_size=sample_size,
     )
     class_sizes = {l: len(v) for l, v in sampler.label_to_all_indices.items()}
-    n_resampled = sum(1 for v in class_sizes.values() if v < sample_size)
-    print(f"  Sampler: ContinuousSubsample, sample={sample_size}/ind/resample, "
-          f"batch_size={TRAIN_BATCH_SIZE}, "
-          f"pool min={min(class_sizes.values())}, pool max={max(class_sizes.values())}, "
-          f"resampled={n_resampled}/{len(class_sizes)} individuals")
+    print(f"  Sampler: CoverageSampler, batch_size={TRAIN_BATCH_SIZE}, "
+          f"k={sampler.k}/class, pool min={min(class_sizes.values())}, "
+          f"pool max={max(class_sizes.values())}")
     print(f"  Training for up to {max_step} gradient steps "
           f"(eval at steps: {eval_steps})")
 
@@ -2070,7 +2078,7 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size):
                 individual_to_class, feasible_individuals,
                 promoted_individuals, excluded_individuals,
                 device, emb_dim, step_to_evals[global_step], output_dir,
-                gallery_threshold, sample_size, list(step_history),
+                gallery_threshold, list(step_history),
                 elapsed, best_lr, best_size, best_embedding_dim,
                 aug_flags, model_config, seed, gallery_info, query_info,
                 all_gallery_indices, all_query_indices, rare_indices_cache,
@@ -2140,13 +2148,8 @@ if __name__ == "__main__":
 
     # tune_step_count subcommand
     sub_step = subparsers.add_parser("tune_step_count",
-                                      help="Step-budget training sweep (gallery threshold × sample size)")
+                                      help="Step-budget training sweep (gallery threshold × seed)")
     add_common_args(sub_step)
-    sub_step.add_argument("--step-budget", type=int, default=STEP_COUNT_BUDGET,
-                          help=f"Total gradient steps (default: {STEP_COUNT_BUDGET})")
-    sub_step.add_argument("--eval-every", type=int, default=STEP_COUNT_EVAL_EVERY,
-                          help=f"Evaluate every N steps (default: {STEP_COUNT_EVAL_EVERY})")
-    sub_step.add_argument("--seed", type=int, default=0)
     sub_step.add_argument("--dry-run", action="store_true",
                           help="Print config and exit without training")
 
@@ -2281,20 +2284,19 @@ if __name__ == "__main__":
         print(f"\nJob {args.idx} (tune_step_count) completed!")
 
     elif args.command == "test_step_eval":
-        job_configs = _build_step_count_job_configs()
-        if args.idx not in job_configs:
-            print(f"Job {args.idx} has no work ({len(job_configs)} configs)")
+        if args.idx >= len(STEP_COUNT_GALLERY_THRESHOLDS):
+            print(f"Job {args.idx} has no work ({len(STEP_COUNT_GALLERY_THRESHOLDS)} gallery thresholds)")
             sys.exit(0)
 
-        _, gallery_threshold, sample_size = job_configs[args.idx]
+        gallery_threshold = STEP_COUNT_GALLERY_THRESHOLDS[args.idx]
 
         print("=" * 80)
         print(f"Test Step Eval - {config['backbone_label']} Re-ID - Job {args.idx}")
-        print(f"  gallery_q>={gallery_threshold:.2f}, sample_size={sample_size}")
+        print(f"  gallery_q>={gallery_threshold:.2f}")
         print("=" * 80)
 
         try:
-            run_test_from_step_sweep(model_name, args, gallery_threshold, sample_size)
+            run_test_from_step_sweep(model_name, args, gallery_threshold)
         except Exception as e:
             print(f"Error: {e}")
             import traceback
