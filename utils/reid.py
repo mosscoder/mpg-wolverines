@@ -61,10 +61,10 @@ def count_trainable_parameters(model):
 # ============================================================================
 
 def _select_best_param(results_dir, glob_pattern, param_key):
-    """Select best param value using cross-seed best-epoch mean R@1.
+    """Select best param value using cross-seed best-step mean R@1.
 
     Groups results by param value, for each group averages test_recall_at_1
-    across seeds at each epoch, picks the epoch with highest mean, and
+    across seeds at each step, picks the step with highest mean, and
     returns the param value with the best cross-seed score.
     """
     files = glob.glob(os.path.join(results_dir, glob_pattern))
@@ -82,10 +82,10 @@ def _select_best_param(results_dir, glob_pattern, param_key):
     best_value = None
     best_score = 0.0
     for value, results in groups.items():
-        histories = [r['results']['epoch_history'] for r in results]
-        n_epochs = len(histories[0])
+        histories = [r['results']['step_history'] for r in results]
+        n_steps = len(histories[0])
         best_mean = 0.0
-        for i in range(n_epochs):
+        for i in range(n_steps):
             mean_r1 = sum(h[i]['test_recall_at_1'] for h in histories) / len(histories)
             if mean_r1 > best_mean:
                 best_mean = mean_r1
