@@ -246,7 +246,7 @@ def compute_open_set_metrics_per_individual_threshold(
 
 
 def compute_arcface_center_thresholds(gallery_embeddings, gallery_labels, criterion,
-                                      class_to_name, device, percentile=2):
+                                      class_to_name, device, percentile=10):
     """
     Compute per-individual acceptance thresholds from ArcFace centers.
 
@@ -440,7 +440,7 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
 
     open_set_metrics = {
         'threshold_calibration': {
-            'method': 'arcface_center_p2',
+            'method': 'arcface_center_p10',
             'global_threshold': global_threshold,
             'per_individual': per_individual_thresholds,
         },
