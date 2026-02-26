@@ -197,7 +197,8 @@ def get_job_combinations(job_idx, max_jobs=24):
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
                          learning_rate, image_size, embedding_dim, epochs=100,
-                         aug_flags=None):
+                         aug_flags=None,
+                         test_dataset=None, test_metadata_cache=None):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
@@ -302,6 +303,20 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         lr=learning_rate
     )
 
+    # Build test query dataset (known individuals only) if test data provided
+    test_query_dataset = None
+    test_query_info = {}
+    if test_dataset is not None and test_metadata_cache is not None:
+        test_id_to_indices = test_metadata_cache['id_to_indices']
+        all_test_query_indices = []
+        for ind_id in feasible_individuals:
+            t_indices = test_id_to_indices.get(ind_id, [])
+            all_test_query_indices.extend(t_indices)
+            test_query_info[ind_id] = len(t_indices)
+        if all_test_query_indices:
+            test_query_dataset = test_dataset.select(all_test_query_indices)
+            print(f"  Test query: {len(all_test_query_indices)} images for {len(feasible_individuals)} individuals")
+
     # Training loop
     start_time = time.time()
     epoch_history = []
@@ -322,6 +337,18 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             promoted_individuals=promoted_individuals,
             excluded_individuals=excluded_individuals
         )
+
+        # Test-set evaluation (if available)
+        test_query_quality_metrics = None
+        test_open_set_metrics = None
+        if test_query_dataset is not None:
+            test_query_quality_metrics, test_open_set_metrics, _ = evaluate_recall_with_openset(
+                model, train_dataset, test_query_dataset, individual_to_class, eval_transform, device,
+                test_dataset, feasible_individuals, test_metadata_cache,
+                criterion=criterion, embedding_dim=emb_dim,
+                promoted_individuals=promoted_individuals,
+                excluded_individuals=excluded_individuals
+            )
 
         recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
 
@@ -359,14 +386,26 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             n_u_ind = ba_data.get('n_unknown_individuals', 0)
             print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k_ind}], U={urr:.2f}[{n_u_ind}])")
 
-        epoch_history.append({
+        if test_query_quality_metrics is not None:
+            test_by_q = test_open_set_metrics.get('by_quality', {})
+            for q_thresh in QUERY_QUALITY_THRESHOLDS:
+                q_key = f"q>={q_thresh}"
+                t_r1 = test_query_quality_metrics[q_key]['recall_at_1']
+                t_ba = test_by_q.get(q_key, {}).get('balanced_accuracy', 0.0)
+                print(f"  TEST {q_key}: R@1={t_r1:.4f}, BA={t_ba:.4f}")
+
+        entry = {
             'epoch': epoch + 1,
             'train_loss': train_loss,
             'val_loss': val_loss,
             'learning_rate': learning_rate,
             'query_quality_metrics': query_quality_metrics,
             'open_set': open_set_metrics
-        })
+        }
+        if test_query_quality_metrics is not None:
+            entry['test_query_quality_metrics'] = test_query_quality_metrics
+            entry['test_open_set'] = test_open_set_metrics
+        epoch_history.append(entry)
 
     training_time = time.time() - start_time
 
@@ -412,6 +451,21 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         }
     }
 
+    if test_query_dataset is not None:
+        result['dataset']['test_query_samples_per_individual'] = test_query_info
+        result['dataset']['total_test_query_size'] = len(test_query_dataset)
+        result['test_at_best_epochs'] = {}
+        for label, epoch_num in [('best_recall', best_recall_epoch),
+                                  ('best_ba', best_ba_epoch),
+                                  ('best_hm', best_hm_epoch)]:
+            if epoch_num > 0:
+                hist_entry = epoch_history[epoch_num - 1]
+                result['test_at_best_epochs'][label] = {
+                    'epoch': epoch_num,
+                    'test_query_quality_metrics': hist_entry.get('test_query_quality_metrics'),
+                    'test_open_set': hist_entry.get('test_open_set'),
+                }
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         json.dump(result, f, indent=2)
@@ -445,6 +499,8 @@ def run_hygiene_sweep(model_name, args):
     print("\nLoading datasets...")
     dataset = load_reidentification_dataset()
     metadata_cache = build_metadata_cache(dataset)
+    test_dataset_full = load_reidentification_test_dataset()
+    test_metadata_cache = build_metadata_cache(test_dataset_full)
     feasibility_config = load_feasibility_config()
 
     if not feasibility_config:
@@ -487,7 +543,9 @@ def run_hygiene_sweep(model_name, args):
                 model_name, threshold, gallery_size, seed, args,
                 dataset, feasibility_config, metadata_cache,
                 learning_rate=best_lr, image_size=best_size,
-                embedding_dim=best_embedding_dim, aug_flags=aug_flags
+                embedding_dim=best_embedding_dim, aug_flags=aug_flags,
+                test_dataset=test_dataset_full,
+                test_metadata_cache=test_metadata_cache,
             )
             if result:
                 results_summary.append(result)
