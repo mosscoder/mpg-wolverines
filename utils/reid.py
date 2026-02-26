@@ -198,7 +198,9 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
                          learning_rate, image_size, embedding_dim, epochs=100,
                          aug_flags=None,
-                         test_dataset=None, test_metadata_cache=None):
+                         test_dataset=None, test_metadata_cache=None,
+                         combined_rare_dataset=None, combined_rare_metadata=None,
+                         rare_excluded=None):
     """Train one hygiene sweep configuration and return results."""
     from utils.arcface import ArcFaceLoss, BalancedBatchSampler
     from utils.training import check_result_exists
@@ -317,37 +319,38 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             test_query_dataset = test_dataset.select(all_test_query_indices)
             print(f"  Test query: {len(all_test_query_indices)} images for {len(feasible_individuals)} individuals")
 
+    # Determine rare source for test-set BA evaluation
+    test_rare_dataset = combined_rare_dataset if combined_rare_dataset is not None else test_dataset
+    test_rare_metadata = combined_rare_metadata if combined_rare_metadata is not None else test_metadata_cache
+    test_rare_excluded = rare_excluded if rare_excluded is not None else excluded_individuals
+
     # Training loop
     start_time = time.time()
     epoch_history = []
     best_recall = 0.0
     best_recall_epoch = 0
-    best_balanced_accuracy = 0.0
-    best_ba_epoch = 0
-    best_harmonic_mean = 0.0
-    best_hm_epoch = 0
 
     for epoch in range(epochs):
         train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
 
-        query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
+        # Val: R@1 only (no open-set BA)
+        query_quality_metrics, _, val_loss = evaluate_recall_with_openset(
             model, train_dataset, val_dataset, individual_to_class, eval_transform, device,
             dataset, feasible_individuals, metadata_cache,
             criterion=criterion, embedding_dim=emb_dim,
-            promoted_individuals=promoted_individuals,
-            excluded_individuals=excluded_individuals
+            skip_open_set=True
         )
 
-        # Test-set evaluation (if available)
+        # Test-set evaluation with combined rare pool for BA
         test_query_quality_metrics = None
         test_open_set_metrics = None
         if test_query_dataset is not None:
             test_query_quality_metrics, test_open_set_metrics, _ = evaluate_recall_with_openset(
                 model, train_dataset, test_query_dataset, individual_to_class, eval_transform, device,
-                test_dataset, feasible_individuals, test_metadata_cache,
+                test_rare_dataset, feasible_individuals, test_rare_metadata,
                 criterion=criterion, embedding_dim=emb_dim,
                 promoted_individuals=promoted_individuals,
-                excluded_individuals=excluded_individuals
+                excluded_individuals=test_rare_excluded
             )
 
         recall_1 = query_quality_metrics["q>=0.0"]["recall_at_1"]
@@ -356,35 +359,13 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             best_recall = recall_1
             best_recall_epoch = epoch + 1
 
-        by_quality = open_set_metrics.get('by_quality', {})
-        ba_q0 = by_quality.get('q>=0.0', {}).get('balanced_accuracy', 0.0)
-        if ba_q0 > best_balanced_accuracy:
-            best_balanced_accuracy = ba_q0
-            best_ba_epoch = epoch + 1
-
-        if (recall_1 + ba_q0) > 0:
-            hm = 2 * recall_1 * ba_q0 / (recall_1 + ba_q0)
-        else:
-            hm = 0.0
-        if hm > best_harmonic_mean:
-            best_harmonic_mean = hm
-            best_hm_epoch = epoch + 1
-
-        thresh_mean = by_quality.get('q>=0.0', {}).get('cosine_threshold', 0.0)
-
-        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, thresh={thresh_mean:.3f}")
+        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}")
 
         for q_thresh in QUERY_QUALITY_THRESHOLDS:
             q_key = f"q>={q_thresh}"
             r1 = query_quality_metrics[q_key]['recall_at_1']
             count = query_quality_metrics[q_key]['count']
-            ba_data = by_quality.get(q_key, {})
-            ba = ba_data.get('balanced_accuracy', 0.0)
-            kar = ba_data.get('known_accept_rate', 0.0)
-            urr = ba_data.get('unknown_reject_rate', 0.0)
-            n_k_ind = ba_data.get('n_known_individuals', 0)
-            n_u_ind = ba_data.get('n_unknown_individuals', 0)
-            print(f"  {q_key}: R@1={r1:.4f} (n={count:3d}), BA={ba:.4f} (K={kar:.2f}[{n_k_ind}], U={urr:.2f}[{n_u_ind}])")
+            print(f"  VAL  {q_key}: R@1={r1:.4f} (n={count:3d})")
 
         if test_query_quality_metrics is not None:
             test_by_q = test_open_set_metrics.get('by_quality', {})
@@ -392,7 +373,11 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
                 q_key = f"q>={q_thresh}"
                 t_r1 = test_query_quality_metrics[q_key]['recall_at_1']
                 t_ba = test_by_q.get(q_key, {}).get('balanced_accuracy', 0.0)
-                print(f"  TEST {q_key}: R@1={t_r1:.4f}, BA={t_ba:.4f}")
+                t_kar = test_by_q.get(q_key, {}).get('known_accept_rate', 0.0)
+                t_urr = test_by_q.get(q_key, {}).get('unknown_reject_rate', 0.0)
+                t_n_k = test_by_q.get(q_key, {}).get('n_known_individuals', 0)
+                t_n_u = test_by_q.get(q_key, {}).get('n_unknown_individuals', 0)
+                print(f"  TEST {q_key}: R@1={t_r1:.4f}, BA={t_ba:.4f} (K={t_kar:.2f}[{t_n_k}], U={t_urr:.2f}[{t_n_u}])")
 
         entry = {
             'epoch': epoch + 1,
@@ -400,7 +385,6 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'val_loss': val_loss,
             'learning_rate': learning_rate,
             'query_quality_metrics': query_quality_metrics,
-            'open_set': open_set_metrics
         }
         if test_query_quality_metrics is not None:
             entry['test_query_quality_metrics'] = test_query_quality_metrics
@@ -444,36 +428,33 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'transform': f'resize_{image_size}_{model_name}_norm',
             'best_recall_epoch': best_recall_epoch,
             'best_recall_at_1': best_recall,
-            'best_ba_epoch': best_ba_epoch,
-            'best_balanced_accuracy': best_balanced_accuracy,
-            'best_hm_epoch': best_hm_epoch,
-            'best_harmonic_mean': best_harmonic_mean,
         }
     }
 
     if test_query_dataset is not None:
         result['dataset']['test_query_samples_per_individual'] = test_query_info
         result['dataset']['total_test_query_size'] = len(test_query_dataset)
-        result['test_at_best_epochs'] = {}
-        for label, epoch_num in [('best_recall', best_recall_epoch),
-                                  ('best_ba', best_ba_epoch),
-                                  ('best_hm', best_hm_epoch)]:
-            if epoch_num > 0:
-                hist_entry = epoch_history[epoch_num - 1]
-                result['test_at_best_epochs'][label] = {
-                    'epoch': epoch_num,
-                    'test_query_quality_metrics': hist_entry.get('test_query_quality_metrics'),
-                    'test_open_set': hist_entry.get('test_open_set'),
-                }
+        if best_recall_epoch > 0:
+            hist_entry = epoch_history[best_recall_epoch - 1]
+            result['test_at_best_recall_epoch'] = {
+                'epoch': best_recall_epoch,
+                'test_query_quality_metrics': hist_entry.get('test_query_quality_metrics'),
+                'test_open_set': hist_entry.get('test_open_set'),
+            }
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Best R@1 epoch: {best_recall_epoch}, R@1={best_recall:.4f}")
-    print(f"Best BA epoch:  {best_ba_epoch}, BA={best_balanced_accuracy:.4f}")
-    print(f"Best H-Mean epoch: {best_hm_epoch}, H-Mean={best_harmonic_mean:.4f} (recommended)")
+    print(f"Best val R@1 epoch: {best_recall_epoch}, R@1={best_recall:.4f}")
+    if test_query_dataset is not None and best_recall_epoch > 0:
+        hist_entry = epoch_history[best_recall_epoch - 1]
+        test_qm = hist_entry.get('test_query_quality_metrics', {})
+        test_os = hist_entry.get('test_open_set', {})
+        t_r1 = test_qm.get('q>=0.0', {}).get('recall_at_1', 0.0)
+        t_ba = test_os.get('by_quality', {}).get('q>=0.0', {}).get('balanced_accuracy', 0.0)
+        print(f"Test @ epoch {best_recall_epoch}: R@1={t_r1:.4f}, BA={t_ba:.4f}")
 
     return filename
 
@@ -507,6 +488,23 @@ def run_hygiene_sweep(model_name, args):
         print("Failed to load feasibility config")
         return
 
+    # Load unknown assignment: combined train+test rare source for test-time BA
+    unknown_config_path = 'preprocessing/results/unknown_assignment.json'
+    try:
+        with open(unknown_config_path, 'r') as f:
+            unknown_config = json.load(f)
+        from datasets import concatenate_datasets
+        combined_rare_dataset = concatenate_datasets([dataset, test_dataset_full])
+        combined_rare_metadata = build_metadata_cache(combined_rare_dataset)
+        rare_excluded = ['HLC21-H1']  # only exclude individuals too sparse for unknown eval
+        print(f"  Combined rare pool: {unknown_config['summary']['combined_unknown_images']} images "
+              f"from {unknown_config['summary']['n_unknown_individuals']} unknown individuals")
+    except FileNotFoundError:
+        print(f"Warning: {unknown_config_path} not found, test BA will use test-split unknowns only")
+        combined_rare_dataset = test_dataset_full
+        combined_rare_metadata = test_metadata_cache
+        rare_excluded = feasibility_config.get('excluded_entirely', [])
+
     total_combinations = len(THRESHOLDS) * len(GALLERY_SIZES) * len(SEEDS)
     print(f"\nExperiment parameters:")
     print(f"  Model: {config['backbone_label']} + Projection Head ({best_embedding_dim}-d) + ArcFace")
@@ -521,7 +519,8 @@ def run_hygiene_sweep(model_name, args):
     print(f"  Seeds: {SEEDS}")
     print(f"  Total combinations: {total_combinations}")
     print(f"  Configs per job: ~{total_combinations // 24}")
-    print(f"  Open-set evaluation: Enabled (rare individuals, raw cosine scores)")
+    print(f"  Val: R@1 only (no open-set BA)")
+    print(f"  Test: R@1 + BA (combined train+test unknown pool)")
 
     combinations = get_job_combinations(args.idx)
 
@@ -546,6 +545,9 @@ def run_hygiene_sweep(model_name, args):
                 embedding_dim=best_embedding_dim, aug_flags=aug_flags,
                 test_dataset=test_dataset_full,
                 test_metadata_cache=test_metadata_cache,
+                combined_rare_dataset=combined_rare_dataset,
+                combined_rare_metadata=combined_rare_metadata,
+                rare_excluded=rare_excluded,
             )
             if result:
                 results_summary.append(result)

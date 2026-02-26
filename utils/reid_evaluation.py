@@ -290,11 +290,12 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
                                   transform, device, dataset, qualified_individuals, metadata_cache,
                                   criterion, embedding_dim=128,
                                   batch_size=EVAL_BATCH_SIZE,
-                                  promoted_individuals=None, excluded_individuals=None):
+                                  promoted_individuals=None, excluded_individuals=None,
+                                  skip_open_set=False):
     """
-    Evaluate model computing Recall@1 and open-set metrics with raw cosine similarity.
+    Evaluate model computing Recall@1 and optionally open-set metrics.
 
-    Rare/unknown individuals are pooled from the train dataset only.
+    When skip_open_set=True, only computes R@1 and val_loss (no unknown sourcing).
 
     Returns:
         query_quality_metrics, open_set_metrics, val_loss
@@ -339,46 +340,10 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
     # Validation loss
     val_loss = compute_validation_loss(query_embeddings, query_labels, criterion, device)
 
-    # Rare/Unknown — pool from train dataset
-    rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
-        metadata_cache, qualified_individuals, quality_threshold=0.0,
-        promoted_individuals=promoted_individuals,
-        excluded_individuals=excluded_individuals
-    )
-
-    all_rare_emb = []
-    all_rare_quality = []
-    all_rare_labels = []
-
-    if rare_indices:
-        emb, qual, lab = compute_rare_embeddings(
-            model, dataset, rare_indices, rare_quality, rare_labels_str,
-            transform, device, embedding_dim=embedding_dim
-        )
-        all_rare_emb.append(emb)
-        all_rare_quality.append(qual)
-        all_rare_labels.append(lab)
-
-    if all_rare_emb:
-        rare_emb = torch.cat(all_rare_emb, dim=0).to(device)
-        rare_quality_arr = np.concatenate(all_rare_quality)
-        rare_labels_arr = np.concatenate(all_rare_labels)
-    else:
-        rare_emb = torch.empty(0, embedding_dim).to(device)
-        rare_quality_arr = np.array([])
-        rare_labels_arr = np.array([])
-
-    # 2. Compute Cosine Similarity Matrices
+    # 2. Compute Cosine Similarity (query vs gallery)
     scores_known = compute_cosine_similarity(query_embeddings, gallery_embeddings)
 
-    if len(rare_emb) > 0:
-        scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
-    else:
-        scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
-
-    # 3. Compute Metrics
-
-    # A. Recall@1 (Closed Set) - macro-averaged
+    # 3. Recall@1 (Closed Set) - macro-averaged
     query_quality_metrics = {}
     query_labels_np = query_labels.cpu().numpy()
 
@@ -410,6 +375,41 @@ def evaluate_recall_with_openset(model, train_dataset, val_dataset, individual_t
         recall = np.mean(per_ind_recall) if per_ind_recall else 0.0
 
         query_quality_metrics[f"q>={thresh}"] = {"recall_at_1": recall, "count": count}
+
+    if skip_open_set:
+        return query_quality_metrics, {}, val_loss
+
+    # 4. Open-set: source rare/unknown individuals
+    rare_indices, rare_quality, rare_labels_str = get_rare_individual_indices(
+        metadata_cache, qualified_individuals, quality_threshold=0.0,
+        promoted_individuals=promoted_individuals,
+        excluded_individuals=excluded_individuals
+    )
+
+    all_rare_emb = []
+    all_rare_quality = []
+    all_rare_labels = []
+
+    if rare_indices:
+        emb, qual, lab = compute_rare_embeddings(
+            model, dataset, rare_indices, rare_quality, rare_labels_str,
+            transform, device, embedding_dim=embedding_dim
+        )
+        all_rare_emb.append(emb)
+        all_rare_quality.append(qual)
+        all_rare_labels.append(lab)
+
+    if all_rare_emb:
+        rare_emb = torch.cat(all_rare_emb, dim=0).to(device)
+        rare_quality_arr = np.concatenate(all_rare_quality)
+        rare_labels_arr = np.concatenate(all_rare_labels)
+    else:
+        rare_emb = torch.empty(0, embedding_dim).to(device)
+        rare_quality_arr = np.array([])
+        rare_labels_arr = np.array([])
+
+    scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings) if len(rare_emb) > 0 \
+        else torch.empty(0, len(gallery_embeddings)).to(device)
 
     # B. Per-individual threshold calibration via ArcFace centers
     class_to_name = {v: k for k, v in individual_to_class.items()}
