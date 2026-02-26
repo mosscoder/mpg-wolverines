@@ -55,30 +55,6 @@ def count_trainable_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def train_epoch_arcface(model, train_loader, optimizer, criterion, device):
-    """Train for one epoch with ArcFace loss."""
-    model.train()
-    criterion.train()
-    total_loss = 0
-    num_batches = 0
-
-    for batch in train_loader:
-        # Support both 2-tuple (image, label) and 3-tuple (image, label, quality)
-        images = batch[0].to(device)
-        labels = batch[1].to(device)
-
-        embeddings = model(images)
-
-        optimizer.zero_grad()
-        loss = criterion(embeddings, labels)
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        num_batches += 1
-
-    return total_loss / max(num_batches, 1)
-
 
 # ============================================================================
 # Hyperparameter loading
@@ -196,13 +172,14 @@ def get_job_combinations(job_idx, max_jobs=24):
 
 def train_single_config(model_name, threshold, gallery_size, seed, args,
                          dataset, config, metadata_cache,
-                         learning_rate, image_size, embedding_dim, epochs=100,
+                         learning_rate, image_size, embedding_dim,
+                         total_steps=300, eval_every=10,
                          aug_flags=None,
                          test_dataset=None, test_metadata_cache=None,
                          combined_rare_dataset=None, combined_rare_metadata=None,
                          rare_excluded=None):
     """Train one hygiene sweep configuration and return results."""
-    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, CoverageSampler
     from utils.training import check_result_exists
 
     model_config = MODEL_CONFIGS[model_name]
@@ -260,8 +237,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         train_transform = eval_transform
     train_torch_dataset = ArcFaceDataset(train_dataset, train_transform, individual_to_class)
 
-    # Create balanced batch sampler
-    sampler = BalancedBatchSampler(
+    # Create coverage sampler (infinite iterator for step-based training)
+    sampler = CoverageSampler(
         labels=train_torch_dataset.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
     )
@@ -324,14 +301,38 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     test_rare_metadata = combined_rare_metadata if combined_rare_metadata is not None else test_metadata_cache
     test_rare_excluded = rare_excluded if rare_excluded is not None else excluded_individuals
 
-    # Training loop
+    # Step-based training loop
     start_time = time.time()
-    epoch_history = []
+    step_history = []
     best_recall = 0.0
-    best_recall_epoch = 0
+    best_recall_step = 0
+    n_evals = total_steps // eval_every
 
-    for epoch in range(epochs):
-        train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
+    model.train()
+    criterion.train()
+    train_iter = iter(train_loader)
+    running_loss = 0.0
+
+    for step in range(1, total_steps + 1):
+        batch = next(train_iter)
+        images = batch[0].to(device)
+        labels = batch[1].to(device)
+
+        embeddings = model(images)
+        optimizer.zero_grad()
+        loss = criterion(embeddings, labels)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+        if step % eval_every != 0:
+            continue
+
+        # Eval checkpoint
+        avg_loss = running_loss / eval_every
+        running_loss = 0.0
+        eval_num = step // eval_every
 
         # Val: R@1 only (no open-set BA)
         query_quality_metrics, _, val_loss = evaluate_recall_with_openset(
@@ -357,9 +358,9 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
 
         if recall_1 > best_recall:
             best_recall = recall_1
-            best_recall_epoch = epoch + 1
+            best_recall_step = step
 
-        print(f"Epoch {epoch+1:3d}/{epochs}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}")
+        print(f"Step {step:3d}/{total_steps} [{eval_num}/{n_evals}]: Loss={avg_loss:.4f}, ValLoss={val_loss:.4f}")
 
         for q_thresh in QUERY_QUALITY_THRESHOLDS:
             q_key = f"q>={q_thresh}"
@@ -379,9 +380,12 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
                 t_n_u = test_by_q.get(q_key, {}).get('n_unknown_individuals', 0)
                 print(f"  TEST {q_key}: R@1={t_r1:.4f}, BA={t_ba:.4f} (K={t_kar:.2f}[{t_n_k}], U={t_urr:.2f}[{t_n_u}])")
 
+        model.train()
+        criterion.train()
+
         entry = {
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
+            'step': step,
+            'train_loss': avg_loss,
             'val_loss': val_loss,
             'learning_rate': learning_rate,
             'query_quality_metrics': query_quality_metrics,
@@ -389,7 +393,7 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         if test_query_quality_metrics is not None:
             entry['test_query_quality_metrics'] = test_query_quality_metrics
             entry['test_open_set'] = test_open_set_metrics
-        epoch_history.append(entry)
+        step_history.append(entry)
 
     training_time = time.time() - start_time
 
@@ -405,7 +409,8 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'optimizer': 'AdamW',
             'scheduler': 'None (fixed LR)',
             'learning_rate': learning_rate,
-            'epochs': epochs,
+            'total_steps': total_steps,
+            'eval_every': eval_every,
             'batch_size': TRAIN_BATCH_SIZE,
             'backbone': model_config['backbone_label'],
             'score_normalization': 'Raw Cosine',
@@ -420,13 +425,13 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
             'total_gallery_size': len(train_dataset),
             'total_query_size': len(val_dataset)
         },
-        'epoch_history': epoch_history,
+        'step_history': step_history,
         'metadata': {
             'created_at': datetime.now().isoformat(),
             'training_time_seconds': training_time,
             'job_idx': args.idx,
             'transform': f'resize_{image_size}_{model_name}_norm',
-            'best_recall_epoch': best_recall_epoch,
+            'best_recall_step': best_recall_step,
             'best_recall_at_1': best_recall,
         }
     }
@@ -434,10 +439,12 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
     if test_query_dataset is not None:
         result['dataset']['test_query_samples_per_individual'] = test_query_info
         result['dataset']['total_test_query_size'] = len(test_query_dataset)
-        if best_recall_epoch > 0:
-            hist_entry = epoch_history[best_recall_epoch - 1]
-            result['test_at_best_recall_epoch'] = {
-                'epoch': best_recall_epoch,
+        if best_recall_step > 0:
+            # Find the step_history entry for the best step
+            best_idx = best_recall_step // eval_every - 1
+            hist_entry = step_history[best_idx]
+            result['test_at_best_recall_step'] = {
+                'step': best_recall_step,
                 'test_query_quality_metrics': hist_entry.get('test_query_quality_metrics'),
                 'test_open_set': hist_entry.get('test_open_set'),
             }
@@ -447,14 +454,15 @@ def train_single_config(model_name, threshold, gallery_size, seed, args,
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Best val R@1 epoch: {best_recall_epoch}, R@1={best_recall:.4f}")
-    if test_query_dataset is not None and best_recall_epoch > 0:
-        hist_entry = epoch_history[best_recall_epoch - 1]
+    print(f"Best val R@1 step: {best_recall_step}, R@1={best_recall:.4f}")
+    if test_query_dataset is not None and best_recall_step > 0:
+        best_idx = best_recall_step // eval_every - 1
+        hist_entry = step_history[best_idx]
         test_qm = hist_entry.get('test_query_quality_metrics', {})
         test_os = hist_entry.get('test_open_set', {})
         t_r1 = test_qm.get('q>=0.0', {}).get('recall_at_1', 0.0)
         t_ba = test_os.get('by_quality', {}).get('q>=0.0', {}).get('balanced_accuracy', 0.0)
-        print(f"Test @ epoch {best_recall_epoch}: R@1={t_r1:.4f}, BA={t_ba:.4f}")
+        print(f"Test @ step {best_recall_step}: R@1={t_r1:.4f}, BA={t_ba:.4f}")
 
     return filename
 
@@ -570,7 +578,7 @@ def run_hygiene_sweep(model_name, args):
 def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
                      dataset, config, metadata_cache,
                      learning_rate=None, image_size=None, embedding_dim=128,
-                     epochs=20, seed=0, train_transform=None):
+                     total_steps=100, eval_every=10, seed=0, train_transform=None):
     """
     Shared training loop for all opt sweep scripts (LR, resize, embedding_dim, augmentation).
 
@@ -585,7 +593,8 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         learning_rate: LR to use (overrides default)
         image_size: Image size to use (overrides default)
         embedding_dim: Embedding dimension
-        epochs: Number of training epochs
+        total_steps: Total number of training steps
+        eval_every: Evaluate every N steps
         seed: Random seed
         train_transform: Optional augmented transform for training data.
             If None, uses the same (clean) eval transform for both.
@@ -593,7 +602,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     Returns:
         filename if saved, None if skipped
     """
-    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, CoverageSampler
 
     model_config = MODEL_CONFIGS[model_name]
     if learning_rate is None:
@@ -650,8 +659,8 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     t_transform = train_transform if train_transform is not None else eval_transform
     train_torch_dataset = ArcFaceDataset(train_dataset, t_transform, individual_to_class)
 
-    # Create balanced batch sampler
-    sampler = BalancedBatchSampler(
+    # Create coverage sampler (infinite iterator for step-based training)
+    sampler = CoverageSampler(
         labels=train_torch_dataset.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
     )
@@ -686,14 +695,37 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         lr=learning_rate
     )
 
-    # Training loop
+    # Step-based training loop
     start_time = time.time()
-    epoch_history = []
+    step_history = []
     best_recall = 0.0
-    best_epoch = 0
+    best_step = 0
+    n_evals = total_steps // eval_every
 
-    for epoch in range(epochs):
-        train_loss = train_epoch_arcface(model, train_loader, optimizer, criterion, device)
+    model.train()
+    criterion.train()
+    train_iter = iter(train_loader)
+    running_loss = 0.0
+
+    for step in range(1, total_steps + 1):
+        batch = next(train_iter)
+        images = batch[0].to(device)
+        labels = batch[1].to(device)
+
+        embeddings = model(images)
+        optimizer.zero_grad()
+        loss = criterion(embeddings, labels)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+        if step % eval_every != 0:
+            continue
+
+        avg_loss = running_loss / eval_every
+        running_loss = 0.0
+        eval_num = step // eval_every
 
         recall_at_1 = evaluate_recall_simple(
             model, train_dataset, test_dataset, individual_to_class, eval_transform, device
@@ -701,15 +733,18 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
 
         if recall_at_1 > best_recall:
             best_recall = recall_at_1
-            best_epoch = epoch + 1
+            best_step = step
 
-        print(f"Epoch {epoch+1:3d}/{epochs}: loss={train_loss:.4f}, test_R@1={recall_at_1:.4f}")
+        print(f"Step {step:3d}/{total_steps} [{eval_num}/{n_evals}]: loss={avg_loss:.4f}, test_R@1={recall_at_1:.4f}")
 
-        epoch_history.append({
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
+        step_history.append({
+            'step': step,
+            'train_loss': avg_loss,
             'test_recall_at_1': recall_at_1
         })
+
+        model.train()
+        criterion.train()
 
     training_time = time.time() - start_time
 
@@ -717,7 +752,8 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
     result = {
         'config': {
             'learning_rate': learning_rate,
-            'epochs': epochs,
+            'total_steps': total_steps,
+            'eval_every': eval_every,
             'seed': seed,
             'backbone': model_config['backbone_label'],
             'target_samples_per_individual': TARGET_SAMPLES_PER_INDIVIDUAL,
@@ -733,9 +769,9 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
             'split_method': 'ymdh_temporal_50_50_train_priority'
         },
         'results': {
-            'best_epoch': best_epoch,
+            'best_step': best_step,
             'best_test_recall_at_1': best_recall,
-            'epoch_history': epoch_history
+            'step_history': step_history
         },
         'metadata': {
             'created_at': datetime.now().isoformat(),
@@ -750,7 +786,7 @@ def run_opt_training(model_name, sweep_param_name, sweep_param_value, args,
         json.dump(result, f, indent=2)
 
     print(f"\nSaved results to: {filename}")
-    print(f"Best R@1: {best_recall:.4f} at epoch {best_epoch}")
+    print(f"Best R@1: {best_recall:.4f} at step {best_step}")
 
     return filename
 
@@ -764,8 +800,8 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
     """
     Read all hygiene sweep results for a backbone and select the best operating point.
 
-    Groups by (threshold, gallery_size), extracts best epoch per seed by criterion,
-    averages across seeds, returns the (threshold, gallery_size, epoch) with highest mean.
+    Groups by (threshold, gallery_size), extracts best step per seed by criterion,
+    averages across seeds, returns the (threshold, gallery_size, step) with highest mean.
 
     Args:
         model_name: Key in MODEL_CONFIGS
@@ -773,7 +809,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
         threshold_filter: If set, only consider groups with this threshold value
 
     Returns:
-        dict with {threshold, gallery_size, best_epoch, score}
+        dict with {threshold, gallery_size, best_step, score}
     """
     config = MODEL_CONFIGS[model_name]
     results_dir = os.path.join(config['experiment_dir'], 'results', 'hygiene')
@@ -815,28 +851,28 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
         for q_thresh in q_thresholds_to_search:
             q_key = f"q>={q_thresh}"
 
-            # Build per-seed lookup: epoch_num -> score
-            # Only include epochs that have evaluation data.
-            all_histories = [r['epoch_history'] for r in group_results]
+            # Build per-seed lookup: step_num -> score
+            # Only include steps that have evaluation data.
+            all_histories = [r['step_history'] for r in group_results]
 
-            eval_epochs = []
+            eval_steps = []
             for entry in all_histories[0]:
                 if 'query_quality_metrics' in entry:
-                    eval_epochs.append(entry['epoch'])
+                    eval_steps.append(entry['step'])
 
-            # For each eval epoch, average the criterion across seeds
+            # For each eval step, average the criterion across seeds
             best_mean = -1.0
-            best_epoch_num = eval_epochs[0] if eval_epochs else 1
+            best_step_num = eval_steps[0] if eval_steps else 1
 
-            for epoch_num in eval_epochs:
+            for step_num in eval_steps:
                 scores = []
                 for history in all_histories:
                     for entry in history:
-                        if entry['epoch'] == epoch_num:
+                        if entry['step'] == step_num:
                             if criterion == 'recall':
                                 s = entry.get('query_quality_metrics', {}).get(q_key, {}).get('recall_at_1')
                             elif criterion == 'balanced_accuracy':
-                                s = entry.get('open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy')
+                                s = entry.get('test_open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy')
                             else:
                                 raise ValueError(f"Unknown criterion: {criterion}")
                             if s is not None:
@@ -844,18 +880,18 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                             break
 
                 if scores:
-                    epoch_mean = np.mean(scores)
-                    if epoch_mean > best_mean:
-                        best_mean = epoch_mean
-                        best_epoch_num = epoch_num
+                    step_mean = np.mean(scores)
+                    if step_mean > best_mean:
+                        best_mean = step_mean
+                        best_step_num = step_num
 
-            # Extract per-individual thresholds at best epoch (for open-set tasks)
+            # Extract per-individual thresholds at best step (for open-set tasks)
             all_per_individual_thresholds = defaultdict(list)
             cosine_thresholds = []
             for history in all_histories:
                 for entry in history:
-                    if entry['epoch'] == best_epoch_num:
-                        open_set = entry.get('open_set', {})
+                    if entry['step'] == best_step_num:
+                        open_set = entry.get('test_open_set', {})
                         thresh_cal = open_set['threshold_calibration']
 
                         for name, thresh in thresh_cal['per_individual'].items():
@@ -874,7 +910,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                     'threshold': threshold,
                     'gallery_size': gallery_size,
                     'query_quality_threshold': q_thresh,
-                    'best_epoch': best_epoch_num,
+                    'best_step': best_step_num,
                     'score': float(best_mean),
                     'criterion': criterion,
                     'n_seeds': len(group_results),
@@ -885,7 +921,7 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
     print(f"Best hygiene config ({criterion}): threshold={best_config['threshold']}, "
           f"gallery_size={best_config['gallery_size']}, "
           f"query_q>={best_config['query_quality_threshold']}, "
-          f"epoch={best_config['best_epoch']}, "
+          f"step={best_config['best_step']}, "
           f"score={best_config['score']:.4f} (n={best_config['n_seeds']} seeds)")
 
     return best_config
@@ -924,7 +960,7 @@ def run_final_test(model_name, args, seed, task_name):
         seed: Random seed for gallery sampling and training
         task_name: Key in TEST_TASKS
     """
-    from utils.arcface import ArcFaceLoss, BalancedBatchSampler
+    from utils.arcface import ArcFaceLoss, CoverageSampler
     from utils.training import check_result_exists
 
     task_cfg = TEST_TASKS[task_name]
@@ -939,20 +975,20 @@ def run_final_test(model_name, args, seed, task_name):
     # 1. The filtered config (same criterion, threshold_filter=None) to determine
     #    what "filtered" means (quality threshold) and build the filtered gallery
     # 2. The unfiltered config (same criterion, threshold_filter=0.0) for
-    #    best_epoch and query_quality_threshold
+    #    best_step and query_quality_threshold
     if is_matched:
         filtered_config = load_best_hygiene_config(model_name, criterion=criterion,
                                                     threshold_filter=None)
         best_config = load_best_hygiene_config(model_name, criterion=criterion,
                                                threshold_filter=threshold_filter)
         quality_threshold = filtered_config['threshold']  # defines "filtered"
-        best_epoch = best_config['best_epoch']
+        best_step = best_config['best_step']
         query_quality_threshold = best_config['query_quality_threshold']
     else:
         best_config = load_best_hygiene_config(model_name, criterion=criterion,
                                                threshold_filter=threshold_filter)
         quality_threshold = best_config['threshold']
-        best_epoch = best_config['best_epoch']
+        best_step = best_config['best_step']
         query_quality_threshold = best_config['query_quality_threshold']
 
     set_all_seeds(seed)
@@ -969,7 +1005,7 @@ def run_final_test(model_name, args, seed, task_name):
     print(f"\n{'='*60}")
     print(f"Final Test Evaluation: seed={seed}, task={task_name}")
     print(f"  criterion={criterion}, quality_threshold={quality_threshold}, "
-          f"query_q>={query_quality_threshold}, epochs={best_epoch}")
+          f"query_q>={query_quality_threshold}, steps={best_step}")
     if is_matched:
         print(f"  gallery_mode=event_matched (matching filtered threshold={quality_threshold})")
     else:
@@ -1074,8 +1110,8 @@ def run_final_test(model_name, args, seed, task_name):
         train_transform = eval_transform
     train_torch_dataset = ArcFaceDataset(gallery_dataset, train_transform, individual_to_class)
 
-    # Create balanced batch sampler
-    sampler = BalancedBatchSampler(
+    # Create coverage sampler (infinite iterator for step-based training)
+    sampler = CoverageSampler(
         labels=train_torch_dataset.get_labels(),
         batch_size=TRAIN_BATCH_SIZE,
     )
@@ -1106,15 +1142,27 @@ def run_final_test(model_name, args, seed, task_name):
         lr=best_lr
     )
 
-    # Train for exactly best_epoch epochs
-    print(f"\nTraining for {best_epoch} epochs...")
+    # Step-based training loop
+    print(f"\nTraining for {best_step} steps...")
     start_time = time.time()
-    epoch_history = []
 
-    for epoch in range(best_epoch):
-        train_loss = train_epoch_arcface(model, train_loader, optimizer, arcface_loss, device)
-        print(f"Epoch {epoch+1:3d}/{best_epoch}: Loss={train_loss:.4f}")
-        epoch_history.append({'epoch': epoch + 1, 'train_loss': train_loss})
+    model.train()
+    arcface_loss.train()
+    train_iter = iter(train_loader)
+    running_loss = 0.0
+    for step in range(1, best_step + 1):
+        batch = next(train_iter)
+        images = batch[0].to(device)
+        labels = batch[1].to(device)
+        embeddings = model(images)
+        optimizer.zero_grad()
+        loss = arcface_loss(embeddings, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+        if step % 10 == 0:
+            print(f"Step {step:3d}/{best_step}: Loss={running_loss / 10:.4f}")
+            running_loss = 0.0
 
     training_time = time.time() - start_time
 
@@ -1178,7 +1226,7 @@ def run_final_test(model_name, args, seed, task_name):
         'threshold_filter': threshold_filter,
         'quality_threshold': quality_threshold,
         'query_quality_threshold': query_quality_threshold,
-        'best_epoch': best_epoch,
+        'best_step': best_step,
         'hygiene_score': best_config['score'],
         'learning_rate': best_lr,
         'image_size': best_size,
@@ -1238,7 +1286,6 @@ def run_final_test(model_name, args, seed, task_name):
                 'n_query': n_query,
                 'n_individuals': len(individual_total),
             },
-            'epoch_history': epoch_history,
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'training_time_seconds': training_time,
@@ -1315,7 +1362,6 @@ def run_final_test(model_name, args, seed, task_name):
                 'n_known_individuals': n_k,
                 'n_unknown_individuals': n_u,
             },
-            'epoch_history': epoch_history,
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'training_time_seconds': training_time,
@@ -2190,7 +2236,8 @@ if __name__ == "__main__":
     sub_lr.add_argument("--values", type=float, nargs="+", required=True, help="Learning rates to sweep")
     sub_lr.add_argument("--image-size", type=int, required=True, help="Fixed image size")
     sub_lr.add_argument("--embedding-dim", type=int, default=128, help="Fixed embedding dimension")
-    sub_lr.add_argument("--epochs", type=int, default=20)
+    sub_lr.add_argument("--total-steps", type=int, default=100)
+    sub_lr.add_argument("--eval-every", type=int, default=10)
     sub_lr.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     # opt_embedding_dim subcommand
@@ -2199,7 +2246,8 @@ if __name__ == "__main__":
     sub_emb.add_argument("--values", type=int, nargs="+", required=True, help="Embedding dims to sweep")
     sub_emb.add_argument("--lr", type=float, required=True, help="Fixed learning rate")
     sub_emb.add_argument("--image-size", type=int, required=True, help="Fixed image size")
-    sub_emb.add_argument("--epochs", type=int, default=20)
+    sub_emb.add_argument("--total-steps", type=int, default=100)
+    sub_emb.add_argument("--eval-every", type=int, default=10)
     sub_emb.add_argument("--seeds", type=int, nargs="+", default=[0], help="Random seeds")
 
     # test_eval subcommand
@@ -2249,14 +2297,14 @@ if __name__ == "__main__":
         value_idx, seed_idx = divmod(args.idx, len(seeds))
         lr = lrs[value_idx]
         seed = seeds[seed_idx]
-        print(f"\nLR: {lr}, Seed: {seed}, Image size: {args.image_size}, Epochs: {args.epochs}")
+        print(f"\nLR: {lr}, Seed: {seed}, Image size: {args.image_size}, Steps: {args.total_steps}")
 
         try:
             run_opt_training(
                 model_name, "lr", lr, args, dataset, feasibility_config, metadata_cache,
                 learning_rate=lr, image_size=args.image_size,
                 embedding_dim=args.embedding_dim,
-                epochs=args.epochs, seed=seed,
+                total_steps=args.total_steps, eval_every=args.eval_every, seed=seed,
             )
         except Exception as e:
             print(f"Error: {e}")
@@ -2288,13 +2336,13 @@ if __name__ == "__main__":
         value_idx, seed_idx = divmod(args.idx, len(seeds))
         emb_dim = dims[value_idx]
         seed = seeds[seed_idx]
-        print(f"\nEmbedding dim: {emb_dim}, Seed: {seed}, LR: {args.lr}, Size: {args.image_size}, Epochs: {args.epochs}")
+        print(f"\nEmbedding dim: {emb_dim}, Seed: {seed}, LR: {args.lr}, Size: {args.image_size}, Steps: {args.total_steps}")
 
         try:
             run_opt_training(
                 model_name, "embedding_dim", emb_dim, args, dataset, feasibility_config, metadata_cache,
                 learning_rate=args.lr, image_size=args.image_size, embedding_dim=emb_dim,
-                epochs=args.epochs, seed=seed,
+                total_steps=args.total_steps, eval_every=args.eval_every, seed=seed,
             )
         except Exception as e:
             print(f"Error: {e}")
