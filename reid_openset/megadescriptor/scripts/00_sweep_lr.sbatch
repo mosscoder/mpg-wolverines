@@ -15,7 +15,7 @@
 # 4 LRs x 5 seeds = 20 configs, one per job
 #
 # LRs: 0.0001, 0.0005, 0.001, 0.005
-# Fixed: 384px images, seeds=0,1,2,3,4, 20 epochs
+# Fixed: 384px images, seeds=0,1,2,3,4, 100 steps (eval every 10)
 #
 # Temporal split by capture event (ymdh):
 # - Earlier 50% of ymdh values -> train
@@ -55,7 +55,7 @@ python -u -m utils.reid opt_lr --model megadescriptor \
     --device gpu \
     --values 0.0001 0.0005 0.001 0.005 \
     --image-size 384 \
-    --embedding-dim 256 --epochs 20 --seeds 0 1 2 3 4
+    --embedding-dim 256 --total-steps 100 --eval-every 10 --seeds 0 1 2 3 4
 
 # Print completion info
 echo "========================================"
