@@ -1461,6 +1461,7 @@ def run_step_count_sweep(model_name, args):
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
     metadata_cache = build_metadata_cache(dataset)
+    test_dataset = load_reidentification_test_dataset()
 
     feasibility_config = load_feasibility_config()
     if not feasibility_config:
@@ -1470,6 +1471,23 @@ def run_step_count_sweep(model_name, args):
     feasible_individuals = feasibility_config.get("qualified_individuals", [])
     promoted_individuals = feasibility_config.get("promoted_to_rare", [])
     excluded_individuals = feasibility_config.get("excluded_entirely", [])
+
+    # Load unknown assignment: combined train+test rare source for BA
+    unknown_config_path = 'preprocessing/results/unknown_assignment.json'
+    try:
+        with open(unknown_config_path, 'r') as f:
+            unknown_config = json.load(f)
+        from datasets import concatenate_datasets
+        combined_rare_dataset = concatenate_datasets([dataset, test_dataset])
+        combined_rare_metadata = build_metadata_cache(combined_rare_dataset)
+        rare_excluded = ['HLC21-H1']
+        print(f"  Combined rare pool: {unknown_config['summary']['combined_unknown_images']} images "
+              f"from {unknown_config['summary']['n_unknown_individuals']} unknown individuals")
+    except FileNotFoundError:
+        print(f"Warning: {unknown_config_path} not found, BA will use train-split unknowns only")
+        combined_rare_dataset = dataset
+        combined_rare_metadata = metadata_cache
+        rare_excluded = excluded_individuals
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
     print(f"\nMode: {mode_label} (threshold>={gallery_threshold})")
@@ -1582,10 +1600,10 @@ def run_step_count_sweep(model_name, args):
 
             query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
                 model, train_ds, val_ds, individual_to_class, eval_transform, device,
-                dataset, feasible_individuals, metadata_cache,
+                combined_rare_dataset, feasible_individuals, combined_rare_metadata,
                 criterion=arcface_loss, embedding_dim=emb_dim,
                 promoted_individuals=promoted_individuals,
-                excluded_individuals=excluded_individuals,
+                excluded_individuals=rare_excluded,
             )
 
             cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
@@ -2015,6 +2033,23 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
     promoted_individuals = feasibility_config.get("promoted_to_rare", [])
     excluded_individuals = feasibility_config.get("excluded_entirely", [])
 
+    # Load unknown assignment: combined train+test rare source for BA
+    unknown_config_path = 'preprocessing/results/unknown_assignment.json'
+    try:
+        with open(unknown_config_path, 'r') as f:
+            unknown_config = json.load(f)
+        from datasets import concatenate_datasets
+        combined_rare_dataset = concatenate_datasets([train_dataset, test_dataset])
+        combined_rare_metadata = build_metadata_cache(combined_rare_dataset)
+        rare_excluded = ['HLC21-H1']
+        print(f"  Combined rare pool: {unknown_config['summary']['combined_unknown_images']} images "
+              f"from {unknown_config['summary']['n_unknown_individuals']} unknown individuals")
+    except FileNotFoundError:
+        print(f"Warning: {unknown_config_path} not found, BA will use test-split unknowns only")
+        combined_rare_dataset = test_dataset
+        combined_rare_metadata = test_metadata_cache
+        rare_excluded = excluded_individuals
+
     if len(feasible_individuals) < 2:
         print(f"Not enough individuals ({len(feasible_individuals)}) for training (need >= 2)")
         return
@@ -2063,9 +2098,9 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
 
     # ---- Pre-fetch rare/unknown indices (used at every eval step) ----
     rare_indices, rare_quality_arr, rare_labels_str = get_rare_individual_indices(
-        test_metadata_cache, feasible_individuals, quality_threshold=0.0,
+        combined_rare_metadata, feasible_individuals, quality_threshold=0.0,
         promoted_individuals=promoted_individuals,
-        excluded_individuals=excluded_individuals
+        excluded_individuals=rare_excluded
     )
     rare_indices_cache = {
         'rare_indices': rare_indices,
@@ -2173,9 +2208,9 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
                   f"{elapsed:.1f}s elapsed)...")
             _evaluate_and_save(
                 model, arcface_loss, gallery_dataset, query_dataset,
-                test_dataset, test_metadata_cache, eval_transform,
+                combined_rare_dataset, combined_rare_metadata, eval_transform,
                 individual_to_class, feasible_individuals,
-                promoted_individuals, excluded_individuals,
+                promoted_individuals, rare_excluded,
                 device, emb_dim, step_to_evals[global_step], output_dir,
                 gallery_threshold, list(step_history),
                 elapsed, best_lr, best_size, best_embedding_dim,
