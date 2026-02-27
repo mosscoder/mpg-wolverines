@@ -1461,7 +1461,6 @@ def run_step_count_sweep(model_name, args):
     print("\nLoading dataset...")
     dataset = load_reidentification_dataset()
     metadata_cache = build_metadata_cache(dataset)
-    test_dataset = load_reidentification_test_dataset()
 
     feasibility_config = load_feasibility_config()
     if not feasibility_config:
@@ -1471,23 +1470,6 @@ def run_step_count_sweep(model_name, args):
     feasible_individuals = feasibility_config.get("qualified_individuals", [])
     promoted_individuals = feasibility_config.get("promoted_to_rare", [])
     excluded_individuals = feasibility_config.get("excluded_entirely", [])
-
-    # Load unknown assignment: combined train+test rare source for BA
-    unknown_config_path = 'preprocessing/results/unknown_assignment.json'
-    try:
-        with open(unknown_config_path, 'r') as f:
-            unknown_config = json.load(f)
-        from datasets import concatenate_datasets
-        combined_rare_dataset = concatenate_datasets([dataset, test_dataset])
-        combined_rare_metadata = build_metadata_cache(combined_rare_dataset)
-        rare_excluded = ['HLC21-H1']
-        print(f"  Combined rare pool: {unknown_config['summary']['combined_unknown_images']} images "
-              f"from {unknown_config['summary']['n_unknown_individuals']} unknown individuals")
-    except FileNotFoundError:
-        print(f"Warning: {unknown_config_path} not found, BA will use train-split unknowns only")
-        combined_rare_dataset = dataset
-        combined_rare_metadata = metadata_cache
-        rare_excluded = excluded_individuals
 
     print(f"Using {len(feasible_individuals)} individuals: {', '.join(feasible_individuals)}")
     print(f"\nMode: {mode_label} (threshold>={gallery_threshold})")
@@ -1566,7 +1548,6 @@ def run_step_count_sweep(model_name, args):
     for q_key in q_keys:
         best_metrics[q_key] = {
             "best_recall": 0.0, "best_recall_step": 0,
-            "best_ba": 0.0, "best_ba_step": 0,
         }
 
     global_step = 0
@@ -1600,20 +1581,19 @@ def run_step_count_sweep(model_name, args):
 
             query_quality_metrics, open_set_metrics, val_loss = evaluate_recall_with_openset(
                 model, train_ds, val_ds, individual_to_class, eval_transform, device,
-                combined_rare_dataset, feasible_individuals, combined_rare_metadata,
+                dataset, feasible_individuals, metadata_cache,
                 criterion=arcface_loss, embedding_dim=emb_dim,
                 promoted_individuals=promoted_individuals,
-                excluded_individuals=rare_excluded,
+                excluded_individuals=excluded_individuals,
+                skip_open_set=True,
             )
-
-            cos_thresh = open_set_metrics.get("threshold_calibration", {}).get("global_threshold", 0.0)
 
             # Coverage stats summary
             cstats = sampler.coverage_stats
             min_resets = min(v["resets"] for v in cstats.values())
             max_resets = max(v["resets"] for v in cstats.values())
             print(f"\nStep {global_step:5d}/{step_budget}: Loss={train_loss:.4f}, ValLoss={val_loss:.4f}, "
-                  f"cos_thresh={cos_thresh:.3f}, coverage_resets=[{min_resets},{max_resets}]")
+                  f"coverage_resets=[{min_resets},{max_resets}]")
 
             step_entry = {
                 "step": global_step,
@@ -1625,22 +1605,14 @@ def run_step_count_sweep(model_name, args):
 
             for q_key in q_keys:
                 r1 = query_quality_metrics.get(q_key, {}).get("recall_at_1", 0.0)
-                os_q = open_set_metrics.get("by_quality", {}).get(q_key, {})
-                ba = os_q.get("balanced_accuracy", 0.0)
-                kar = os_q.get("known_accept_rate", 0.0)
-                urr = os_q.get("unknown_reject_rate", 0.0)
-                n_k = os_q.get("n_known_individuals", 0)
-                n_u = os_q.get("n_unknown_individuals", 0)
 
                 bm = best_metrics[q_key]
                 if r1 > bm["best_recall"]:
                     bm["best_recall"] = r1
                     bm["best_recall_step"] = global_step
-                if ba > bm["best_ba"]:
-                    bm["best_ba"] = ba
-                    bm["best_ba_step"] = global_step
 
-                print(f"  {q_key}: R@1={r1:.4f}, BA={ba:.4f} (K={kar:.2f}[{n_k}], U={urr:.2f}[{n_u}])")
+                n_q = query_quality_metrics.get(q_key, {}).get("count", 0)
+                print(f"  {q_key}: R@1={r1:.4f} (n={n_q})")
 
             step_history.append(step_entry)
 
@@ -1659,8 +1631,7 @@ def run_step_count_sweep(model_name, args):
     print(f"\nBest metrics by query quality:")
     for q_key in q_keys:
         bm = best_metrics[q_key]
-        print(f"  {q_key}: R@1={bm['best_recall']:.4f} (step {bm['best_recall_step']}), "
-              f"BA={bm['best_ba']:.4f} (step {bm['best_ba_step']})")
+        print(f"  {q_key}: R@1={bm['best_recall']:.4f} (step {bm['best_recall_step']})")
 
     # Final coverage summary
     final_coverage = sampler.coverage_stats
