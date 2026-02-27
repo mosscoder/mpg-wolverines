@@ -251,11 +251,14 @@ def collect_strategies_data(results: ResultsCollection, target_metric: str = 'r1
             query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
             break
 
+    nonzero_gal = [t for t in gallery_thresholds if t > 0.0]
+    nonzero_q = [q for q in query_thresholds if q != 'q>=0.0']
+
     strategy_configs = {
-        'none':          {'gal': [0.0],             'q': ['q>=0.0'],      'label': 'None'},
-        'gallery':       {'gal': gallery_thresholds, 'q': ['q>=0.0'],      'label': 'Gallery'},
-        'query':         {'gal': [0.0],             'q': query_thresholds, 'label': 'Query'},
-        'gallery_query': {'gal': gallery_thresholds, 'q': query_thresholds, 'label': 'Gallery + Query'},
+        'none':          {'gal': [0.0],      'q': ['q>=0.0'],  'label': 'None'},
+        'gallery':       {'gal': nonzero_gal, 'q': ['q>=0.0'],  'label': 'Gallery'},
+        'query':         {'gal': [0.0],      'q': nonzero_q,    'label': 'Query'},
+        'gallery_query': {'gal': nonzero_gal, 'q': nonzero_q,    'label': 'Gallery + Query'},
     }
 
     strategies = {}
