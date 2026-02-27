@@ -869,12 +869,10 @@ def load_best_hygiene_config(model_name, criterion='harmonic_mean', threshold_fi
                 for history in all_histories:
                     for entry in history:
                         if entry['step'] == step_num:
-                            if criterion == 'recall':
-                                s = entry.get('query_quality_metrics', {}).get(q_key, {}).get('recall_at_1')
-                            elif criterion == 'balanced_accuracy':
-                                s = entry.get('test_open_set', {}).get('by_quality', {}).get(q_key, {}).get('balanced_accuracy')
-                            else:
-                                raise ValueError(f"Unknown criterion: {criterion}")
+                            # Always select by val recall (the only val metric;
+                            # val skips open-set BA).  Test metrics are reported
+                            # but never used for model/step selection.
+                            s = entry.get('query_quality_metrics', {}).get(q_key, {}).get('recall_at_1')
                             if s is not None:
                                 scores.append(s)
                             break

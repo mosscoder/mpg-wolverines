@@ -31,7 +31,7 @@ from utils.reid_plotting_figures import (  # noqa: F401
 
 # Settings for diagnostic functions (print_summary_table, plot_cosine_threshold).
 # Note: The main figure uses hardcoded 'recall' criterion.
-DEFAULT_BEST_EPOCH_CRITERION = 'recall'
+DEFAULT_BEST_STEP_CRITERION = 'recall'
 DEFAULT_QUALITY_THRESHOLD = 'q>=0.0'
 
 
@@ -67,114 +67,104 @@ def load_hygiene_results(results_dir: str) -> ResultsCollection:
     return ResultsCollection(results)
 
 
-def compute_epoch_metric(h: dict, criterion: str, query_thresh: str = "q>=0.0") -> float:
+def get_val_recall(h: dict, query_thresh: str = "q>=0.0") -> float:
     """
-    Compute a single metric value for one epoch record.
+    Extract val recall@1 from a step history record (for step selection).
 
-    Args:
-        h: Single epoch history record
-        criterion: One of 'harmonic_mean', 'ba', 'recall', 'recall_only', 'ba_only'
-        query_thresh: Quality threshold key (e.g., "q>=0.0")
+    Val is the only metric available for model selection — the hygiene sweep
+    evaluates open-set BA only on the test split.
 
     Returns:
-        Metric value, or None if not computable
+        Val recall@1, or None if not available
     """
-    recall = None
-    ba = None
-
     if 'query_quality_metrics' in h and query_thresh in h['query_quality_metrics']:
-        recall = h['query_quality_metrics'][query_thresh].get('recall_at_1')
+        return h['query_quality_metrics'][query_thresh].get('recall_at_1')
+    return None
 
-    if 'open_set' in h:
-        by_quality = h['open_set'].get('by_quality', {})
+
+def get_test_recall(h: dict, query_thresh: str = "q>=0.0") -> float:
+    """Extract test recall@1 from a step history record (for reporting)."""
+    if 'test_query_quality_metrics' in h and query_thresh in h['test_query_quality_metrics']:
+        return h['test_query_quality_metrics'][query_thresh].get('recall_at_1')
+    return None
+
+
+def get_test_ba(h: dict, query_thresh: str = "q>=0.0") -> float:
+    """Extract test balanced accuracy from a step history record (for reporting)."""
+    if 'test_open_set' in h:
+        by_quality = h['test_open_set'].get('by_quality', {})
         if query_thresh in by_quality:
-            ba = by_quality[query_thresh].get('balanced_accuracy')
-
-    if criterion == 'recall' or criterion == 'recall_only':
-        return recall
-    elif criterion == 'ba' or criterion == 'ba_only':
-        return ba
-    elif criterion == 'harmonic_mean':
-        if recall is not None and ba is not None and (recall + ba) > 0:
-            return 2 * recall * ba / (recall + ba)
-        return None
-    elif criterion == 'arithmetic_mean':
-        if recall is not None and ba is not None:
-            return (recall + ba) / 2
-        return None
-    elif criterion == 'geometric_mean':
-        if recall is not None and ba is not None and recall > 0 and ba > 0:
-            return np.sqrt(recall * ba)
-        return None
-    else:
-        raise ValueError(f"Unknown criterion: {criterion}")
+            return by_quality[query_thresh].get('balanced_accuracy')
+    return None
 
 
-def find_best_epoch(all_histories: List[List[dict]],
-                    criterion: str = "harmonic_mean",
-                    query_thresh: str = "q>=0.0") -> Tuple[int, float, dict]:
+def find_best_step(all_histories: List[List[dict]],
+                   query_thresh: str = "q>=0.0",
+                   **_kwargs) -> Tuple[int, float, dict]:
     """
-    Find epoch with best mean metric across seeds.
+    Find step with best mean val recall@1 across seeds.
+
+    Step selection always uses val recall (the only val metric; hygiene
+    skips open-set BA on val).  Test metrics at the chosen step are
+    returned in the details dict for informational purposes only.
 
     Returns:
-        Tuple of (best_epoch, best_mean_metric, details_dict)
+        Tuple of (best_step, best_mean_val_recall, details_dict)
     """
     if not all_histories or not all_histories[0]:
         return 50, 0.0, {}
 
-    eval_epochs = []
+    eval_steps = []
     for h in all_histories[0]:
-        if 'query_quality_metrics' in h or 'open_set' in h:
-            eval_epochs.append(h['epoch'])
+        if 'query_quality_metrics' in h:
+            eval_steps.append(h['step'])
 
-    if not eval_epochs:
+    if not eval_steps:
         return 50, 0.0, {}
 
-    best_epoch = None
+    best_step = None
     best_mean = -1
     best_details = {}
 
-    for epoch in eval_epochs:
-        metric_values = []
-        recall_values = []
-        ba_values = []
+    for step in eval_steps:
+        val_recall_values = []
+        test_recall_values = []
+        test_ba_values = []
 
         for history in all_histories:
             for h in history:
-                if h['epoch'] == epoch:
-                    metric = compute_epoch_metric(h, criterion, query_thresh)
-                    if metric is not None:
-                        metric_values.append(metric)
-
-                    r = compute_epoch_metric(h, 'recall', query_thresh)
-                    b = compute_epoch_metric(h, 'ba', query_thresh)
+                if h['step'] == step:
+                    r = get_val_recall(h, query_thresh)
                     if r is not None:
-                        recall_values.append(r)
-                    if b is not None:
-                        ba_values.append(b)
+                        val_recall_values.append(r)
+                    tr = get_test_recall(h, query_thresh)
+                    if tr is not None:
+                        test_recall_values.append(tr)
+                    tb = get_test_ba(h, query_thresh)
+                    if tb is not None:
+                        test_ba_values.append(tb)
                     break
 
-        if metric_values:
-            mean_metric = np.mean(metric_values)
-            if mean_metric > best_mean:
-                best_mean = mean_metric
-                best_epoch = epoch
+        if val_recall_values:
+            mean_val_recall = np.mean(val_recall_values)
+            if mean_val_recall > best_mean:
+                best_mean = mean_val_recall
+                best_step = step
                 best_details = {
-                    'recall': np.mean(recall_values) if recall_values else 0.0,
-                    'ba': np.mean(ba_values) if ba_values else 0.0,
-                    'criterion': criterion,
-                    'criterion_value': mean_metric
+                    'val_recall': mean_val_recall,
+                    'test_recall': np.mean(test_recall_values) if test_recall_values else 0.0,
+                    'test_ba': np.mean(test_ba_values) if test_ba_values else 0.0,
                 }
 
-    return best_epoch or 50, best_mean, best_details
+    return best_step or 50, best_mean, best_details
 
 
-def find_optimal_epoch(all_histories: List[List[dict]],
-                       query_thresh: str = None) -> Tuple[int, float, dict]:
-    """Find optimal epoch using the configured default criterion."""
+def find_optimal_step(all_histories: List[List[dict]],
+                      query_thresh: str = None) -> Tuple[int, float, dict]:
+    """Find optimal step using the configured default criterion."""
     if query_thresh is None:
         query_thresh = DEFAULT_QUALITY_THRESHOLD
-    return find_best_epoch(all_histories, criterion=DEFAULT_BEST_EPOCH_CRITERION, query_thresh=query_thresh)
+    return find_best_step(all_histories, criterion=DEFAULT_BEST_STEP_CRITERION, query_thresh=query_thresh)
 
 
 def collect_strategies_data(results: ResultsCollection) -> dict:
@@ -188,7 +178,7 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
     # Discover query thresholds from result data
     query_thresholds = ['q>=0.0']
     for r in results:
-        history = r.get('epoch_history', [])
+        history = r.get('step_history', [])
         if history and 'query_quality_metrics' in history[0]:
             query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
             break
@@ -216,28 +206,21 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
         # --- Baseline: gallery_threshold=0.0, eval q>=0.0 ---
         baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
         if len(baseline_filtered) > 0:
-            all_histories = [r.get('epoch_history', []) for r in baseline_filtered]
+            all_histories = [r.get('step_history', []) for r in baseline_filtered]
             if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                # R@1: select epoch that maximizes recall
-                best_r1_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh='q>=0.0')
+                # Select best step by val recall, report test metrics
+                best_step, _, _ = find_best_step(all_histories, query_thresh='q>=0.0')
                 r1_values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['epoch'] == best_r1_epoch:
-                            if 'query_quality_metrics' in h and 'q>=0.0' in h['query_quality_metrics']:
-                                r1_values.append(h['query_quality_metrics']['q>=0.0']['recall_at_1'])
-                            break
-
-                # BA: select epoch that maximizes balanced accuracy
-                best_ba_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh='q>=0.0')
                 ba_values = []
                 for history in all_histories:
                     for h in history:
-                        if h['epoch'] == best_ba_epoch:
-                            if 'open_set' in h:
-                                by_quality = h['open_set'].get('by_quality', {})
-                                if 'q>=0.0' in by_quality:
-                                    ba_values.append(by_quality['q>=0.0']['balanced_accuracy'])
+                        if h['step'] == best_step:
+                            tr = get_test_recall(h, 'q>=0.0')
+                            if tr is not None:
+                                r1_values.append(tr)
+                            tb = get_test_ba(h, 'q>=0.0')
+                            if tb is not None:
+                                ba_values.append(tb)
                             break
 
                 if r1_values:
@@ -266,26 +249,26 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
                 continue
-            all_histories = [r.get('epoch_history', []) for r in filtered]
+            all_histories = [r.get('step_history', []) for r in filtered]
             if not all_histories or not all_histories[0]:
                 continue
             if 'query_quality_metrics' not in all_histories[0][0]:
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=q_thresh)
+                best_step, _, _ = find_best_step(all_histories, query_thresh=q_thresh)
 
                 r1_values = []
                 ba_values = []
                 for history in all_histories:
                     for h in history:
-                        if h['epoch'] == best_epoch:
-                            if 'query_quality_metrics' in h and q_thresh in h['query_quality_metrics']:
-                                r1_values.append(h['query_quality_metrics'][q_thresh]['recall_at_1'])
-                            if 'open_set' in h:
-                                by_quality = h['open_set'].get('by_quality', {})
-                                if q_thresh in by_quality:
-                                    ba_values.append(by_quality[q_thresh]['balanced_accuracy'])
+                        if h['step'] == best_step:
+                            tr = get_test_recall(h, q_thresh)
+                            if tr is not None:
+                                r1_values.append(tr)
+                            tb = get_test_ba(h, q_thresh)
+                            if tb is not None:
+                                ba_values.append(tb)
                             break
 
                 if r1_values:
@@ -324,23 +307,22 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
             if len(filtered) == 0:
                 continue
-            all_histories = [r.get('epoch_history', []) for r in filtered]
+            all_histories = [r.get('step_history', []) for r in filtered]
             if not all_histories or not all_histories[0]:
                 continue
-            if 'open_set' not in all_histories[0][0]:
+            if 'test_open_set' not in all_histories[0][0]:
                 continue
 
             for q_thresh in query_thresholds:
-                best_epoch, _, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=q_thresh)
+                best_step, _, _ = find_best_step(all_histories, query_thresh=q_thresh)
 
                 ba_values = []
                 for history in all_histories:
                     for h in history:
-                        if h['epoch'] == best_epoch:
-                            if 'open_set' in h:
-                                by_quality = h['open_set'].get('by_quality', {})
-                                if q_thresh in by_quality:
-                                    ba_values.append(by_quality[q_thresh]['balanced_accuracy'])
+                        if h['step'] == best_step:
+                            tb = get_test_ba(h, q_thresh)
+                            if tb is not None:
+                                ba_values.append(tb)
                             break
 
                 if ba_values:
@@ -376,19 +358,19 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
             if len(filtered) == 0:
                 continue
 
-            all_histories = [r.get('epoch_history', []) for r in filtered]
+            all_histories = [r.get('step_history', []) for r in filtered]
             if not all_histories or not all_histories[0]:
                 continue
 
-            best_epoch, criterion_value, details = find_optimal_epoch(all_histories)
+            best_step, criterion_value, details = find_optimal_step(all_histories)
 
             recall_values = []
             ba_values = []
             for history in all_histories:
                 for h in history:
-                    if h['epoch'] == best_epoch:
-                        r = compute_epoch_metric(h, 'recall', DEFAULT_QUALITY_THRESHOLD)
-                        b = compute_epoch_metric(h, 'ba', DEFAULT_QUALITY_THRESHOLD)
+                    if h['step'] == best_step:
+                        r = get_test_recall(h, DEFAULT_QUALITY_THRESHOLD)
+                        b = get_test_ba(h, DEFAULT_QUALITY_THRESHOLD)
                         if r is not None:
                             recall_values.append(r)
                         if b is not None:
@@ -405,7 +387,7 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
                 rows.append({
                     'gallery_threshold': threshold,
                     'gallery_size': gallery_size,
-                    'best_epoch': best_epoch,
+                    'best_step': best_step,
                     'recall_at_1': mean_recall,
                     'recall_at_1_ci': recall_ci,
                     'balanced_accuracy': mean_ba,
@@ -423,7 +405,7 @@ def save_summary_table(results: ResultsCollection, output_dir: str):
 def print_summary_table(results: ResultsCollection):
     """Print summary statistics for open-set evaluation."""
     print("\n" + "=" * 100)
-    print("SUMMARY TABLE: Best Epoch by R@1 and BA (independent)")
+    print("SUMMARY TABLE: Best Step by R@1 and BA (independent)")
     print("=" * 100)
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -432,14 +414,14 @@ def print_summary_table(results: ResultsCollection):
     # Discover available query thresholds from data
     query_thresholds = [DEFAULT_QUALITY_THRESHOLD]
     for r in results:
-        history = r.get('epoch_history', [])
+        history = r.get('step_history', [])
         if history and 'query_quality_metrics' in history[0]:
             query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
             break
 
     print(f"{'Thresh':<8} {'Gallery':<8} "
-          f"{'R@1_epoch':<10} {'R@1_mean':<10} {'R@1_query_t':<12} "
-          f"{'BA_epoch':<9} {'BA_mean':<9} {'BA_query_t':<11} {'Seeds':<6}")
+          f"{'R@1_step':<10} {'R@1_mean':<10} {'R@1_query_t':<12} "
+          f"{'BA_step':<9} {'BA_mean':<9} {'BA_query_t':<11} {'Seeds':<6}")
     print("-" * 100)
 
     metrics = {}
@@ -449,32 +431,30 @@ def print_summary_table(results: ResultsCollection):
             if len(filtered) == 0:
                 continue
 
-            all_histories = [r.get('epoch_history', []) for r in filtered]
+            all_histories = [r.get('step_history', []) for r in filtered]
             if not all_histories or not all_histories[0]:
                 continue
 
-            # Find best R@1 across query thresholds
-            best_r1_epoch, best_r1_mean, best_r1_qt = None, -1, query_thresholds[0]
+            # Find best step by val recall, report test R@1 and BA
+            best_r1_step, best_r1_mean, best_r1_qt = None, -1, query_thresholds[0]
+            best_ba_step, best_ba_mean, best_ba_qt = None, -1, query_thresholds[0]
             for qt in query_thresholds:
-                epoch, mean_val, _ = find_best_epoch(all_histories, criterion='recall', query_thresh=qt)
-                if mean_val is not None and mean_val > best_r1_mean:
-                    best_r1_epoch, best_r1_mean, best_r1_qt = epoch, mean_val, qt
-
-            # Find best BA across query thresholds
-            best_ba_epoch, best_ba_mean, best_ba_qt = None, -1, query_thresholds[0]
-            for qt in query_thresholds:
-                epoch, mean_val, _ = find_best_epoch(all_histories, criterion='ba', query_thresh=qt)
-                if mean_val is not None and mean_val > best_ba_mean:
-                    best_ba_epoch, best_ba_mean, best_ba_qt = epoch, mean_val, qt
+                step, mean_val, details = find_best_step(all_histories, query_thresh=qt)
+                test_r1 = details.get('test_recall', 0.0)
+                test_ba = details.get('test_ba', 0.0)
+                if test_r1 > best_r1_mean:
+                    best_r1_step, best_r1_mean, best_r1_qt = step, test_r1, qt
+                if test_ba > best_ba_mean:
+                    best_ba_step, best_ba_mean, best_ba_qt = step, test_ba, qt
 
             n_seeds = len(all_histories)
 
             print(f"{threshold:<8.2f} {gallery_size:<8} "
-                  f"{best_r1_epoch:<10} {best_r1_mean:<10.4f} {best_r1_qt:<12} "
-                  f"{best_ba_epoch:<9} {best_ba_mean:<9.4f} {best_ba_qt:<11} {n_seeds:<6}")
+                  f"{best_r1_step:<10} {best_r1_mean:<10.4f} {best_r1_qt:<12} "
+                  f"{best_ba_step:<9} {best_ba_mean:<9.4f} {best_ba_qt:<11} {n_seeds:<6}")
             metrics[(threshold, gallery_size)] = {
-                'r1_epoch': best_r1_epoch, 'r1_mean': best_r1_mean, 'r1_query_t': best_r1_qt,
-                'ba_epoch': best_ba_epoch, 'ba_mean': best_ba_mean, 'ba_query_t': best_ba_qt,
+                'r1_step': best_r1_step, 'r1_mean': best_r1_mean, 'r1_query_t': best_r1_qt,
+                'ba_step': best_ba_step, 'ba_mean': best_ba_mean, 'ba_query_t': best_ba_qt,
                 'n_seeds': n_seeds
             }
 
@@ -484,10 +464,10 @@ def print_summary_table(results: ResultsCollection):
         print("-" * 100)
         d = metrics[best_r1_key]
         print(f"Best R@1: thresh={best_r1_key[0]}, gallery={best_r1_key[1]}, "
-              f"epoch={d['r1_epoch']}, R@1={d['r1_mean']:.4f}, query_t={d['r1_query_t']}")
+              f"step={d['r1_step']}, R@1={d['r1_mean']:.4f}, query_t={d['r1_query_t']}")
         d = metrics[best_ba_key]
         print(f"Best BA:  thresh={best_ba_key[0]}, gallery={best_ba_key[1]}, "
-              f"epoch={d['ba_epoch']}, BA={d['ba_mean']:.4f}, query_t={d['ba_query_t']}")
+              f"step={d['ba_step']}, BA={d['ba_mean']:.4f}, query_t={d['ba_query_t']}")
 
 
 def run_single_model(model_name: str, results_dir: str, output_dir: str):

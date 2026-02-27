@@ -349,7 +349,7 @@ def create_test_performance_table(model_data: dict, output_dir: str,
                 'Gallery Size': cfg.get('gallery_size', ''),
                 'Gallery Thresh': cfg.get('threshold', ''),
                 'Query Thresh': cfg.get('query_quality_threshold', ''),
-                'Epoch': cfg.get('best_epoch', ''),
+                'Step': cfg.get('best_step', ''),
             })
 
     if not rows:
@@ -358,7 +358,7 @@ def create_test_performance_table(model_data: dict, output_dir: str,
 
     # Build xlsx with same styling as create_thresholds_table
     columns = ['Backbone', 'Filter Strategy', score_label,
-               'Gallery Size', 'Gallery Thresh', 'Query Thresh', 'Epoch']
+               'Gallery Size', 'Gallery Thresh', 'Query Thresh', 'Step']
 
     serif_font = Font(name='Times New Roman', size=11)
     serif_bold = Font(name='Times New Roman', size=11, bold=True)

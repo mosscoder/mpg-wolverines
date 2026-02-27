@@ -150,7 +150,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
 
 
 def plot_recall_curves(results: ResultsCollection, output_path: str):
-    """Create faceted figure showing recall@1 curves over epochs."""
+    """Create faceted figure showing recall@1 curves over steps."""
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -158,7 +158,7 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
     # Pick middle query threshold from result data
     q_key = "q>=0.0"
     for r in results:
-        history = r.get('epoch_history', [])
+        history = r.get('step_history', [])
         if history and 'query_quality_metrics' in history[0]:
             available = sorted(history[0]['query_quality_metrics'].keys())
             q_key = available[len(available) // 2]
@@ -176,10 +176,10 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
 
             for r in filtered:
                 seed = r['seed']
-                history = r.get('epoch_history', [])
-                epochs = [h['epoch'] for h in history]
+                history = r.get('step_history', [])
+                steps = [h['step'] for h in history]
                 recall_values = [h['query_quality_metrics'][q_key]['recall_at_1'] for h in history]
-                ax.plot(epochs, recall_values, color=seed_colors[seed], alpha=0.8, linewidth=1)
+                ax.plot(steps, recall_values, color=seed_colors[seed], alpha=0.8, linewidth=1)
 
             if i == 0:
                 ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
@@ -193,7 +193,7 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
         for s in range(8)
     ]
     fig.legend(handles=legend_elements, loc='upper right', fontsize=9, title='Seed')
-    fig.supxlabel('Epoch', fontsize=12)
+    fig.supxlabel('Step', fontsize=12)
     fig.supylabel('Recall@1 (val)', fontsize=12)
     fig.suptitle(f'Validation Recall@1 ({q_key}) by Configuration (Raw Cosine)', fontsize=14, y=1.01)
 
@@ -203,7 +203,7 @@ def plot_recall_curves(results: ResultsCollection, output_path: str):
 
 
 def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
-    """Create faceted figure showing validation loss curves over epochs."""
+    """Create faceted figure showing validation loss curves over steps."""
     from matplotlib.lines import Line2D
 
     gallery_sizes = sorted(results.get_unique('gallery_size'))
@@ -221,12 +221,12 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
 
             for r in filtered:
                 seed = r['seed']
-                history = r.get('epoch_history', [])
+                history = r.get('step_history', [])
                 if not history or 'val_loss' not in history[0]:
                     continue
-                epochs = [h['epoch'] for h in history]
+                steps = [h['step'] for h in history]
                 val_losses = [h['val_loss'] for h in history]
-                ax.plot(epochs, val_losses, color=seed_colors[seed], alpha=0.8, linewidth=1)
+                ax.plot(steps, val_losses, color=seed_colors[seed], alpha=0.8, linewidth=1)
 
             if i == 0:
                 ax.set_title(f'thresh={threshold:.1f}', fontsize=9)
@@ -239,7 +239,7 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
         for s in range(8)
     ]
     fig.legend(handles=legend_elements, loc='upper right', fontsize=9, title='Seed')
-    fig.supxlabel('Epoch', fontsize=12)
+    fig.supxlabel('Step', fontsize=12)
     fig.supylabel('Validation Loss (ArcFace)', fontsize=12)
     fig.suptitle('Validation Loss by Configuration (Raw Cosine)', fontsize=14, y=1.01)
 
@@ -250,7 +250,7 @@ def plot_validation_loss_curves(results: ResultsCollection, output_path: str):
 
 def plot_cosine_threshold(results: ResultsCollection, output_path: str):
     """Plot cosine similarity decision threshold by gallery size and quality threshold."""
-    from utils.reid_plotting import find_optimal_epoch
+    from utils.reid_plotting import find_optimal_step
 
     fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -269,14 +269,14 @@ def plot_cosine_threshold(results: ResultsCollection, output_path: str):
             if len(filtered) == 0:
                 continue
 
-            all_histories = [r.get('epoch_history', []) for r in filtered]
-            best_epoch, _, _ = find_optimal_epoch(all_histories, 'q>=0.0')
+            all_histories = [r.get('step_history', []) for r in filtered]
+            best_step, _, _ = find_optimal_step(all_histories, 'q>=0.0')
 
             thresh_values = []
             for history in all_histories:
                 for h in history:
-                    if h['epoch'] == best_epoch and 'open_set' in h:
-                        open_set = h['open_set']
+                    if h['step'] == best_step and 'test_open_set' in h:
+                        open_set = h['test_open_set']
                         ct = open_set['threshold_calibration']['global_threshold']
                         thresh_values.append(ct)
                         break
