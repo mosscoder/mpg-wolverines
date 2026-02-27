@@ -1190,7 +1190,7 @@ def run_final_test(model_name, args, seed, task_name):
         gallery_embeddings, gallery_labels, arcface_loss, class_to_name, device
     )
 
-    print(f"\nFresh ArcFace center p2 thresholds (global mean={global_threshold:.4f}):")
+    print(f"\nFresh ArcFace center p10 thresholds (global mean={global_threshold:.4f}):")
     for name, t in sorted(per_individual_thresholds.items()):
         print(f"    {name}: {t:.4f}")
 
@@ -1694,10 +1694,10 @@ def run_step_count_sweep(model_name, args):
 
 def load_eval_schedule(model_name, gallery_threshold):
     """
-    For each (metric, query_q), find the best step by max-mean-score
+    For each query_q, find the best step by max-mean R@1
     across 5 seeds from the step-count sweep.
 
-    Returns: list of (metric, q_thresh, best_step, mean_score)
+    Returns: list of (q_thresh, best_step, mean_r1)
     """
     config = MODEL_CONFIGS[model_name]
     results_dir = os.path.join(config["experiment_dir"], "results", "step_count")
@@ -1710,32 +1710,28 @@ def load_eval_schedule(model_name, gallery_threshold):
             seed_results.append(json.load(f))
 
     schedule = []
-    for metric in ['recall', 'ba']:
-        for q_thresh in QUERY_QUALITY_THRESHOLDS:
-            q_key = f"q>={q_thresh}"
+    for q_thresh in QUERY_QUALITY_THRESHOLDS:
+        q_key = f"q>={q_thresh}"
 
-            # Build step -> [score_seed0, score_seed1, ...] mapping
-            step_scores = defaultdict(list)
-            for sr in seed_results:
-                for entry in sr['step_history']:
-                    step = entry['step']
-                    if metric == 'recall':
-                        score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
-                    else:
-                        score = entry['open_set_metrics'].get('by_quality', {}).get(q_key, {}).get('balanced_accuracy', 0.0)
-                    step_scores[step].append(score)
+        # Build step -> [r1_seed0, r1_seed1, ...] mapping
+        step_scores = defaultdict(list)
+        for sr in seed_results:
+            for entry in sr['step_history']:
+                step = entry['step']
+                score = entry['query_quality_metrics'].get(q_key, {}).get('recall_at_1', 0.0)
+                step_scores[step].append(score)
 
-            # Pick step with highest mean across seeds
-            best_step = None
-            best_mean = -1.0
-            for step, scores in step_scores.items():
-                mean_score = sum(scores) / len(scores)
-                if mean_score > best_mean:
-                    best_mean = mean_score
-                    best_step = step
+        # Pick step with highest mean R@1 across seeds
+        best_step = None
+        best_mean = -1.0
+        for step, scores in step_scores.items():
+            mean_score = sum(scores) / len(scores)
+            if mean_score > best_mean:
+                best_mean = mean_score
+                best_step = step
 
-            if best_step is not None:
-                schedule.append((metric, q_thresh, best_step, best_mean))
+        if best_step is not None:
+            schedule.append((q_thresh, best_step, best_mean))
 
     return schedule
 
@@ -1750,9 +1746,9 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
                        aug_flags, model_config, seed, gallery_info, query_info,
                        all_gallery_indices, all_query_indices, rare_indices_cache):
     """
-    Evaluate at a scheduled step and save one JSON per (metric, query_q) combo.
+    Evaluate at a scheduled step and save one JSON per query_q combo.
 
-    schedule_entries: list of (metric, q_thresh, step, sweep_score) for this step.
+    schedule_entries: list of (q_thresh, step, sweep_score) for this step.
     rare_indices_cache: dict with pre-fetched rare/unknown data.
     """
     model.eval()
@@ -1829,8 +1825,8 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
     else:
         scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
 
-    # Evaluate each (metric, q_thresh) combo at this step
-    for metric, q_thresh, step, sweep_score in schedule_entries:
+    # Evaluate each q_thresh combo at this step
+    for q_thresh, step, sweep_score in schedule_entries:
         q_key = f"q>={q_thresh}"
 
         # ---- R@1 (closed-set, macro-averaged) ----
@@ -1880,17 +1876,16 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
         n_known = ba_data.get('n_known_individuals', 0)
         n_unknown = ba_data.get('n_unknown_individuals', 0)
 
-        print(f"    {metric} {q_key}: R@1={recall_at_1:.4f} (n={n_query}), "
+        print(f"    {q_key}: R@1={recall_at_1:.4f} (n={n_query}), "
               f"BA={ba:.4f} (K={kar:.2f}[{n_known}], U={urr:.2f}[{n_unknown}])")
 
         # ---- Save JSON ----
         result = {
             "config": {
-                "metric": metric,
                 "gallery_threshold": gallery_threshold,
                 "query_threshold": q_thresh,
                 "best_step": step,
-                "sweep_score": sweep_score,
+                "cv_recall_at_1": sweep_score,
                 "learning_rate": best_lr,
                 "image_size": best_size,
                 "embedding_dim": best_embedding_dim,
@@ -1928,7 +1923,7 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
             },
         }
 
-        output_path = os.path.join(output_dir, f"{metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
+        output_path = os.path.join(output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
         os.makedirs(output_dir, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(result, f, indent=2,
@@ -1942,11 +1937,11 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
 
 def run_test_from_step_sweep(model_name, args, gallery_threshold):
     """
-    Final test evaluation using per-(metric, query_q) optimal checkpoints.
+    Final test evaluation using per-query_q optimal checkpoints.
 
     Trains up to the max scheduled step, evaluating at each scheduled step
-    for the (metric, query_q) combos assigned to this gallery_threshold.
-    Best steps are selected by max-mean-score across 5 seeds.
+    for the query_q combos assigned to this gallery_threshold.
+    Best steps are selected by max-mean R@1 across 5 seeds.
     """
     from utils.arcface import ArcFaceLoss, CoverageSampler
     from tqdm import tqdm
@@ -1965,14 +1960,14 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
         print(f"  No combos won for this config. Exiting gracefully.")
         return
 
-    for metric, q_thresh, step, score in schedule:
-        print(f"  {metric} q>={q_thresh}: step={step}, sweep_score={score:.4f}")
+    for q_thresh, step, score in schedule:
+        print(f"  q>={q_thresh}: step={step}, cv_r1={score:.4f}")
 
     # Check for already-completed outputs and filter schedule
     remaining = []
     for entry in schedule:
-        metric, q_thresh, step, score = entry
-        out_path = os.path.join(output_dir, f"{metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
+        q_thresh, step, score = entry
+        out_path = os.path.join(output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
         if os.path.exists(out_path) and not args.overwrite:
             print(f"  SKIP (exists): {out_path}")
         else:
@@ -1987,7 +1982,7 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
     # Group schedule by step
     step_to_evals = defaultdict(list)
     for entry in schedule:
-        metric, q_thresh, step, score = entry
+        q_thresh, step, score = entry
         step_to_evals[step].append(entry)
     eval_steps = sorted(step_to_evals.keys())
     max_step = max(eval_steps)
@@ -2197,9 +2192,9 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
 
     # Summary
     print(f"\nSummary: saved {len(schedule)} JSONs to {output_dir}")
-    for metric, q_thresh, step, score in schedule:
-        print(f"  {metric}_g{gallery_threshold:.2f}_q{q_thresh:.2f}.json "
-              f"(step={step}, sweep={score:.4f})")
+    for q_thresh, step, score in schedule:
+        print(f"  g{gallery_threshold:.2f}_q{q_thresh:.2f}.json "
+              f"(step={step}, cv_r1={score:.4f})")
 
 
 # ============================================================================

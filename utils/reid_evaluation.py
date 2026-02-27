@@ -260,7 +260,7 @@ def compute_arcface_center_thresholds(gallery_embeddings, gallery_labels, criter
         criterion: ArcFaceLoss module (has .weight attribute for centers)
         class_to_name: dict {class_label_int: individual_name}
         device: torch device
-        percentile: Percentile for threshold (default 2 = p2)
+        percentile: Percentile for threshold (default 10 = p10)
 
     Returns:
         (per_individual_thresholds dict, global_threshold float)

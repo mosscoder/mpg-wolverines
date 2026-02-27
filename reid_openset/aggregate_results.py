@@ -48,19 +48,18 @@ def main():
         return
 
     # ---- Recall@1 table ----
-    r1_cols = ['backbone', 'gallery_q', 'query_q', 'R@1',
+    r1_cols = ['backbone', 'gallery_q', 'query_q', 'R@1', 'cv_R@1',
                'lr', 'emb_dim', 'steps']
     r1_rows = []
     for data in all_data:
         cfg = data['config']
-        if cfg['metric'] != 'recall':
-            continue
         res = data['results']
         r1_rows.append({
             'backbone':  cfg['backbone'],
             'gallery_q': f"{cfg['gallery_threshold']:.2f}",
             'query_q':   f"{cfg['query_threshold']:.2f}",
             'R@1':       f"{res['recall_at_1']:.4f}",
+            'cv_R@1':    f"{cfg.get('cv_recall_at_1', 0):.4f}",
             'lr':        cfg['learning_rate'],
             'emb_dim':   cfg['embedding_dim'],
             'steps':     cfg['best_step'],
@@ -76,8 +75,6 @@ def main():
     ba_rows = []
     for data in all_data:
         cfg = data['config']
-        if cfg['metric'] != 'ba':
-            continue
         res = data['results']
         ba_rows.append({
             'backbone':  cfg['backbone'],
