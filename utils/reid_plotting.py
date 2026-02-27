@@ -167,11 +167,79 @@ def find_optimal_step(all_histories: List[List[dict]],
     return find_best_step(all_histories, criterion=DEFAULT_BEST_STEP_CRITERION, query_thresh=query_thresh)
 
 
-def collect_strategies_data(results: ResultsCollection) -> dict:
-    """
-    Collect metrics for all strategies (baseline, optimal R@1, optimal BA).
+def _find_best_combo(results, gsize, gal_thresholds, q_thresholds, target_metric):
+    """Find best gallery x query filter combo for a given gallery size.
 
-    Returns a dict with strategy data that can be used by multiple plotting functions.
+    Args:
+        results: ResultsCollection
+        gsize: Gallery size to filter on
+        gal_thresholds: List of gallery thresholds to try
+        q_thresholds: List of query quality thresholds to try
+        target_metric: 'r1' or 'ba' — which metric to maximize
+
+    Returns:
+        Dict with r1_values, ba_values, gal_thresh, q_thresh, or None
+    """
+    best_mean = -1
+    best_result = None
+
+    for gal_thresh in gal_thresholds:
+        filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+        if len(filtered) == 0:
+            continue
+        all_histories = [r.get('step_history', []) for r in filtered]
+        if not all_histories or not all_histories[0]:
+            continue
+        if 'query_quality_metrics' not in all_histories[0][0]:
+            continue
+
+        for q_thresh in q_thresholds:
+            best_step, _, _ = find_best_step(all_histories, query_thresh=q_thresh)
+
+            r1_values = []
+            ba_values = []
+            for history in all_histories:
+                for h in history:
+                    if h['step'] == best_step:
+                        tr = get_test_recall(h, q_thresh)
+                        if tr is not None:
+                            r1_values.append(tr)
+                        tb = get_test_ba(h, q_thresh)
+                        if tb is not None:
+                            ba_values.append(tb)
+                        break
+
+            if target_metric == 'r1' and r1_values:
+                current_mean = np.mean(r1_values)
+            elif target_metric == 'ba' and ba_values:
+                current_mean = np.mean(ba_values)
+            else:
+                continue
+
+            if current_mean > best_mean:
+                best_mean = current_mean
+                best_result = {
+                    'r1_values': r1_values,
+                    'ba_values': ba_values,
+                    'gal_thresh': gal_thresh,
+                    'q_thresh': q_thresh,
+                }
+
+    return best_result
+
+
+def collect_strategies_data(results: ResultsCollection, target_metric: str = 'r1') -> dict:
+    """
+    Collect metrics for 4 filter strategies across gallery sizes.
+
+    Args:
+        results: ResultsCollection from hygiene sweep
+        target_metric: 'r1' or 'ba' — which metric to optimize filter selection on.
+            Step selection always uses val recall (find_best_step).
+
+    Returns:
+        Dict with keys: 'none', 'gallery', 'query', 'gallery_query'.
+        Each contains label, x, r1/ba arrays with CI bounds, best_gal, best_q.
     """
     gallery_sizes = sorted(results.get_unique('gallery_size'))
     gallery_thresholds = sorted(results.get_unique('threshold'))
@@ -183,165 +251,50 @@ def collect_strategies_data(results: ResultsCollection) -> dict:
             query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
             break
 
-    strategies = {
-        'baseline': {
-            'label': 'None',
-            'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
-            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': []
-        },
-        'optimal': {
-            'label': 'Optimal',
-            'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
-            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
-            'best_gal': [], 'best_q': []
-        },
-        'optimal_ba': {
-            'label': 'Optimal',
-            'x': [], 'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
-            'best_gal': [], 'best_q': []
-        }
+    strategy_configs = {
+        'none':          {'gal': [0.0],             'q': ['q>=0.0'],      'label': 'None'},
+        'gallery':       {'gal': gallery_thresholds, 'q': ['q>=0.0'],      'label': 'Gallery'},
+        'query':         {'gal': [0.0],             'q': query_thresholds, 'label': 'Query'},
+        'gallery_query': {'gal': gallery_thresholds, 'q': query_thresholds, 'label': 'Gallery + Query'},
     }
 
+    strategies = {}
+    for key, cfg in strategy_configs.items():
+        strategies[key] = {
+            'label': cfg['label'],
+            'x': [], 'r1': [], 'r1_ci_lower': [], 'r1_ci_upper': [],
+            'ba': [], 'ba_ci_lower': [], 'ba_ci_upper': [],
+            'best_gal': [], 'best_q': [],
+        }
+
     for gsize in gallery_sizes:
-        # --- Baseline: gallery_threshold=0.0, eval q>=0.0 ---
-        baseline_filtered = results.filter(threshold=0.0, gallery_size=gsize)
-        if len(baseline_filtered) > 0:
-            all_histories = [r.get('step_history', []) for r in baseline_filtered]
-            if all_histories and all_histories[0] and 'query_quality_metrics' in all_histories[0][0]:
-                # Select best step by val recall, report test metrics
-                best_step, _, _ = find_best_step(all_histories, query_thresh='q>=0.0')
-                r1_values = []
-                ba_values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['step'] == best_step:
-                            tr = get_test_recall(h, 'q>=0.0')
-                            if tr is not None:
-                                r1_values.append(tr)
-                            tb = get_test_ba(h, 'q>=0.0')
-                            if tb is not None:
-                                ba_values.append(tb)
-                            break
-
-                if r1_values:
-                    mean_r1 = np.mean(r1_values)
-                    ci_r1 = stats.t.ppf(0.975, len(r1_values) - 1) * stats.sem(r1_values) if len(r1_values) > 1 else 0
-                    strategies['baseline']['x'].append(gsize)
-                    strategies['baseline']['r1'].append(mean_r1)
-                    strategies['baseline']['r1_ci_lower'].append(mean_r1 - ci_r1)
-                    strategies['baseline']['r1_ci_upper'].append(mean_r1 + ci_r1)
-
-                    if ba_values:
-                        mean_ba = np.mean(ba_values)
-                        ci_ba = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
-                        strategies['baseline']['ba'].append(mean_ba)
-                        strategies['baseline']['ba_ci_lower'].append(mean_ba - ci_ba)
-                        strategies['baseline']['ba_ci_upper'].append(mean_ba + ci_ba)
-
-        # --- Optimal: find best gallery x eval quality combo for R@1 ---
-        best_mean_r1 = -1
-        best_r1_values = None
-        best_ba_values = None
-        best_gal_thresh = None
-        best_q_thresh = None
-
-        for gal_thresh in gallery_thresholds:
-            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
-            if len(filtered) == 0:
-                continue
-            all_histories = [r.get('step_history', []) for r in filtered]
-            if not all_histories or not all_histories[0]:
-                continue
-            if 'query_quality_metrics' not in all_histories[0][0]:
+        for key, cfg in strategy_configs.items():
+            result = _find_best_combo(
+                results, gsize, cfg['gal'], cfg['q'], target_metric,
+            )
+            if result is None:
                 continue
 
-            for q_thresh in query_thresholds:
-                best_step, _, _ = find_best_step(all_histories, query_thresh=q_thresh)
+            s = strategies[key]
+            s['x'].append(gsize)
+            s['best_gal'].append(result['gal_thresh'])
+            s['best_q'].append(float(result['q_thresh'].replace('q>=', '')))
 
-                r1_values = []
-                ba_values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['step'] == best_step:
-                            tr = get_test_recall(h, q_thresh)
-                            if tr is not None:
-                                r1_values.append(tr)
-                            tb = get_test_ba(h, q_thresh)
-                            if tb is not None:
-                                ba_values.append(tb)
-                            break
+            r1_values = result['r1_values']
+            if r1_values:
+                mean_r1 = np.mean(r1_values)
+                ci_r1 = stats.t.ppf(0.975, len(r1_values) - 1) * stats.sem(r1_values) if len(r1_values) > 1 else 0
+                s['r1'].append(mean_r1)
+                s['r1_ci_lower'].append(mean_r1 - ci_r1)
+                s['r1_ci_upper'].append(mean_r1 + ci_r1)
 
-                if r1_values:
-                    mean_r1 = np.mean(r1_values)
-                    if mean_r1 > best_mean_r1:
-                        best_mean_r1 = mean_r1
-                        best_r1_values = r1_values
-                        best_ba_values = ba_values
-                        best_gal_thresh = gal_thresh
-                        best_q_thresh = q_thresh
-
-        if best_r1_values:
-            mean_r1 = np.mean(best_r1_values)
-            ci_r1 = stats.t.ppf(0.975, len(best_r1_values) - 1) * stats.sem(best_r1_values) if len(best_r1_values) > 1 else 0
-            strategies['optimal']['x'].append(gsize)
-            strategies['optimal']['r1'].append(mean_r1)
-            strategies['optimal']['r1_ci_lower'].append(mean_r1 - ci_r1)
-            strategies['optimal']['r1_ci_upper'].append(mean_r1 + ci_r1)
-            strategies['optimal']['best_gal'].append(best_gal_thresh)
-            strategies['optimal']['best_q'].append(float(best_q_thresh.replace('q>=', '')))
-
-            if best_ba_values:
-                mean_ba = np.mean(best_ba_values)
-                ci_ba = stats.t.ppf(0.975, len(best_ba_values) - 1) * stats.sem(best_ba_values) if len(best_ba_values) > 1 else 0
-                strategies['optimal']['ba'].append(mean_ba)
-                strategies['optimal']['ba_ci_lower'].append(mean_ba - ci_ba)
-                strategies['optimal']['ba_ci_upper'].append(mean_ba + ci_ba)
-
-        # --- Optimal BA: find best gallery threshold for BA ---
-        best_mean_ba = -1
-        best_ba_values_ba = None
-        best_gal_thresh_ba = None
-        best_q_thresh_ba = None
-
-        for gal_thresh in gallery_thresholds:
-            filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
-            if len(filtered) == 0:
-                continue
-            all_histories = [r.get('step_history', []) for r in filtered]
-            if not all_histories or not all_histories[0]:
-                continue
-            if 'test_open_set' not in all_histories[0][0]:
-                continue
-
-            for q_thresh in query_thresholds:
-                best_step, _, _ = find_best_step(all_histories, query_thresh=q_thresh)
-
-                ba_values = []
-                for history in all_histories:
-                    for h in history:
-                        if h['step'] == best_step:
-                            tb = get_test_ba(h, q_thresh)
-                            if tb is not None:
-                                ba_values.append(tb)
-                            break
-
-                if ba_values:
-                    mean_ba = np.mean(ba_values)
-                    if mean_ba > best_mean_ba:
-                        best_mean_ba = mean_ba
-                        best_ba_values_ba = ba_values
-                        best_gal_thresh_ba = gal_thresh
-                        best_q_thresh_ba = q_thresh
-
-        if best_ba_values_ba:
-            mean_ba = np.mean(best_ba_values_ba)
-            ci_ba = stats.t.ppf(0.975, len(best_ba_values_ba) - 1) * stats.sem(best_ba_values_ba) if len(best_ba_values_ba) > 1 else 0
-            strategies['optimal_ba']['x'].append(gsize)
-            strategies['optimal_ba']['ba'].append(mean_ba)
-            strategies['optimal_ba']['ba_ci_lower'].append(mean_ba - ci_ba)
-            strategies['optimal_ba']['ba_ci_upper'].append(mean_ba + ci_ba)
-            strategies['optimal_ba']['best_gal'].append(best_gal_thresh_ba)
-            strategies['optimal_ba']['best_q'].append(float(best_q_thresh_ba.replace('q>=', '')))
+            ba_values = result['ba_values']
+            if ba_values:
+                mean_ba = np.mean(ba_values)
+                ci_ba = stats.t.ppf(0.975, len(ba_values) - 1) * stats.sem(ba_values) if len(ba_values) > 1 else 0
+                s['ba'].append(mean_ba)
+                s['ba_ci_lower'].append(mean_ba - ci_ba)
+                s['ba_ci_upper'].append(mean_ba + ci_ba)
 
     return strategies
 
@@ -494,10 +447,11 @@ def run_single_model(model_name: str, results_dir: str, output_dir: str):
     tables_dir = os.path.join('reid_openset', 'tables', model_name)
     os.makedirs(tables_dir, exist_ok=True)
 
-    strategies = collect_strategies_data(results)
+    strategies_r1 = collect_strategies_data(results, target_metric='r1')
+    strategies_ba = collect_strategies_data(results, target_metric='ba')
 
-    save_scores_table(strategies, tables_dir)
-    save_thresholds_table(strategies, tables_dir)
+    save_scores_table(strategies_r1, strategies_ba, tables_dir)
+    save_thresholds_table(strategies_r1, strategies_ba, tables_dir)
     save_summary_table(results, tables_dir)
 
     # Diagnostic figures -> reid_openset/figures/{model_name}/
@@ -512,7 +466,7 @@ def run_single_model(model_name: str, results_dir: str, output_dir: str):
     print(f"  Tables: {tables_dir}")
     print(f"  Figures: {figures_dir}")
 
-    return {'strategies': strategies, 'results': results}
+    return {'strategies_r1': strategies_r1, 'strategies_ba': strategies_ba, 'results': results}
 
 
 def run_aggregate(base_dir: str = "reid_openset"):
@@ -539,7 +493,8 @@ def run_aggregate(base_dir: str = "reid_openset"):
             continue
 
         model_data[model_name] = {
-            'strategies': result['strategies'],
+            'strategies_r1': result['strategies_r1'],
+            'strategies_ba': result['strategies_ba'],
             'results': result['results'],
             'label': config['backbone_label'],
         }

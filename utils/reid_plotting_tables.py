@@ -12,31 +12,37 @@ from openpyxl.utils import get_column_letter
 from scipy import stats
 
 
-def save_scores_table(strategies: dict, output_dir: str):
-    """Save scores data as CSV tables."""
+def save_scores_table(strategies_r1: dict, strategies_ba: dict, output_dir: str):
+    """Save scores data as CSV tables.
+
+    Args:
+        strategies_r1: Strategies dict optimized for R@1
+        strategies_ba: Strategies dict optimized for BA
+        output_dir: Directory to save CSVs
+    """
     # R@1 comparison table
     r1_data = []
-    for i, x in enumerate(strategies['baseline']['x']):
+    for i, x in enumerate(strategies_r1['none']['x']):
         row = {'gallery_size': x}
-        if i < len(strategies['baseline']['r1']):
-            row['baseline_r1'] = strategies['baseline']['r1'][i]
-            row['baseline_r1_ci_lower'] = strategies['baseline']['r1_ci_lower'][i]
-            row['baseline_r1_ci_upper'] = strategies['baseline']['r1_ci_upper'][i]
+        if i < len(strategies_r1['none']['r1']):
+            row['baseline_r1'] = strategies_r1['none']['r1'][i]
+            row['baseline_r1_ci_lower'] = strategies_r1['none']['r1_ci_lower'][i]
+            row['baseline_r1_ci_upper'] = strategies_r1['none']['r1_ci_upper'][i]
         r1_data.append(row)
 
-    for i, x in enumerate(strategies['optimal']['x']):
+    for i, x in enumerate(strategies_r1['gallery_query']['x']):
         match = next((r for r in r1_data if r['gallery_size'] == x), None)
         if match is None:
             match = {'gallery_size': x}
             r1_data.append(match)
-        if i < len(strategies['optimal']['r1']):
-            match['optimal_r1'] = strategies['optimal']['r1'][i]
-            match['optimal_r1_ci_lower'] = strategies['optimal']['r1_ci_lower'][i]
-            match['optimal_r1_ci_upper'] = strategies['optimal']['r1_ci_upper'][i]
-            if i < len(strategies['optimal']['best_gal']):
-                match['optimal_gal_thresh'] = strategies['optimal']['best_gal'][i]
-            if i < len(strategies['optimal']['best_q']):
-                match['optimal_query_thresh'] = strategies['optimal']['best_q'][i]
+        if i < len(strategies_r1['gallery_query']['r1']):
+            match['optimal_r1'] = strategies_r1['gallery_query']['r1'][i]
+            match['optimal_r1_ci_lower'] = strategies_r1['gallery_query']['r1_ci_lower'][i]
+            match['optimal_r1_ci_upper'] = strategies_r1['gallery_query']['r1_ci_upper'][i]
+            if i < len(strategies_r1['gallery_query']['best_gal']):
+                match['optimal_gal_thresh'] = strategies_r1['gallery_query']['best_gal'][i]
+            if i < len(strategies_r1['gallery_query']['best_q']):
+                match['optimal_query_thresh'] = strategies_r1['gallery_query']['best_q'][i]
 
     r1_df = pd.DataFrame(r1_data).sort_values('gallery_size')
     if 'baseline_r1' in r1_df.columns and 'optimal_r1' in r1_df.columns:
@@ -48,27 +54,27 @@ def save_scores_table(strategies: dict, output_dir: str):
 
     # Balanced Accuracy comparison table
     ba_data = []
-    for i, x in enumerate(strategies['baseline']['x']):
+    for i, x in enumerate(strategies_ba['none']['x']):
         row = {'gallery_size': x}
-        if i < len(strategies['baseline']['ba']):
-            row['baseline_ba'] = strategies['baseline']['ba'][i]
-            row['baseline_ba_ci_lower'] = strategies['baseline']['ba_ci_lower'][i]
-            row['baseline_ba_ci_upper'] = strategies['baseline']['ba_ci_upper'][i]
+        if i < len(strategies_ba['none']['ba']):
+            row['baseline_ba'] = strategies_ba['none']['ba'][i]
+            row['baseline_ba_ci_lower'] = strategies_ba['none']['ba_ci_lower'][i]
+            row['baseline_ba_ci_upper'] = strategies_ba['none']['ba_ci_upper'][i]
         ba_data.append(row)
 
-    for i, x in enumerate(strategies['optimal_ba']['x']):
+    for i, x in enumerate(strategies_ba['gallery_query']['x']):
         match = next((r for r in ba_data if r['gallery_size'] == x), None)
         if match is None:
             match = {'gallery_size': x}
             ba_data.append(match)
-        if i < len(strategies['optimal_ba']['ba']):
-            match['optimal_ba'] = strategies['optimal_ba']['ba'][i]
-            match['optimal_ba_ci_lower'] = strategies['optimal_ba']['ba_ci_lower'][i]
-            match['optimal_ba_ci_upper'] = strategies['optimal_ba']['ba_ci_upper'][i]
-            if i < len(strategies['optimal_ba']['best_gal']):
-                match['optimal_gal_thresh'] = strategies['optimal_ba']['best_gal'][i]
-            if i < len(strategies['optimal_ba']['best_q']):
-                match['optimal_query_thresh'] = strategies['optimal_ba']['best_q'][i]
+        if i < len(strategies_ba['gallery_query']['ba']):
+            match['optimal_ba'] = strategies_ba['gallery_query']['ba'][i]
+            match['optimal_ba_ci_lower'] = strategies_ba['gallery_query']['ba_ci_lower'][i]
+            match['optimal_ba_ci_upper'] = strategies_ba['gallery_query']['ba_ci_upper'][i]
+            if i < len(strategies_ba['gallery_query']['best_gal']):
+                match['optimal_gal_thresh'] = strategies_ba['gallery_query']['best_gal'][i]
+            if i < len(strategies_ba['gallery_query']['best_q']):
+                match['optimal_query_thresh'] = strategies_ba['gallery_query']['best_q'][i]
 
     ba_df = pd.DataFrame(ba_data).sort_values('gallery_size')
     if 'baseline_ba' in ba_df.columns and 'optimal_ba' in ba_df.columns:
@@ -79,15 +85,21 @@ def save_scores_table(strategies: dict, output_dir: str):
     print(f"Saved BA scores table: {ba_path}")
 
 
-def save_thresholds_table(strategies: dict, output_dir: str):
-    """Save optimal thresholds data as CSV tables."""
+def save_thresholds_table(strategies_r1: dict, strategies_ba: dict, output_dir: str):
+    """Save optimal thresholds data as CSV tables.
+
+    Args:
+        strategies_r1: Strategies dict optimized for R@1
+        strategies_ba: Strategies dict optimized for BA
+        output_dir: Directory to save CSVs
+    """
     r1_thresh_data = []
-    for i, x in enumerate(strategies['optimal']['x']):
+    for i, x in enumerate(strategies_r1['gallery_query']['x']):
         row = {'gallery_size': x}
-        if i < len(strategies['optimal']['best_gal']):
-            row['gallery_threshold'] = strategies['optimal']['best_gal'][i]
-        if i < len(strategies['optimal']['best_q']):
-            row['query_threshold'] = strategies['optimal']['best_q'][i]
+        if i < len(strategies_r1['gallery_query']['best_gal']):
+            row['gallery_threshold'] = strategies_r1['gallery_query']['best_gal'][i]
+        if i < len(strategies_r1['gallery_query']['best_q']):
+            row['query_threshold'] = strategies_r1['gallery_query']['best_q'][i]
         r1_thresh_data.append(row)
 
     r1_df = pd.DataFrame(r1_thresh_data).sort_values('gallery_size')
@@ -96,12 +108,12 @@ def save_thresholds_table(strategies: dict, output_dir: str):
     print(f"Saved R@1-optimized thresholds table: {r1_path}")
 
     ba_thresh_data = []
-    for i, x in enumerate(strategies['optimal_ba']['x']):
+    for i, x in enumerate(strategies_ba['gallery_query']['x']):
         row = {'gallery_size': x}
-        if i < len(strategies['optimal_ba']['best_gal']):
-            row['gallery_threshold'] = strategies['optimal_ba']['best_gal'][i]
-        if i < len(strategies['optimal_ba']['best_q']):
-            row['query_threshold'] = strategies['optimal_ba']['best_q'][i]
+        if i < len(strategies_ba['gallery_query']['best_gal']):
+            row['gallery_threshold'] = strategies_ba['gallery_query']['best_gal'][i]
+        if i < len(strategies_ba['gallery_query']['best_q']):
+            row['query_threshold'] = strategies_ba['gallery_query']['best_q'][i]
         ba_thresh_data.append(row)
 
     ba_df = pd.DataFrame(ba_thresh_data).sort_values('gallery_size')
@@ -140,8 +152,8 @@ def load_test_results(model_name: str) -> dict:
     return by_task
 
 
-def create_thresholds_table(model_data: dict, strategy_key: str,
-                            output_dir: str, filename: str):
+def create_thresholds_table(model_data: dict, strategies_attr: str,
+                            strategy_key: str, output_dir: str, filename: str):
     """Write optimal thresholds as an arXiv-style formatted .xlsx spreadsheet.
 
     Layout (example with 3 backbones):
@@ -153,8 +165,9 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
         ...
 
     Args:
-        model_data: Dict mapping model name -> {"strategies", "results", "label"}
-        strategy_key: 'optimal' (R@1-optimized) or 'optimal_ba' (BA-optimized)
+        model_data: Dict mapping model name -> {"strategies_r1", "strategies_ba", "results", "label"}
+        strategies_attr: Key in model_data entry for strategies dict (e.g. 'strategies_r1')
+        strategy_key: Key within strategies dict (e.g. 'gallery_query')
         output_dir: Directory to save xlsx
         filename: Output filename (e.g. 'best_threshold_rank.xlsx')
     """
@@ -166,13 +179,13 @@ def create_thresholds_table(model_data: dict, strategy_key: str,
     # Collect all gallery sizes across backbones
     all_sizes = sorted(set(
         sz for m in models
-        for sz in model_data[m]['strategies'][strategy_key]['x']
+        for sz in model_data[m][strategies_attr][strategy_key]['x']
     ))
 
     # Build lookup: model -> gallery_size -> (gal_thresh, q_thresh)
     lookup = {}
     for m in models:
-        s = model_data[m]['strategies'][strategy_key]
+        s = model_data[m][strategies_attr][strategy_key]
         lookup[m] = {}
         for i, sz in enumerate(s['x']):
             gal = s['best_gal'][i] if i < len(s['best_gal']) else None
@@ -427,7 +440,7 @@ def create_test_performance_table(model_data: dict, output_dir: str,
 def create_rank1_thresholds_table(model_data: dict, output_dir: str):
     """Create cross-backbone table of R@1-optimized quality thresholds."""
     create_thresholds_table(
-        model_data, 'optimal', output_dir,
+        model_data, 'strategies_r1', 'gallery_query', output_dir,
         'best_threshold_rank.xlsx',
     )
 
@@ -435,6 +448,6 @@ def create_rank1_thresholds_table(model_data: dict, output_dir: str):
 def create_novelty_thresholds_table(model_data: dict, output_dir: str):
     """Create cross-backbone table of BA-optimized quality thresholds."""
     create_thresholds_table(
-        model_data, 'optimal_ba', output_dir,
+        model_data, 'strategies_ba', 'gallery_query', output_dir,
         'best_threshold_novelty.xlsx',
     )

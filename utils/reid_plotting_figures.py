@@ -10,8 +10,8 @@ from scipy import stats
 from utils.results import ResultsCollection
 
 
-def _plot_scores_facet(ax, strategies, baseline_key, optimal_key, metric, colors, ylabel):
-    """Draw one baseline-vs-optimal panel with lines and CI ribbons.
+def _plot_scores_facet(ax, strategies, strategy_keys, metric, colors, ylabel):
+    """Draw multi-strategy panel with lines and CI ribbons.
 
     Does NOT set y-limits — returns CI bounds so the caller can unify axes
     across multiple facets.
@@ -19,18 +19,20 @@ def _plot_scores_facet(ax, strategies, baseline_key, optimal_key, metric, colors
     Args:
         ax: Matplotlib axes
         strategies: Dict from collect_strategies_data()
-        baseline_key: Strategy key for baseline (e.g. 'baseline')
-        optimal_key: Strategy key for optimal (e.g. 'optimal' or 'optimal_ba')
+        strategy_keys: Ordered list of strategy keys to plot
         metric: Metric prefix in strategies dict ('r1' or 'ba')
         colors: Dict mapping strategy keys to colors
         ylabel: Y-axis label string
 
     Returns:
-        (ci_lower_list, ci_upper_list) collected from both strategies
+        (ci_lower_list, ci_upper_list) collected from all strategies
     """
-    gallery_sizes = sorted(set(strategies['baseline']['x'] + strategies[optimal_key]['x']))
+    all_x = set()
+    for key in strategy_keys:
+        all_x.update(strategies[key]['x'])
+    gallery_sizes = sorted(all_x)
 
-    for key in [baseline_key, optimal_key]:
+    for key in strategy_keys:
         s = strategies[key]
         if s['x'] and s[metric]:
             ax.plot(s['x'], s[metric], color=colors[key], linewidth=2.5,
@@ -45,8 +47,11 @@ def _plot_scores_facet(ax, strategies, baseline_key, optimal_key, metric, colors
 
     ax.grid(True, alpha=0.3, axis='y')
 
-    all_ci_lower = strategies[baseline_key].get(f'{metric}_ci_lower', []) + strategies[optimal_key].get(f'{metric}_ci_lower', [])
-    all_ci_upper = strategies[baseline_key].get(f'{metric}_ci_upper', []) + strategies[optimal_key].get(f'{metric}_ci_upper', [])
+    all_ci_lower = []
+    all_ci_upper = []
+    for key in strategy_keys:
+        all_ci_lower.extend(strategies[key].get(f'{metric}_ci_lower', []))
+        all_ci_upper.extend(strategies[key].get(f'{metric}_ci_upper', []))
     return all_ci_lower, all_ci_upper
 
 
@@ -71,11 +76,12 @@ def create_rank1_figure(model_data: dict, output_dir: str):
     """Create 1x3 cross-backbone figure for Recall@1.
 
     Args:
-        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        model_data: Dict mapping model name -> {"strategies_r1", "strategies_ba", "results", "label"}
         output_dir: Directory to save figure
     """
     panel_labels = ['A', 'B', 'C']
-    colors = {'baseline': '#1f77b4', 'optimal': '#2ca02c'}
+    strategy_keys = ['none', 'gallery', 'query', 'gallery_query']
+    colors = {'none': '#888888', 'gallery': '#1f77b4', 'query': '#ff7f0e', 'gallery_query': '#2ca02c'}
     models = list(model_data.keys())
 
     fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
@@ -86,15 +92,15 @@ def create_rank1_figure(model_data: dict, output_dir: str):
     for i, model_name in enumerate(models):
         ax = axes[0, i]
         md = model_data[model_name]
-        strategies = md['strategies']
+        strategies = md['strategies_r1']
 
-        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, 'baseline', 'optimal', 'r1', colors,
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors,
                                           'Wolverine re-identification score (Recall at rank 1)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n\n" + "$\\bf{Image\\ quality\\ filters:}$",
-                  loc='lower right', fontsize=10, title_fontsize=10)
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
+                  loc='lower right', fontsize=7.5, title_fontsize=7.5)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
 
@@ -112,11 +118,12 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
     """Create 1x3 cross-backbone figure for Balanced Accuracy (novelty detection).
 
     Args:
-        model_data: Dict mapping model name -> {"strategies", "results", "label"}
+        model_data: Dict mapping model name -> {"strategies_r1", "strategies_ba", "results", "label"}
         output_dir: Directory to save figure
     """
     panel_labels = ['A', 'B', 'C']
-    colors = {'baseline': '#1f77b4', 'optimal_ba': '#2ca02c'}
+    strategy_keys = ['none', 'gallery', 'query', 'gallery_query']
+    colors = {'none': '#888888', 'gallery': '#1f77b4', 'query': '#ff7f0e', 'gallery_query': '#2ca02c'}
     models = list(model_data.keys())
 
     fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 6), squeeze=False)
@@ -127,15 +134,15 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
     for i, model_name in enumerate(models):
         ax = axes[0, i]
         md = model_data[model_name]
-        strategies = md['strategies']
+        strategies = md['strategies_ba']
 
-        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, 'baseline', 'optimal_ba', 'ba', colors,
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors,
                                           'Novel wolverine detection score (Balanced accuracy)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n\n" + "$\\bf{Image\\ quality\\ filters:}$",
-                  loc='lower right', fontsize=10, title_fontsize=10)
+        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
+                  loc='lower right', fontsize=7.5, title_fontsize=7.5)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
                 fontsize=16, fontweight='bold', va='top', ha='left')
 
