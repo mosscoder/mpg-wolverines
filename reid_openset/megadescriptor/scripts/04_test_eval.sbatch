@@ -1,7 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=test_eval_MD
+#SBATCH --job-name=test_step_eval_MD
 #SBATCH --partition=general
-#SBATCH --array=0-3
+#SBATCH --requeue
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -10,10 +11,9 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/test_eval/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/test_eval/%A_%a.err
 
-# Final Test Evaluation - MegaDescriptor + ArcFace
-# 4 tasks (one per job): closed_filtered, closed_matched, open_filtered, open_matched
-# seed=0, full filtered gallery (no cap), event-matched subsampling for matched tasks
-# Fresh ArcFace center p5 thresholds computed from the trained model
+# Final test evaluation from step-count sweep (3 jobs, one per gallery_q):
+#   idx=0: g>=0.00    idx=1: g>=0.25    idx=2: g>=0.50
+# Each reads 5 seed sweep results, finds best step per (metric, query_q)
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/test_eval
@@ -41,11 +41,10 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run final test evaluation
-python -u -m utils.reid test_eval --model megadescriptor \
+python -u -m utils.reid test_step_eval --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/megadescriptor/results/test \
-    --device gpu
+    --output_dir reid_openset/megadescriptor/results/test_eval \
+    --device gpu --seed 0
 
 # Print completion info
 echo "========================================"

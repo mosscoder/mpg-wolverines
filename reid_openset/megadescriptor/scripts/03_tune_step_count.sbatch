@@ -1,22 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=test_eval_bioclip2
-#SBATCH --partition=general
-#SBATCH --array=0-3
+#SBATCH --job-name=tune_step_count_MD
+#SBATCH --partition=preempt
+#SBATCH --requeue
+#SBATCH --array=0-14
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00
 #SBATCH --exclude=babel-l5-[16,20,24],babel-y5-16,babel-x9-24
-#SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval/%A_%a.out
-#SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval/%A_%a.err
+#SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/step_count/%A_%a.out
+#SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/step_count/%A_%a.err
 
-# Final Test Evaluation - BioCLIP-2 + ArcFace
-# 4 tasks (one per job): closed_filtered, closed_matched, open_filtered, open_matched
-# seed=0, full filtered gallery (no cap), event-matched subsampling for matched tasks
-# Fresh ArcFace center p5 thresholds computed from the trained model
+# Sweep gallery threshold × seed with CoverageSampler (15 jobs = 3 gallery_q × 5 seeds):
+#   idx= 0- 4: g>=0.00, seeds 0-4
+#   idx= 5- 9: g>=0.25, seeds 0-4
+#   idx=10-14: g>=0.50, seeds 0-4
 
 # Create log directory if it doesn't exist
-mkdir -p /home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval
+mkdir -p /home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/step_count
 
 # Navigate to project directory
 cd /home/kdoherty/wolverines
@@ -41,10 +42,9 @@ echo "Node: $SLURMD_NODENAME"
 echo "Start time: $(date)"
 echo "========================================"
 
-# Run final test evaluation
-python -u -m utils.reid test_eval --model bioclip2 \
+python -u -m utils.reid tune_step_count --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
-    --output_dir reid_openset/bioclip2/results/test \
+    --output_dir reid_openset/megadescriptor/results/step_count \
     --device gpu
 
 # Print completion info
