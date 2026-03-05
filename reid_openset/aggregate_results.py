@@ -13,6 +13,7 @@ Produces:
 import json
 import glob
 import os
+import sys
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -371,6 +372,7 @@ def create_test_eval_figures(all_data, out_dir):
 def main():
     # Run from project root
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, project_root)
     os.chdir(project_root)
 
     # ---- Hygiene sweep figures/tables (direct import) ----
