@@ -14,10 +14,12 @@ import numpy as np
 
 
 class _TitleHandler(HandlerBase):
-    """Legend handler that draws no handle, so text aligns with patch icons."""
+    """Legend handler that draws an invisible handle, so text aligns with patch icons."""
     def create_artists(self, legend, orig_handle, xdescent, ydescent,
                        width, height, fontsize, trans):
-        return []
+        patch = mpatches.FancyBboxPatch((0, 0), 0, 0, visible=False,
+                                        transform=trans)
+        return [patch]
 
 def write_table(rows, cols, name, out_dir):
     csv_path = os.path.join(out_dir, f'{name}.csv')
