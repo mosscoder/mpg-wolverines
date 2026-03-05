@@ -28,6 +28,11 @@ def write_table(rows, cols, name, out_dir):
         print(f.read())
 
 
+def _strip_frozen(name):
+    """Remove 'Frozen ' prefix from backbone name for display."""
+    return name.replace('Frozen ', '')
+
+
 def classify_backbone(name):
     """Map full backbone string to short label via substring matching."""
     if 'DINOv3' in name:
@@ -40,16 +45,23 @@ def classify_backbone(name):
 
 
 def create_test_eval_figures(all_data, out_dir):
-    """Create grouped bar charts for Recall@1 and Balanced Accuracy."""
+    """Create grouped bar charts for Recall@1 and Balanced Accuracy.
+
+    X-axis: query threshold, bars grouped by backbone with gallery threshold
+    controlling saturation (higher gallery threshold = darker fill).
+    """
     os.makedirs(out_dir, exist_ok=True)
 
-    # Build records
+    # Build records, keeping full backbone name for display
     records = []
+    backbone_full_names = {}
     for data in all_data:
         cfg = data['config']
         res = data['results']
+        short = classify_backbone(cfg['backbone'])
+        backbone_full_names[short] = _strip_frozen(cfg['backbone'])
         records.append({
-            'backbone': classify_backbone(cfg['backbone']),
+            'backbone': short,
             'gallery_q': cfg['gallery_threshold'],
             'query_q': cfg['query_threshold'],
             'recall_at_1': res['recall_at_1'],
@@ -65,14 +77,14 @@ def create_test_eval_figures(all_data, out_dir):
     gallery_thresholds = sorted(set(r['gallery_q'] for r in records))
     query_thresholds = sorted(set(r['query_q'] for r in records))
 
-    # Colors: backbone -> base hue, query threshold -> alpha
+    # Colors: backbone -> base hue, gallery threshold -> alpha (saturation)
     backbone_hues = {
         'DINOv3': '#1f77b4',
         'MegaDescriptor': '#ff7f0e',
         'BioCLIP-2': '#2ca02c',
     }
-    query_alphas = {qt: alpha for qt, alpha in
-                    zip(query_thresholds, [0.3, 0.6, 1.0])}
+    gallery_alphas = {gt: alpha for gt, alpha in
+                      zip(gallery_thresholds, [0.3, 0.6, 1.0])}
 
     # Build lookup: (backbone, gallery_q, query_q) -> record
     lookup = {}
@@ -81,13 +93,10 @@ def create_test_eval_figures(all_data, out_dir):
 
     # Bar layout parameters
     bar_width = 0.08
-    intra_gap = 0.0       # no gap within backbone group
-    inter_gap = 0.04      # small gap between backbone groups
-    n_query = len(query_thresholds)
+    inter_gap = 0.04      # gap between backbone groups
+    n_gallery = len(gallery_thresholds)
     n_backbones = len(backbones)
-    # Width of one backbone group
-    group_w = n_query * bar_width
-    # Width of all backbone groups at one gallery tick
+    group_w = n_gallery * bar_width
     tick_w = n_backbones * group_w + (n_backbones - 1) * inter_gap
 
     metrics = [
@@ -98,19 +107,19 @@ def create_test_eval_figures(all_data, out_dir):
     for metric_key, metric_label, filename in metrics:
         fig, ax = plt.subplots(figsize=(10, 6))
 
-        for gi, gal in enumerate(gallery_thresholds):
-            tick_center = gi
+        for qi, qt in enumerate(query_thresholds):
+            tick_center = qi
             tick_left = tick_center - tick_w / 2
 
             for bi, backbone in enumerate(backbones):
                 group_left = tick_left + bi * (group_w + inter_gap)
                 base_color = backbone_hues[backbone]
 
-                for qi, qt in enumerate(query_thresholds):
-                    x = group_left + qi * bar_width + bar_width / 2
+                for gi, gal in enumerate(gallery_thresholds):
+                    x = group_left + gi * bar_width + bar_width / 2
                     key = (backbone, gal, qt)
                     val = lookup.get(key, {}).get(metric_key, 0)
-                    alpha = query_alphas[qt]
+                    alpha = gallery_alphas[gal]
 
                     ax.bar(x, val, width=bar_width,
                            color=base_color, alpha=alpha,
@@ -118,25 +127,32 @@ def create_test_eval_figures(all_data, out_dir):
                     ax.text(x, val + 0.01, f'{val:.2f}',
                             ha='center', va='bottom', fontsize=6, rotation=90)
 
-        # X-axis
-        ax.set_xticks(range(len(gallery_thresholds)))
-        ax.set_xticklabels([f'{g:.2f}' for g in gallery_thresholds])
-        ax.set_xlabel('Gallery Filter Threshold')
+        # X-axis: query thresholds
+        ax.set_xticks(range(len(query_thresholds)))
+        ax.set_xticklabels([f'{q:.2f}' for q in query_thresholds])
+        ax.set_xlabel('Query Filter Threshold')
         ax.set_ylabel(metric_label)
-        ax.set_title(f'{metric_label} by Gallery Threshold, Backbone, and Query Threshold')
+        ax.set_title(f'{metric_label} by Query Threshold, Backbone, and Gallery Threshold')
         ax.set_ylim(0, 1.05)
 
-        # Legend: backbone patches + query alpha patches
+        # Legend with bolded section titles
         legend_handles = []
+        # Model section header
+        legend_handles.append(mpatches.Patch(
+            facecolor='none', edgecolor='none', label=r'$\bf{Model}$'))
         for backbone in backbones:
             patch = mpatches.Patch(facecolor=backbone_hues[backbone],
                                   edgecolor=backbone_hues[backbone],
-                                  label=backbone)
+                                  label=backbone_full_names[backbone])
             legend_handles.append(patch)
-        for qt in query_thresholds:
-            patch = mpatches.Patch(facecolor='gray', alpha=query_alphas[qt],
+        # Gallery filter section header
+        legend_handles.append(mpatches.Patch(
+            facecolor='none', edgecolor='none',
+            label=r'$\bf{Gallery\ filter\ thresh.}$'))
+        for gt in gallery_thresholds:
+            patch = mpatches.Patch(facecolor='gray', alpha=gallery_alphas[gt],
                                   edgecolor='gray',
-                                  label=f'Query θ={qt:.2f}')
+                                  label=f'{gt:.2f}')
             legend_handles.append(patch)
 
         ax.legend(handles=legend_handles, loc='lower right', fontsize=8,
