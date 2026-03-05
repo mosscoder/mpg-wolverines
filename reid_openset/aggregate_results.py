@@ -7,6 +7,10 @@ import os
 import subprocess
 import sys
 
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
 def write_table(rows, cols, name, out_dir):
     csv_path = os.path.join(out_dir, f'{name}.csv')
     md_path = os.path.join(out_dir, f'{name}.md')
@@ -22,6 +26,127 @@ def write_table(rows, cols, name, out_dir):
     print(f'  {name}: {len(rows)} rows -> {csv_path}, {md_path}')
     with open(md_path) as f:
         print(f.read())
+
+
+def classify_backbone(name):
+    """Map full backbone string to short label via substring matching."""
+    if 'DINOv3' in name:
+        return 'DINOv3'
+    elif 'MegaDescriptor' in name:
+        return 'MegaDescriptor'
+    elif 'BioCLIP' in name:
+        return 'BioCLIP-2'
+    return name
+
+
+def create_test_eval_figures(all_data, out_dir):
+    """Create grouped bar charts for Recall@1 and Balanced Accuracy."""
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Build records
+    records = []
+    for data in all_data:
+        cfg = data['config']
+        res = data['results']
+        records.append({
+            'backbone': classify_backbone(cfg['backbone']),
+            'gallery_q': cfg['gallery_threshold'],
+            'query_q': cfg['query_threshold'],
+            'recall_at_1': res['recall_at_1'],
+            'balanced_accuracy': res['balanced_accuracy'],
+        })
+
+    if not records:
+        print('No test_eval data for figures.')
+        return
+
+    # Ordered categories
+    backbones = ['DINOv3', 'MegaDescriptor', 'BioCLIP-2']
+    gallery_thresholds = sorted(set(r['gallery_q'] for r in records))
+    query_thresholds = sorted(set(r['query_q'] for r in records))
+
+    # Colors: backbone -> base hue, query threshold -> alpha
+    backbone_hues = {
+        'DINOv3': '#1f77b4',
+        'MegaDescriptor': '#ff7f0e',
+        'BioCLIP-2': '#2ca02c',
+    }
+    query_alphas = {qt: alpha for qt, alpha in
+                    zip(query_thresholds, [0.3, 0.6, 1.0])}
+
+    # Build lookup: (backbone, gallery_q, query_q) -> record
+    lookup = {}
+    for r in records:
+        lookup[(r['backbone'], r['gallery_q'], r['query_q'])] = r
+
+    # Bar layout parameters
+    bar_width = 0.08
+    intra_gap = 0.0       # no gap within backbone group
+    inter_gap = 0.04      # small gap between backbone groups
+    n_query = len(query_thresholds)
+    n_backbones = len(backbones)
+    # Width of one backbone group
+    group_w = n_query * bar_width
+    # Width of all backbone groups at one gallery tick
+    tick_w = n_backbones * group_w + (n_backbones - 1) * inter_gap
+
+    metrics = [
+        ('recall_at_1', 'Recall@1', 'test_rank@1.png'),
+        ('balanced_accuracy', 'Balanced Accuracy', 'test_novelty_detection.png'),
+    ]
+
+    for metric_key, metric_label, filename in metrics:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for gi, gal in enumerate(gallery_thresholds):
+            tick_center = gi
+            tick_left = tick_center - tick_w / 2
+
+            for bi, backbone in enumerate(backbones):
+                group_left = tick_left + bi * (group_w + inter_gap)
+                base_color = backbone_hues[backbone]
+
+                for qi, qt in enumerate(query_thresholds):
+                    x = group_left + qi * bar_width + bar_width / 2
+                    key = (backbone, gal, qt)
+                    val = lookup.get(key, {}).get(metric_key, 0)
+                    alpha = query_alphas[qt]
+
+                    ax.bar(x, val, width=bar_width,
+                           color=base_color, alpha=alpha,
+                           edgecolor=base_color, linewidth=1.2)
+                    ax.text(x, val + 0.01, f'{val:.2f}',
+                            ha='center', va='bottom', fontsize=6, rotation=90)
+
+        # X-axis
+        ax.set_xticks(range(len(gallery_thresholds)))
+        ax.set_xticklabels([f'{g:.2f}' for g in gallery_thresholds])
+        ax.set_xlabel('Gallery Filter Threshold')
+        ax.set_ylabel(metric_label)
+        ax.set_title(f'{metric_label} by Gallery Threshold, Backbone, and Query Threshold')
+        ax.set_ylim(0, 1.05)
+
+        # Legend: backbone patches + query alpha patches
+        legend_handles = []
+        for backbone in backbones:
+            patch = mpatches.Patch(facecolor=backbone_hues[backbone],
+                                  edgecolor=backbone_hues[backbone],
+                                  label=backbone)
+            legend_handles.append(patch)
+        for qt in query_thresholds:
+            patch = mpatches.Patch(facecolor='gray', alpha=query_alphas[qt],
+                                  edgecolor='gray',
+                                  label=f'Query θ={qt:.2f}')
+            legend_handles.append(patch)
+
+        ax.legend(handles=legend_handles, loc='lower right', fontsize=8,
+                  ncol=2, framealpha=0.9)
+
+        plt.tight_layout()
+        path = os.path.join(out_dir, filename)
+        fig.savefig(path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        print(f'  Saved figure: {path}')
 
 
 def main():
@@ -94,6 +219,11 @@ def main():
 
     print(f'\nTotal: {len(r1_rows)} R@1 rows + {len(ba_rows)} BA rows '
           f'from {len(all_data)} JSONs')
+
+    # ---- Test eval figures ----
+    fig_dir = 'reid_openset/figures'
+    print(f'\nGenerating test eval figures -> {fig_dir}/')
+    create_test_eval_figures(all_data, fig_dir)
 
 
 if __name__ == '__main__':
