@@ -446,28 +446,23 @@ def run_single_model(model_name: str, results_dir: str, output_dir: str):
 
     print_summary_table(results)
 
-    # Tables -> reid_openset/tables/{model_name}/
-    tables_dir = os.path.join('reid_openset', 'tables', model_name)
-    os.makedirs(tables_dir, exist_ok=True)
+    # All per-backbone outputs -> reid_openset/{model_name}/diagnostics/
+    diag_dir = os.path.join('reid_openset', model_name, 'diagnostics')
+    os.makedirs(diag_dir, exist_ok=True)
 
     strategies_r1 = collect_strategies_data(results, target_metric='r1')
     strategies_ba = collect_strategies_data(results, target_metric='ba')
 
-    save_scores_table(strategies_r1, strategies_ba, tables_dir)
-    save_thresholds_table(strategies_r1, strategies_ba, tables_dir)
-    save_summary_table(results, tables_dir)
+    save_scores_table(strategies_r1, strategies_ba, diag_dir)
+    save_thresholds_table(strategies_r1, strategies_ba, diag_dir)
+    save_summary_table(results, diag_dir)
 
-    # Diagnostic figures -> reid_openset/figures/{model_name}/
-    figures_dir = os.path.join('reid_openset', 'figures', model_name)
-    os.makedirs(figures_dir, exist_ok=True)
-
-    plot_recall_curves(results, os.path.join(figures_dir, 'recall_curves.png'))
-    plot_validation_loss_curves(results, os.path.join(figures_dir, 'validation_loss_curves.png'))
-    plot_cosine_threshold(results, os.path.join(figures_dir, 'cosine_threshold.png'))
+    plot_recall_curves(results, os.path.join(diag_dir, 'recall_curves.png'))
+    plot_validation_loss_curves(results, os.path.join(diag_dir, 'validation_loss_curves.png'))
+    plot_cosine_threshold(results, os.path.join(diag_dir, 'cosine_threshold.png'))
 
     print(f"\nDiagnostics complete for {model_name}!")
-    print(f"  Tables: {tables_dir}")
-    print(f"  Figures: {figures_dir}")
+    print(f"  Output: {diag_dir}")
 
     return {'strategies_r1': strategies_r1, 'strategies_ba': strategies_ba, 'results': results}
 
@@ -506,28 +501,25 @@ def run_aggregate(base_dir: str = "reid_openset"):
         print("No backbone results found. Exiting.")
         return
 
-    # Cross-backbone figures -> reid_openset/figures/
-    cross_figures_dir = os.path.join(base_dir, 'figures')
-    os.makedirs(cross_figures_dir, exist_ok=True)
+    # Cross-backbone outputs -> reid_openset/fewshot/
+    fewshot_dir = os.path.join(base_dir, 'fewshot')
+    os.makedirs(fewshot_dir, exist_ok=True)
 
-    # Cross-backbone tables -> reid_openset/tables/
-    cross_tables_dir = os.path.join(base_dir, 'tables')
-    os.makedirs(cross_tables_dir, exist_ok=True)
-
-    print(f"\nGenerating cross-backbone figures ({len(model_data)} backbones)...")
-    create_rank1_figure(model_data, cross_figures_dir)
-    create_novelty_detection_figure(model_data, cross_figures_dir)
-    create_rank1_thresholds_table(model_data, cross_tables_dir)
-    create_novelty_thresholds_table(model_data, cross_tables_dir)
+    print(f"\nGenerating cross-backbone outputs ({len(model_data)} backbones)...")
+    create_rank1_figure(model_data, fewshot_dir)
+    create_novelty_detection_figure(model_data, fewshot_dir)
+    create_rank1_thresholds_table(model_data, fewshot_dir)
+    create_novelty_thresholds_table(model_data, fewshot_dir)
 
     # Test performance tables (skip gracefully if no test results exist)
     print(f"\nGenerating test performance tables...")
-    create_test_performance_table(model_data, cross_tables_dir, 'closedset')
-    create_test_performance_table(model_data, cross_tables_dir, 'openset')
+    create_test_performance_table(model_data, fewshot_dir, 'closedset')
+    create_test_performance_table(model_data, fewshot_dir, 'openset')
 
     print(f"\nAggregate analysis complete!")
-    print(f"  Cross-backbone figures: {cross_figures_dir}")
-    print(f"  Cross-backbone tables: {cross_tables_dir}")
+    print(f"  Output: {fewshot_dir}")
+
+    return model_data
 
 
 if __name__ == "__main__":

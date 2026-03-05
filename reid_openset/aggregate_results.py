@@ -1,16 +1,24 @@
 #!/usr/bin/env python
-"""Aggregate test_eval JSONs into recall_at_1 and balanced_accuracy tables."""
+"""Aggregate reid results into tidy tables.
+
+Produces:
+  reid_openset/fewshot/recall_at_1.csv + .md         Full factorial few-shot results
+  reid_openset/fewshot/balanced_accuracy.csv + .md
+  reid_openset/fewshot/hyperparameters.csv + .md      Per-backbone hyperparameters
+  reid_openset/test_eval/recall_at_1.csv + .md        Test eval results
+  reid_openset/test_eval/balanced_accuracy.csv + .md
+  reid_openset/test_eval/*.png                        Test eval figures
+"""
 
 import json
 import glob
 import os
-import subprocess
-import sys
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.legend_handler import HandlerBase
 import numpy as np
+from scipy import stats
 
 
 class _TitleHandler(HandlerBase):
@@ -22,6 +30,7 @@ class _TitleHandler(HandlerBase):
         return [patch]
 
 def write_table(rows, cols, name, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, f'{name}.csv')
     md_path = os.path.join(out_dir, f'{name}.md')
     with open(csv_path, 'w') as f:
@@ -52,6 +61,175 @@ def classify_backbone(name):
     elif 'BioCLIP' in name:
         return 'BioCLIP-2'
     return name
+
+
+def _fmt_ci(values):
+    """Format mean ± 95% CI as string."""
+    mean = np.mean(values)
+    if len(values) > 1:
+        ci = stats.t.ppf(0.975, len(values) - 1) * stats.sem(values)
+    else:
+        ci = 0.0
+    return f"{mean:.4f} (\u00b1{ci:.4f})"
+
+
+def create_fewshot_tables(model_data, out_dir):
+    """Generate full-factorial few-shot tables from hygiene sweep results."""
+    from utils.reid_plotting import find_best_step, get_test_recall, get_test_ba
+
+    r1_rows = []
+    ba_rows = []
+
+    for model_name, mdata in model_data.items():
+        results = mdata['results']
+        label = mdata['label']
+
+        gallery_sizes = sorted(results.get_unique('gallery_size'))
+        gallery_thresholds = sorted(results.get_unique('threshold'))
+
+        # Discover query thresholds from data
+        query_thresholds = ['q>=0.0']
+        for r in results:
+            history = r.get('step_history', [])
+            if history and 'query_quality_metrics' in history[0]:
+                query_thresholds = sorted(history[0]['query_quality_metrics'].keys())
+                break
+
+        for gsize in gallery_sizes:
+            for gal_thresh in gallery_thresholds:
+                filtered = results.filter(threshold=gal_thresh, gallery_size=gsize)
+                if len(filtered) == 0:
+                    continue
+                all_histories = [r.get('step_history', []) for r in filtered]
+                if not all_histories or not all_histories[0]:
+                    continue
+                if 'query_quality_metrics' not in all_histories[0][0]:
+                    continue
+
+                for q_key in query_thresholds:
+                    best_step, _, _ = find_best_step(all_histories, query_thresh=q_key)
+
+                    r1_values = []
+                    ba_values = []
+                    for history in all_histories:
+                        for h in history:
+                            if h['step'] == best_step:
+                                tr = get_test_recall(h, q_key)
+                                if tr is not None:
+                                    r1_values.append(tr)
+                                tb = get_test_ba(h, q_key)
+                                if tb is not None:
+                                    ba_values.append(tb)
+                                break
+
+                    n_seeds = len(all_histories)
+
+                    if r1_values:
+                        r1_rows.append({
+                            'backbone': label,
+                            'gallery_size': gsize,
+                            'gallery_q': f"{gal_thresh:.2f}",
+                            'query_q': q_key.replace('q>=', ''),
+                            'R@1 (95% CI)': _fmt_ci(r1_values),
+                            'best_step': best_step,
+                            'seeds': n_seeds,
+                        })
+
+                    if ba_values:
+                        ba_rows.append({
+                            'backbone': label,
+                            'gallery_size': gsize,
+                            'gallery_q': f"{gal_thresh:.2f}",
+                            'query_q': q_key.replace('q>=', ''),
+                            'BA (95% CI)': _fmt_ci(ba_values),
+                            'best_step': best_step,
+                            'seeds': n_seeds,
+                        })
+
+    fewshot_dir = os.path.join(out_dir, 'fewshot')
+    r1_cols = ['backbone', 'gallery_size', 'gallery_q', 'query_q',
+               'R@1 (95% CI)', 'best_step', 'seeds']
+    ba_cols = ['backbone', 'gallery_size', 'gallery_q', 'query_q',
+               'BA (95% CI)', 'best_step', 'seeds']
+
+    print('=== Few-shot Recall@1 ===')
+    write_table(r1_rows, r1_cols, 'recall_at_1', fewshot_dir)
+    print('=== Few-shot Balanced Accuracy ===')
+    write_table(ba_rows, ba_cols, 'balanced_accuracy', fewshot_dir)
+
+
+def create_hyperparameters_table(out_dir):
+    """Generate per-backbone hyperparameters table."""
+    from utils.reid_config import MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, TRAIN_BATCH_SIZE
+    from utils.reid import load_best_hyperparams
+
+    rows = []
+    for model_name, config in MODEL_CONFIGS.items():
+        best_lr, best_size, best_emb_dim = load_best_hyperparams(model_name)
+        rows.append({
+            'backbone': config['backbone_label'],
+            'lr': best_lr,
+            'emb_dim': best_emb_dim,
+            'image_size': best_size,
+            'arcface_margin': ARCFACE_MARGIN,
+            'arcface_scale': ARCFACE_SCALE,
+            'batch_size': TRAIN_BATCH_SIZE,
+        })
+
+    cols = ['backbone', 'lr', 'emb_dim', 'image_size',
+            'arcface_margin', 'arcface_scale', 'batch_size']
+    print('=== Hyperparameters ===')
+    write_table(rows, cols, 'hyperparameters', out_dir)
+
+
+def create_test_eval_tables(all_data, out_dir):
+    """Aggregate test_eval JSONs into recall_at_1 and balanced_accuracy tables."""
+    r1_cols = ['backbone', 'gallery_q', 'query_q', 'R@1', 'cv_R@1',
+               'lr', 'emb_dim', 'steps']
+    r1_rows = []
+    for data in all_data:
+        cfg = data['config']
+        res = data['results']
+        r1_rows.append({
+            'backbone':  cfg['backbone'],
+            'gallery_q': f"{cfg['gallery_threshold']:.2f}",
+            'query_q':   f"{cfg['query_threshold']:.2f}",
+            'R@1':       f"{res['recall_at_1']:.4f}",
+            'cv_R@1':    f"{cfg.get('cv_recall_at_1', 0):.4f}",
+            'lr':        cfg['learning_rate'],
+            'emb_dim':   cfg['embedding_dim'],
+            'steps':     cfg['best_step'],
+        })
+
+    r1_rows.sort(key=lambda r: (r['backbone'], r['gallery_q'], r['query_q']))
+    print('=== Test Eval Recall@1 ===')
+    write_table(r1_rows, r1_cols, 'recall_at_1', out_dir)
+
+    ba_cols = ['backbone', 'gallery_q', 'query_q', 'BA', 'KAR', 'URR',
+               'lr', 'emb_dim', 'steps']
+    ba_rows = []
+    for data in all_data:
+        cfg = data['config']
+        res = data['results']
+        ba_rows.append({
+            'backbone':  cfg['backbone'],
+            'gallery_q': f"{cfg['gallery_threshold']:.2f}",
+            'query_q':   f"{cfg['query_threshold']:.2f}",
+            'BA':        f"{res['balanced_accuracy']:.4f}",
+            'KAR':       f"{res['known_accept_rate']:.4f}",
+            'URR':       f"{res['unknown_reject_rate']:.4f}",
+            'lr':        cfg['learning_rate'],
+            'emb_dim':   cfg['embedding_dim'],
+            'steps':     cfg['best_step'],
+        })
+
+    ba_rows.sort(key=lambda r: (r['backbone'], r['gallery_q'], r['query_q']))
+    print('=== Test Eval Balanced Accuracy ===')
+    write_table(ba_rows, ba_cols, 'balanced_accuracy', out_dir)
+
+    print(f'\nTotal: {len(r1_rows)} R@1 rows + {len(ba_rows)} BA rows '
+          f'from {len(all_data)} JSONs')
+    return all_data
 
 
 def create_test_eval_figures(all_data, out_dir):
@@ -195,14 +373,19 @@ def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
 
-    # ---- Hygiene sweep figures/tables (existing) ----
-    print("Running reid_plotting --aggregate ...")
-    subprocess.run([sys.executable, '-u', '-m', 'utils.reid_plotting', '--aggregate'],
-                   check=False)
+    # ---- Hygiene sweep figures/tables (direct import) ----
+    print("Running aggregate analysis ...")
+    from utils.reid_plotting import run_aggregate
+    model_data = run_aggregate()
 
-    # ---- Test eval: aggregate per-job JSONs into tables ----
-    out_dir = 'reid_openset/tables'
-    os.makedirs(out_dir, exist_ok=True)
+    # ---- Few-shot tables -> reid_openset/fewshot/ ----
+    fewshot_dir = 'reid_openset/fewshot'
+    if model_data:
+        create_fewshot_tables(model_data, fewshot_dir)
+        create_hyperparameters_table(fewshot_dir)
+
+    # ---- Test eval -> reid_openset/test_eval/ ----
+    test_eval_dir = 'reid_openset/test_eval'
 
     all_data = []
     for path in sorted(glob.glob('reid_openset/*/results/test_eval/*.json')):
@@ -211,60 +394,10 @@ def main():
 
     if not all_data:
         print('No test_eval JSONs found.')
-        return
-
-    # ---- Recall@1 table ----
-    r1_cols = ['backbone', 'gallery_q', 'query_q', 'R@1', 'cv_R@1',
-               'lr', 'emb_dim', 'steps']
-    r1_rows = []
-    for data in all_data:
-        cfg = data['config']
-        res = data['results']
-        r1_rows.append({
-            'backbone':  cfg['backbone'],
-            'gallery_q': f"{cfg['gallery_threshold']:.2f}",
-            'query_q':   f"{cfg['query_threshold']:.2f}",
-            'R@1':       f"{res['recall_at_1']:.4f}",
-            'cv_R@1':    f"{cfg.get('cv_recall_at_1', 0):.4f}",
-            'lr':        cfg['learning_rate'],
-            'emb_dim':   cfg['embedding_dim'],
-            'steps':     cfg['best_step'],
-        })
-
-    r1_rows.sort(key=lambda r: (r['backbone'], r['gallery_q'], r['query_q']))
-    print('=== Recall@1 ===')
-    write_table(r1_rows, r1_cols, 'recall_at_1', out_dir)
-
-    # ---- Balanced Accuracy table ----
-    ba_cols = ['backbone', 'gallery_q', 'query_q', 'BA', 'KAR', 'URR',
-               'lr', 'emb_dim', 'steps']
-    ba_rows = []
-    for data in all_data:
-        cfg = data['config']
-        res = data['results']
-        ba_rows.append({
-            'backbone':  cfg['backbone'],
-            'gallery_q': f"{cfg['gallery_threshold']:.2f}",
-            'query_q':   f"{cfg['query_threshold']:.2f}",
-            'BA':        f"{res['balanced_accuracy']:.4f}",
-            'KAR':       f"{res['known_accept_rate']:.4f}",
-            'URR':       f"{res['unknown_reject_rate']:.4f}",
-            'lr':        cfg['learning_rate'],
-            'emb_dim':   cfg['embedding_dim'],
-            'steps':     cfg['best_step'],
-        })
-
-    ba_rows.sort(key=lambda r: (r['backbone'], r['gallery_q'], r['query_q']))
-    print('=== Balanced Accuracy ===')
-    write_table(ba_rows, ba_cols, 'balanced_accuracy', out_dir)
-
-    print(f'\nTotal: {len(r1_rows)} R@1 rows + {len(ba_rows)} BA rows '
-          f'from {len(all_data)} JSONs')
-
-    # ---- Test eval figures ----
-    fig_dir = 'reid_openset/figures'
-    print(f'\nGenerating test eval figures -> {fig_dir}/')
-    create_test_eval_figures(all_data, fig_dir)
+    else:
+        create_test_eval_tables(all_data, test_eval_dir)
+        print(f'\nGenerating test eval figures -> {test_eval_dir}/')
+        create_test_eval_figures(all_data, test_eval_dir)
 
 
 if __name__ == '__main__':
