@@ -446,8 +446,8 @@ def run_single_model(model_name: str, results_dir: str, output_dir: str):
 
     print_summary_table(results)
 
-    # All per-backbone outputs -> reid_openset/{model_name}/diagnostics/
-    diag_dir = os.path.join('reid_openset', model_name, 'diagnostics')
+    # Per-backbone diagnostics -> reid_openset/diagnostics/{model_name}/
+    diag_dir = os.path.join('reid_openset', 'diagnostics', model_name)
     os.makedirs(diag_dir, exist_ok=True)
 
     strategies_r1 = collect_strategies_data(results, target_metric='r1')
