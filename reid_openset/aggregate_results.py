@@ -100,8 +100,12 @@ def create_test_eval_figures(all_data, out_dir):
     tick_w = n_backbones * group_w + (n_backbones - 1) * inter_gap
 
     metrics = [
-        ('recall_at_1', 'Recall@1', 'test_rank@1.png', (0.5, 0.9)),
-        ('balanced_accuracy', 'Balanced Accuracy', 'test_novelty_detection.png', (0.4, 0.85)),
+        ('recall_at_1',
+         'Wolverine re-identification score\n(Recall@1 - Test)',
+         'test_rank@1.png', (0.5, 0.9)),
+        ('balanced_accuracy',
+         'Novel wolverine detection score\n(Balanced Accuracy - Test)',
+         'test_novelty_detection.png', (0.4, 0.85)),
     ]
 
     for metric_key, metric_label, filename, ylim in metrics:
@@ -132,7 +136,6 @@ def create_test_eval_figures(all_data, out_dir):
         ax.set_xticklabels([f'{q:.2f}' for q in query_thresholds])
         ax.set_xlabel('Query Filter Threshold')
         ax.set_ylabel(metric_label)
-        ax.set_title(f'{metric_label} by Query Threshold, Backbone, and Gallery Threshold')
         ax.set_ylim(ylim)
         ax.set_yticks(np.arange(ylim[0], ylim[1] + 0.001, 0.05))
         ax.yaxis.grid(True, linestyle='--', alpha=0.7)
@@ -158,7 +161,8 @@ def create_test_eval_figures(all_data, out_dir):
                                   label=f'{gt:.2f}')
             legend_handles.append(patch)
 
-        leg = ax.legend(handles=legend_handles, loc='lower right', fontsize=8,
+        leg = ax.legend(handles=legend_handles, loc='upper center',
+                        bbox_to_anchor=(0.5, -0.15), fontsize=8,
                         ncol=2, framealpha=0.9, handletextpad=0.5,
                         columnspacing=0.8)
         leg._legend_box.align = 'left'

@@ -95,7 +95,7 @@ def create_rank1_figure(model_data: dict, output_dir: str):
         strategies = md['strategies_r1']
 
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors,
-                                          'Wolverine re-identification score (Recall at rank 1)')
+                                          'Wolverine re-identification score\n(Recall@1 - Few-shot)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
@@ -108,7 +108,7 @@ def create_rank1_figure(model_data: dict, output_dir: str):
 
     plt.tight_layout()
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, 'rank@1.png')
+    output_path = os.path.join(output_dir, 'fewshot_rank@1.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved cross-backbone R@1 figure: {output_path}")
@@ -137,7 +137,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
         strategies = md['strategies_ba']
 
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors,
-                                          'Novel wolverine detection score (Balanced accuracy)')
+                                          'Novel wolverine detection score\n(Balanced Accuracy - Few-shot)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
@@ -150,7 +150,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
 
     plt.tight_layout()
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, 'novelty_detection.png')
+    output_path = os.path.join(output_dir, 'fewshot_novelty_detection.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved cross-backbone novelty detection figure: {output_path}")
