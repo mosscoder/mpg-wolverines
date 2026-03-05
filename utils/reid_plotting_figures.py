@@ -95,7 +95,7 @@ def create_rank1_figure(model_data: dict, output_dir: str):
         strategies = md['strategies_r1']
 
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors,
-                                          'Wolverine re-identification score\n(Recall@1 - Few-shot)')
+                                          'Wolverine re-identification score\n(Recall@1 - Test)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
@@ -137,7 +137,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
         strategies = md['strategies_ba']
 
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors,
-                                          'Novel wolverine detection score\n(Balanced Accuracy - Few-shot)')
+                                          'Novel wolverine detection score\n(Balanced Accuracy - Test)')
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')

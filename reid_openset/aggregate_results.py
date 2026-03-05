@@ -138,7 +138,7 @@ def create_test_eval_figures(all_data, out_dir):
         ax.set_ylabel(metric_label)
         ax.set_ylim(ylim)
         ax.set_yticks(np.arange(ylim[0], ylim[1] + 0.001, 0.05))
-        ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+        ax.grid(True, alpha=0.3, axis='y')
         ax.set_axisbelow(True)
 
         # Legend with bolded section titles
