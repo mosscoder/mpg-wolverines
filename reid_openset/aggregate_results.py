@@ -9,7 +9,15 @@ import sys
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.legend_handler import HandlerBase
 import numpy as np
+
+
+class _TitleHandler(HandlerBase):
+    """Legend handler that draws no handle, so text aligns with patch icons."""
+    def create_artists(self, legend, orig_handle, xdescent, ydescent,
+                       width, height, fontsize, trans):
+        return []
 
 def write_table(rows, cols, name, out_dir):
     csv_path = os.path.join(out_dir, f'{name}.csv')
@@ -141,27 +149,33 @@ def create_test_eval_figures(all_data, out_dir):
         ax.grid(True, alpha=0.3, axis='y')
         ax.set_axisbelow(True)
 
-        # Legend with bolded section titles
+        # Legend with bolded section titles aligned over patches
         legend_handles = []
+        handler_map = {}
         # Model section header
-        legend_handles.append(mpatches.Patch(
-            facecolor='none', edgecolor='none', label=r'$\bf{Model}$'))
+        model_title = mpatches.Patch(
+            facecolor='none', edgecolor='none', label=r'$\bf{Model}$')
+        legend_handles.append(model_title)
+        handler_map[model_title] = _TitleHandler()
         for backbone in backbones:
             patch = mpatches.Patch(facecolor=backbone_hues[backbone],
                                   edgecolor=backbone_hues[backbone],
                                   label=backbone_full_names[backbone])
             legend_handles.append(patch)
         # Gallery filter section header
-        legend_handles.append(mpatches.Patch(
+        gallery_title = mpatches.Patch(
             facecolor='none', edgecolor='none',
-            label=r'$\bf{Gallery\ filter\ thresh.}$'))
+            label=r'$\bf{Gallery\ filter\ thresh.}$')
+        legend_handles.append(gallery_title)
+        handler_map[gallery_title] = _TitleHandler()
         for gt in gallery_thresholds:
             patch = mpatches.Patch(facecolor='gray', alpha=gallery_alphas[gt],
                                   edgecolor='gray',
                                   label=f'{gt:.2f}')
             legend_handles.append(patch)
 
-        leg = ax.legend(handles=legend_handles, loc='upper center',
+        leg = ax.legend(handles=legend_handles, handler_map=handler_map,
+                        loc='upper center',
                         bbox_to_anchor=(0.5, -0.15), fontsize=8,
                         ncol=2, framealpha=0.9, handletextpad=0.5,
                         columnspacing=0.8)
