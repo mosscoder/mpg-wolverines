@@ -100,12 +100,12 @@ def create_test_eval_figures(all_data, out_dir):
     tick_w = n_backbones * group_w + (n_backbones - 1) * inter_gap
 
     metrics = [
-        ('recall_at_1', 'Recall@1', 'test_rank@1.png'),
-        ('balanced_accuracy', 'Balanced Accuracy', 'test_novelty_detection.png'),
+        ('recall_at_1', 'Recall@1', 'test_rank@1.png', (0.5, 0.9)),
+        ('balanced_accuracy', 'Balanced Accuracy', 'test_novelty_detection.png', (0.4, 0.85)),
     ]
 
-    for metric_key, metric_label, filename in metrics:
-        fig, ax = plt.subplots(figsize=(10, 6))
+    for metric_key, metric_label, filename, ylim in metrics:
+        fig, ax = plt.subplots(figsize=(7, 6))
 
         for qi, qt in enumerate(query_thresholds):
             tick_center = qi
@@ -133,7 +133,10 @@ def create_test_eval_figures(all_data, out_dir):
         ax.set_xlabel('Query Filter Threshold')
         ax.set_ylabel(metric_label)
         ax.set_title(f'{metric_label} by Query Threshold, Backbone, and Gallery Threshold')
-        ax.set_ylim(0, 1.05)
+        ax.set_ylim(ylim)
+        ax.set_yticks(np.arange(ylim[0], ylim[1] + 0.001, 0.05))
+        ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+        ax.set_axisbelow(True)
 
         # Legend with bolded section titles
         legend_handles = []
@@ -155,8 +158,10 @@ def create_test_eval_figures(all_data, out_dir):
                                   label=f'{gt:.2f}')
             legend_handles.append(patch)
 
-        ax.legend(handles=legend_handles, loc='lower right', fontsize=8,
-                  ncol=2, framealpha=0.9)
+        leg = ax.legend(handles=legend_handles, loc='lower right', fontsize=8,
+                        ncol=2, framealpha=0.9, handletextpad=0.5,
+                        columnspacing=0.8)
+        leg._legend_box.align = 'left'
 
         plt.tight_layout()
         path = os.path.join(out_dir, filename)
