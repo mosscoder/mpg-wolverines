@@ -2,12 +2,12 @@
 """Aggregate reid results into tidy tables.
 
 Produces:
-  reid_openset/fewshot/recall_at_1.csv + .md         Full factorial few-shot results
-  reid_openset/fewshot/balanced_accuracy.csv + .md
-  reid_openset/fewshot/hyperparameters.csv + .md      Per-backbone hyperparameters
-  reid_openset/test_eval/recall_at_1.csv + .md        Test eval results
-  reid_openset/test_eval/balanced_accuracy.csv + .md
-  reid_openset/test_eval/*.png                        Test eval figures
+  reid_openset/summary/fewshot/recall_at_1.csv + .md         Full factorial few-shot results
+  reid_openset/summary/fewshot/balanced_accuracy.csv + .md
+  reid_openset/summary/fewshot/hyperparameters.csv + .md      Per-backbone hyperparameters
+  reid_openset/summary/test_eval/recall_at_1.csv + .md        Test eval results
+  reid_openset/summary/test_eval/balanced_accuracy.csv + .md
+  reid_openset/summary/test_eval/*.png                        Test eval figures
 """
 
 import json
@@ -147,16 +147,15 @@ def create_fewshot_tables(model_data, out_dir):
                             'seeds': n_seeds,
                         })
 
-    fewshot_dir = os.path.join(out_dir, 'fewshot')
     r1_cols = ['backbone', 'gallery_size', 'gallery_q', 'query_q',
                'R@1 (95% CI)', 'best_step', 'seeds']
     ba_cols = ['backbone', 'gallery_size', 'gallery_q', 'query_q',
                'BA (95% CI)', 'best_step', 'seeds']
 
     print('=== Few-shot Recall@1 ===')
-    write_table(r1_rows, r1_cols, 'recall_at_1', fewshot_dir)
+    write_table(r1_rows, r1_cols, 'recall_at_1', out_dir)
     print('=== Few-shot Balanced Accuracy ===')
-    write_table(ba_rows, ba_cols, 'balanced_accuracy', fewshot_dir)
+    write_table(ba_rows, ba_cols, 'balanced_accuracy', out_dir)
 
 
 def create_hyperparameters_table(out_dir):
@@ -380,14 +379,14 @@ def main():
     from utils.reid_plotting import run_aggregate
     model_data = run_aggregate()
 
-    # ---- Few-shot tables -> reid_openset/fewshot/ ----
-    fewshot_dir = 'reid_openset/fewshot'
+    # ---- Few-shot tables -> reid_openset/summary/fewshot/ ----
+    fewshot_dir = 'reid_openset/summary/fewshot'
     if model_data:
         create_fewshot_tables(model_data, fewshot_dir)
         create_hyperparameters_table(fewshot_dir)
 
-    # ---- Test eval -> reid_openset/test_eval/ ----
-    test_eval_dir = 'reid_openset/test_eval'
+    # ---- Test eval -> reid_openset/summary/test_eval/ ----
+    test_eval_dir = 'reid_openset/summary/test_eval'
 
     all_data = []
     for path in sorted(glob.glob('reid_openset/*/results/test_eval/*.json')):

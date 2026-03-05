@@ -502,7 +502,7 @@ def run_aggregate(base_dir: str = "reid_openset"):
         return
 
     # Cross-backbone outputs -> reid_openset/fewshot/
-    fewshot_dir = os.path.join(base_dir, 'fewshot')
+    fewshot_dir = os.path.join(base_dir, 'summary', 'fewshot')
     os.makedirs(fewshot_dir, exist_ok=True)
 
     print(f"\nGenerating cross-backbone outputs ({len(model_data)} backbones)...")
