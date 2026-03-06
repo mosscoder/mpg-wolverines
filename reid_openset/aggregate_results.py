@@ -290,14 +290,14 @@ def create_test_eval_figures(all_data, out_dir):
     metrics = [
         ('recall_at_1',
          'Wolverine re-identification score\n(Recall@1 - Test)',
-         'test_rank@1.png', (0.5, 0.9)),
+         'test_rank@1.png', (0.5, 0.95)),
         ('balanced_accuracy',
          'Novel wolverine detection score\n(Balanced Accuracy - Test)',
          'test_novelty_detection.png', (0.4, 0.85)),
     ]
 
     for metric_key, metric_label, filename, ylim in metrics:
-        fig, ax = plt.subplots(figsize=(7, 6))
+        fig, ax = plt.subplots(figsize=(7, 3))
 
         for qi, qt in enumerate(query_thresholds):
             tick_center = qi
@@ -316,7 +316,7 @@ def create_test_eval_figures(all_data, out_dir):
                     ax.bar(x, val, width=bar_width,
                            color=base_color, alpha=alpha,
                            edgecolor=base_color, linewidth=1.2)
-                    ax.text(x, val + 0.01, f'{val:.2f}',
+                    ax.text(x, val + 0.01, f'{val:.3f}',
                             ha='center', va='bottom', fontsize=6, rotation=90)
 
         # X-axis: query thresholds
@@ -355,10 +355,11 @@ def create_test_eval_figures(all_data, out_dir):
             legend_handles.append(patch)
 
         leg = ax.legend(handles=legend_handles, handler_map=handler_map,
-                        loc='upper center',
-                        bbox_to_anchor=(0.5, -0.15), fontsize=8,
+                        loc='lower right',
+                        fontsize=4.8,
                         ncol=2, framealpha=0.9, handletextpad=0.5,
-                        columnspacing=0.8)
+                        columnspacing=0.8, labelspacing=0.25,
+                        handleheight=0.5)
         leg._legend_box.align = 'left'
 
         plt.tight_layout()
