@@ -40,8 +40,8 @@ def _plot_scores_facet(ax, strategies, strategy_keys, metric, colors, ylabel):
             ax.fill_between(s['x'], s[f'{metric}_ci_lower'], s[f'{metric}_ci_upper'],
                             color=colors[key], alpha=0.2)
 
-    ax.set_xlabel('Training examples per individual', fontsize=12)
-    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_xlabel('Training examples per individual', fontsize=17.3)
+    ax.set_ylabel(ylabel, fontsize=17.3)
     if gallery_sizes:
         ax.set_xticks(gallery_sizes)
 
@@ -94,19 +94,29 @@ def create_rank1_figure(model_data: dict, output_dir: str):
         md = model_data[model_name]
         strategies = md['strategies_r1']
 
-        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors,
-                                          'Wolverine re-identification score\n(Recall@1 - Test)')
+        ylabel = 'Wolverine re-identification score\n(Test Recall@1)' if i == 0 else ''
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors, ylabel)
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
-                  loc='lower right', fontsize=7.5, title_fontsize=7.5)
+        ax.set_title(label, fontsize=17.3, fontweight='bold', pad=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
-                fontsize=16, fontweight='bold', va='top', ha='left')
+                fontsize=23.0, fontweight='bold', va='top', ha='left')
+        ax.tick_params(labelsize=13.0)
+        if i > 0:
+            ax.set_ylabel('')
+            ax.set_yticklabels([])
 
     _apply_shared_ylim([axes[0, i] for i in range(len(models))], global_ci_lower, global_ci_upper)
 
+    # Single shared legend from the first panel
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', fontsize=13.0, ncol=len(strategy_keys),
+               bbox_to_anchor=(0.5, -0.06), framealpha=0.9,
+               title="$\\bf{Image\\ quality\\ filters}$", title_fontsize=13.0)
+
     plt.tight_layout()
+    fig.subplots_adjust(bottom=0.15)
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, 'fewshot_rank@1.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -136,19 +146,29 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
         md = model_data[model_name]
         strategies = md['strategies_ba']
 
-        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors,
-                                          'Novel wolverine detection score\n(Balanced Accuracy - Test)')
+        ylabel = 'Novel wolverine detection score\n(Test Balanced Accuracy)' if i == 0 else ''
+        ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors, ylabel)
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
         label = md['label'].replace('Frozen ', '')
-        ax.legend(title="$\\bf{Model:}$" + f"\n{label}\n" + "$\\bf{Image\\ quality\\ filters:}$",
-                  loc='lower right', fontsize=7.5, title_fontsize=7.5)
+        ax.set_title(label, fontsize=17.3, fontweight='bold', pad=10)
         ax.text(0.02, 0.98, panel_labels[i], transform=ax.transAxes,
-                fontsize=16, fontweight='bold', va='top', ha='left')
+                fontsize=23.0, fontweight='bold', va='top', ha='left')
+        ax.tick_params(labelsize=13.0)
+        if i > 0:
+            ax.set_ylabel('')
+            ax.set_yticklabels([])
 
     _apply_shared_ylim([axes[0, i] for i in range(len(models))], global_ci_lower, global_ci_upper)
 
+    # Single shared legend from the first panel
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', fontsize=13.0, ncol=len(strategy_keys),
+               bbox_to_anchor=(0.5, -0.06), framealpha=0.9,
+               title="$\\bf{Image\\ quality\\ filters}$", title_fontsize=13.0)
+
     plt.tight_layout()
+    fig.subplots_adjust(bottom=0.15)
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, 'fewshot_novelty_detection.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
