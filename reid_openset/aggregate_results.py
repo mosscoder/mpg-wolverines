@@ -232,6 +232,203 @@ def create_test_eval_tables(all_data, out_dir):
     return all_data
 
 
+def _latex_escape(s):
+    """Escape special LaTeX characters in a string."""
+    return str(s).replace('_', r'\_').replace('&', r'\&').replace('%', r'\%')
+
+
+def _write_latex_fragment(lines, path):
+    """Write LaTeX table rows, stripping \\\\ from the last data row.
+
+    This is required because \\input{} inside a tabular followed by
+    \\bottomrule causes 'Misplaced \\noalign' errors if the last line
+    from the input file ends with \\\\. The manuscript must add \\\\ after
+    the \\input{} call.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Strip trailing \\ from last line
+    if lines and lines[-1].endswith('\\\\'):
+        lines[-1] = lines[-1][:-2].rstrip()
+    with open(path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'  Wrote {path}')
+
+
+def _write_latex_s1_hyperparams(out_dir):
+    """Generate LaTeX rows for Table S1: optimal hyperparameters per backbone."""
+    from utils.reid_config import MODEL_CONFIGS, ARCFACE_MARGIN, ARCFACE_SCALE, TRAIN_BATCH_SIZE
+    from utils.reid import load_best_hyperparams
+
+    lines = []
+    for model_name, config in MODEL_CONFIGS.items():
+        best_lr, best_size, best_emb_dim = load_best_hyperparams(model_name)
+        label = config['backbone_label'].replace('Frozen ', '')
+        # Format lr: drop trailing zeros but keep meaningful precision
+        lr_str = f"{best_lr:g}"
+        lines.append(
+            f"{label:<25s} & {lr_str} & {best_emb_dim} & {best_size} "
+            f"& {ARCFACE_MARGIN} & {ARCFACE_SCALE} & {TRAIN_BATCH_SIZE} \\\\"
+        )
+
+    _write_latex_fragment(lines, os.path.join(out_dir, 'table_s1_hyperparams.tex'))
+
+
+def _write_latex_thresh_table(model_data, strategies_attr, out_dir, filename):
+    """Generate LaTeX rows for threshold tables (S3 or S4).
+
+    Columns per backbone: Gal. only | Query only | Gal. + Query (as gal / query).
+    Rows: gallery sizes (2, 4, 8, 16, 32, 64).
+    """
+    models = list(model_data.keys())
+    labels = [model_data[m]['label'].replace('Frozen ', '') for m in models]
+
+    # Collect all gallery sizes
+    all_sizes = sorted(set(
+        sz for m in models
+        for sz in model_data[m][strategies_attr]['gallery_query']['x']
+    ))
+
+    # Build lookups: model -> gallery_size -> threshold for each strategy
+    lookup = {}
+    for m in models:
+        lookup[m] = {}
+        for strat_key in ['gallery', 'query', 'gallery_query']:
+            s = model_data[m][strategies_attr][strat_key]
+            lookup[m][strat_key] = {}
+            for i, sz in enumerate(s['x']):
+                gal = s['best_gal'][i] if i < len(s['best_gal']) else None
+                q = s['best_q'][i] if i < len(s['best_q']) else None
+                lookup[m][strat_key][sz] = (gal, q)
+
+    lines = []
+    for sz in all_sizes:
+        parts = [str(sz)]
+        for m in models:
+            # Gallery only: show gal threshold
+            gal_data = lookup[m]['gallery'].get(sz, (None, None))
+            gal_val = f"{gal_data[0]:.2f}" if gal_data[0] is not None else '---'
+            parts.append(gal_val)
+
+            # Query only: show query threshold
+            q_data = lookup[m]['query'].get(sz, (None, None))
+            q_val = f"{q_data[1]:.2f}" if q_data[1] is not None else '---'
+            parts.append(q_val)
+
+            # Gallery + Query: show gal / query
+            gq_data = lookup[m]['gallery_query'].get(sz, (None, None))
+            if gq_data[0] is not None and gq_data[1] is not None:
+                gq_val = f"{gq_data[0]:.2f} / {gq_data[1]:.2f}"
+            else:
+                gq_val = '---'
+            parts.append(gq_val)
+
+        lines.append(' & '.join(parts) + ' \\\\')
+
+    _write_latex_fragment(lines, os.path.join(out_dir, filename))
+
+
+def _write_latex_s5_test_steps(out_dir):
+    """Generate LaTeX rows for Table S5: optimal steps and CV R@1.
+
+    For each (backbone, gal_thresh, query_thresh), load 5 seed step_count JSONs,
+    find best step by mean val R@1, and format with 95% CI.
+    """
+    from utils.reid_config import MODEL_CONFIGS
+
+    gallery_thresholds = [0.0, 0.25, 0.50]
+    query_thresholds = ['q>=0.0', 'q>=0.25', 'q>=0.5']
+
+    lines = []
+    model_names = list(MODEL_CONFIGS.keys())
+
+    for mi, model_name in enumerate(model_names):
+        config = MODEL_CONFIGS[model_name]
+        label = config['backbone_label'].replace('Frozen ', '')
+        results_dir = os.path.join(config['experiment_dir'], 'results', 'step_count')
+
+        first_row_of_backbone = True
+        for gal_thresh in gallery_thresholds:
+            # Load all seed files for this gallery threshold
+            pattern = os.path.join(results_dir, f'g{gal_thresh:.2f}_seed=*.json')
+            seed_files = sorted(glob.glob(pattern))
+            if not seed_files:
+                continue
+
+            seed_data = []
+            for sf in seed_files:
+                with open(sf) as f:
+                    seed_data.append(json.load(f))
+
+            for qt in query_thresholds:
+                # Find all steps evaluated
+                steps = set()
+                for sd in seed_data:
+                    for h in sd['step_history']:
+                        if qt in h.get('query_quality_metrics', {}):
+                            steps.add(h['step'])
+
+                if not steps:
+                    continue
+
+                # Find step with highest mean val recall across seeds
+                best_step = None
+                best_mean = -1
+                best_vals = []
+                for step in sorted(steps):
+                    vals = []
+                    for sd in seed_data:
+                        for h in sd['step_history']:
+                            if h['step'] == step and qt in h.get('query_quality_metrics', {}):
+                                vals.append(h['query_quality_metrics'][qt]['recall_at_1'])
+                                break
+                    if vals:
+                        mean_val = np.mean(vals)
+                        if mean_val > best_mean:
+                            best_mean = mean_val
+                            best_step = step
+                            best_vals = vals
+
+                # Format CI
+                n = len(best_vals)
+                if n > 1:
+                    ci = stats.t.ppf(0.975, n - 1) * stats.sem(best_vals)
+                else:
+                    ci = 0.0
+
+                # Use backbone name only on first row, blank on continuation
+                backbone_col = f"{label:<25s}" if first_row_of_backbone else ' ' * 25
+                first_row_of_backbone = False
+
+                q_float = float(qt.replace('q>=', ''))
+                lines.append(
+                    f"{backbone_col} & {gal_thresh:.2f} & {q_float:.2f} "
+                    f"& {best_step} & {best_mean:.3f} ($\\pm${ci:.3f}) \\\\"
+                )
+
+        # Add midrule between backbones (not after last)
+        if mi < len(model_names) - 1:
+            lines.append(r'\midrule')
+
+    _write_latex_fragment(lines, os.path.join(out_dir, 'table_s5_test_steps.tex'))
+
+
+def write_latex_tables(model_data, out_dir='reid_openset/summary/latex'):
+    """Write LaTeX table fragment files for manuscript appendix tables S1, S3, S4, S5."""
+    print(f'\n=== Writing LaTeX table fragments -> {out_dir}/ ===')
+
+    _write_latex_s1_hyperparams(out_dir)
+
+    if model_data:
+        _write_latex_thresh_table(model_data, 'strategies_r1', out_dir,
+                                  'table_s3_thresh_r1.tex')
+        _write_latex_thresh_table(model_data, 'strategies_ba', out_dir,
+                                  'table_s4_thresh_ba.tex')
+
+    _write_latex_s5_test_steps(out_dir)
+
+    print('  LaTeX table fragments complete.')
+
+
 def create_test_eval_figures(all_data, out_dir):
     """Create grouped bar charts for Recall@1 and Balanced Accuracy.
 
@@ -289,10 +486,10 @@ def create_test_eval_figures(all_data, out_dir):
 
     metrics = [
         ('recall_at_1',
-         'Wolverine re-identification score\n(Recall@1 - Test)',
+         'Wolverine re-identification score\n(Test Recall@1)',
          'test_rank@1.png', (0.5, 0.95)),
         ('balanced_accuracy',
-         'Novel wolverine detection score\n(Balanced Accuracy - Test)',
+         'Novel wolverine detection score\n(Test Balanced Accuracy)',
          'test_novelty_detection.png', (0.4, 0.85)),
     ]
 
@@ -385,6 +582,9 @@ def main():
     if model_data:
         create_fewshot_tables(model_data, fewshot_dir)
         create_hyperparameters_table(fewshot_dir)
+
+    # ---- LaTeX table fragments -> reid_openset/summary/latex/ ----
+    write_latex_tables(model_data)
 
     # ---- Test eval -> reid_openset/summary/test_eval/ ----
     test_eval_dir = 'reid_openset/summary/test_eval'
