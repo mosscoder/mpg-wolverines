@@ -44,7 +44,7 @@ echo "========================================"
 python -u -m utils.reid test_step_eval --model megadescriptor \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/megadescriptor/results/test_eval \
-    --device gpu --seed 0
+    --device gpu --seed 0 --overwrite --export-embeddings
 
 # Print completion info
 echo "========================================"

@@ -1733,12 +1733,18 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
                        gallery_threshold, step_history,
                        training_time, best_lr, best_size, best_embedding_dim,
                        aug_flags, model_config, seed, gallery_info, query_info,
-                       all_gallery_indices, all_query_indices, rare_indices_cache):
+                       all_gallery_indices, all_query_indices, rare_indices_cache,
+                       export_dir=None, anchor_dataset=None, export_meta=None):
     """
     Evaluate at a scheduled step and save one JSON per query_q combo.
 
     schedule_entries: list of (q_thresh, step, sweep_score) for this step.
     rare_indices_cache: dict with pre-fetched rare/unknown data.
+    export_dir: if set, save gallery/query/rare/anchor embeddings for this
+        step as one .npz. anchor_dataset holds the last training event per
+        individual (embedded unfiltered, regardless of gallery_threshold);
+        export_meta holds pre-sliced filename/id/ymdh/quality arrays aligned
+        to each embedding block.
     """
     model.eval()
     arcface_loss.eval()
@@ -1813,6 +1819,40 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
         scores_unknown = compute_cosine_similarity(rare_emb, gallery_embeddings)
     else:
         scores_unknown = torch.empty(0, len(gallery_embeddings)).to(device)
+
+    # ---- Embedding export: one .npz per (gallery_threshold, step) ----
+    if export_dir is not None:
+        step = schedule_entries[0][1]
+
+        anchor_torch = ArcFaceDataset(anchor_dataset, eval_transform, individual_to_class)
+        anchor_loader = DataLoader(anchor_torch, batch_size=EVAL_BATCH_SIZE, shuffle=False,
+                                   num_workers=EVAL_NUM_WORKERS, pin_memory=use_amp)
+        anchor_embeddings = []
+        with torch.no_grad(), torch.amp.autocast('cuda', enabled=use_amp):
+            for images, _, _ in anchor_loader:
+                images = images.to(device, non_blocking=True)
+                anchor_embeddings.append(model(images))
+        anchor_embeddings = torch.cat(anchor_embeddings, dim=0).float()
+
+        os.makedirs(export_dir, exist_ok=True)
+        npz_path = os.path.join(export_dir, f"emb_g{gallery_threshold:.2f}_step{step}.npz")
+        np.savez_compressed(
+            npz_path,
+            gallery_emb=gallery_embeddings.cpu().numpy().astype(np.float16),
+            query_emb=query_embeddings.cpu().numpy().astype(np.float16),
+            rare_emb=rare_emb.cpu().numpy().astype(np.float16),
+            anchor_emb=anchor_embeddings.cpu().numpy().astype(np.float16),
+            per_individual_thresholds=json.dumps(
+                {k: float(v) for k, v in per_individual_thresholds.items()}),
+            global_threshold=float(global_threshold),
+            step=step,
+            gallery_threshold=gallery_threshold,
+            backbone=model_config["backbone_label"],
+            **export_meta,
+        )
+        print(f"    Exported embeddings: {npz_path} "
+              f"(gallery={len(gallery_embeddings)}, query={len(query_embeddings)}, "
+              f"rare={len(rare_emb)}, anchor={len(anchor_embeddings)})")
 
     # Evaluate each q_thresh combo at this step
     for q_thresh, step, sweep_score in schedule_entries:
@@ -2079,6 +2119,36 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
         'rare_labels_str': rare_labels_str,
     }
 
+    # ---- Optional embedding export (anchor = last training event per individual) ----
+    export_dir = None
+    anchor_dataset = None
+    export_meta = None
+    if getattr(args, 'export_embeddings', False):
+        export_dir = os.path.join(experiment_dir, "results", "embeddings")
+        anchor_indices = []
+        for ind_id in feasible_individuals:
+            ind_indices = id_to_indices.get(ind_id, [])
+            if not ind_indices:
+                continue
+            last_event = max(train_metadata_cache['ymdh'][i] for i in ind_indices)
+            anchor_indices.extend(
+                i for i in ind_indices if train_metadata_cache['ymdh'][i] == last_event
+            )
+        anchor_dataset = train_dataset.select(anchor_indices)
+        export_meta = {}
+        for prefix, cache, indices in [
+            ('gallery', train_metadata_cache, all_gallery_indices),
+            ('query', test_metadata_cache, all_query_indices),
+            ('rare', combined_rare_metadata, rare_indices),
+            ('anchor', train_metadata_cache, anchor_indices),
+        ]:
+            export_meta[f'{prefix}_filenames'] = np.asarray(cache['filenames'][indices], dtype=str)
+            export_meta[f'{prefix}_ids'] = np.asarray(cache['ids'][indices], dtype=str)
+            export_meta[f'{prefix}_ymdh'] = np.asarray(cache['ymdh'][indices])
+            export_meta[f'{prefix}_quality'] = np.asarray(cache['quality_scores'][indices])
+        print(f"  Embedding export ON: anchor={len(anchor_indices)} images "
+              f"(last train event per individual) -> {export_dir}")
+
     # ---- Create model ----
     device = "cuda" if args.device == "gpu" and torch.cuda.is_available() else "cpu"
     model, emb_dim = create_arcface_model(model_name, embedding_dim=best_embedding_dim,
@@ -2187,6 +2257,8 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
                 elapsed, best_lr, best_size, best_embedding_dim,
                 aug_flags, model_config, seed, gallery_info, query_info,
                 all_gallery_indices, all_query_indices, rare_indices_cache,
+                export_dir=export_dir, anchor_dataset=anchor_dataset,
+                export_meta=export_meta,
             )
 
         if global_step >= max_step:
@@ -2265,6 +2337,9 @@ if __name__ == "__main__":
                                        help="Final test from step-count sweep")
     add_common_args(sub_tstep)
     sub_tstep.add_argument("--seed", type=int, default=0)
+    sub_tstep.add_argument("--export-embeddings", action="store_true",
+                           help="Save gallery/query/rare/anchor embeddings per "
+                                "eval step to results/embeddings/")
 
     args = parser.parse_args()
     model_name = args.model

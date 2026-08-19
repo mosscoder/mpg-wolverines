@@ -44,7 +44,7 @@ echo "========================================"
 python -u -m utils.reid test_step_eval --model bioclip2 \
     --idx $SLURM_ARRAY_TASK_ID \
     --output_dir reid_openset/bioclip2/results/test_eval \
-    --device gpu --seed 0
+    --device gpu --seed 0 --overwrite --export-embeddings
 
 # Print completion info
 echo "========================================"
