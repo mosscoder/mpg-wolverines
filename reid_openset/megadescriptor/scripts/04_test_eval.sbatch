@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=test_step_eval_MD
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --requeue
 #SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00
-#SBATCH --exclude=babel-l5-[16,20,24],babel-y5-16,babel-x9-24
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/test_eval/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/test_eval/%A_%a.err
 
