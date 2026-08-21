@@ -2283,8 +2283,8 @@ if __name__ == "__main__":
     import argparse
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["HF_DATASETS_OFFLINE"] = "1"
-    os.environ["HF_HOME"] = "/data/hf_cache"
+    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+    os.environ.setdefault("HF_HOME", "/data/user_data/kdoherty/hf_cache")
 
     parser = argparse.ArgumentParser(description="Reid open-set experiments")
     subparsers = parser.add_subparsers(dest="command", required=True)

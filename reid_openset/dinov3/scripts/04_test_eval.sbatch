@@ -26,7 +26,7 @@ source ~/.bashrc
 mamba activate wolverines
 
 # Set HuggingFace cache to cluster's shared cache (private dataset)
-export HF_HOME=/data/hf_cache
+export HF_HOME=/data/user_data/kdoherty/hf_cache
 export HF_DATASETS_OFFLINE=1
 
 # Use node-local scratch for temp files (avoids /tmp full errors)
