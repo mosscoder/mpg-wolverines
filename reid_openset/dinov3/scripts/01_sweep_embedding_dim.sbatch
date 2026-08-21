@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=opt_emb_dim_sweep
 #SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --requeue
 #SBATCH --array=0-9
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=4:00:00
-#SBATCH --exclude=babel-l5-[16,20,24],babel-y5-16,babel-x9-24
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/DINOv3/embedding_dim/%A_%a.err
 
@@ -28,7 +28,7 @@ source ~/.bashrc
 mamba activate wolverines
 
 # Set HuggingFace cache to cluster's shared cache (private dataset)
-export HF_HOME=/data/hf_cache
+export HF_HOME=/data/user_data/kdoherty/hf_cache
 export HF_DATASETS_OFFLINE=1
 
 # Use node-local scratch for temp files (avoids /tmp full errors)
