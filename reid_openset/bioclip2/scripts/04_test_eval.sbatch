@@ -53,9 +53,11 @@ python -u -m utils.reid test_step_eval --model bioclip2 \
     --idx $GAL_IDX \
     --output_dir reid_openset/bioclip2/results/test_eval_seeds \
     --device gpu --seed $SEED --overwrite --export-embeddings
+rc=$?
 
 # Print completion info
 echo "========================================"
 echo "End time: $(date)"
-echo "Job completed"
+echo "Python exit code: $rc"
 echo "========================================"
+exit $rc
