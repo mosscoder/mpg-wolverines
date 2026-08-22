@@ -42,9 +42,11 @@ words and shallow. Convention shared with the vole repo
 - **Positive**: The paired design works as intended. Absolute macro R@1
   swings 0.716 to 0.790 across seeds (matching the probe's noise
   estimate), yet within-seed differences between filtered and unfiltered
-  evaluations never exceed 0.032 under any temporal regime, certifying
-  the E2 no-inflation claim independently of training noise. Smoke cell
-  matched the probe run to the 4th decimal.
+  evaluations never exceed 0.027 under any temporal regime (200 thinning
+  draws; 20 draws left ~0.02 Monte Carlo error that faked an
+  event-vs-1000s gap), certifying the E2 no-inflation claim
+  independently of training noise. Smoke cell matched the probe run to
+  the 4th decimal.
 - **Negative**: The new RTX_PRO_6000 (Blackwell, sm_120) preempt nodes
   fail twice over: PyTorch 2.7.1 has no sm_120 kernels, and the nodes
   arrived with empty or missing caches. Worse, test_step_eval's
