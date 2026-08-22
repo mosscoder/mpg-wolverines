@@ -2498,6 +2498,9 @@ if __name__ == "__main__":
             print(f"Error: {e}")
             import traceback
             traceback.print_exc()
+            # Propagate failure to Slurm; swallowing here made crashed
+            # tasks report COMPLETED 0:0.
+            sys.exit(1)
 
         print(f"\nJob {args.idx} (test_step_eval) completed!")
 
