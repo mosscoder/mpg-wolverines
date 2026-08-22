@@ -39,9 +39,20 @@ words and shallow. Convention shared with the vole repo
   `results/embeddings/` with `_seed={s}`. Arrays 0-14 per backbone
   (3 gallery thresholds x seeds 0-4), 45 tasks, smoke-gated on dinov3
   task 0. `results/test_eval/` and `summary/` deliberately untouched.
-- **Positive**: pending (runs in flight 2026-08-21).
-- **Negative**: pending. Determinism holds per GPU model only; preempt is
-  heterogeneous, and a preempted requeue restarts from step 0.
+- **Positive**: The paired design works as intended. Absolute macro R@1
+  swings 0.716 to 0.790 across seeds (matching the probe's noise
+  estimate), yet within-seed differences between filtered and unfiltered
+  evaluations never exceed 0.032 under any temporal regime, certifying
+  the E2 no-inflation claim independently of training noise. Smoke cell
+  matched the probe run to the 4th decimal.
+- **Negative**: The new RTX_PRO_6000 (Blackwell, sm_120) preempt nodes
+  fail twice over: PyTorch 2.7.1 has no sm_120 kernels, and the nodes
+  arrived with empty or missing caches. Worse, test_step_eval's
+  top-level except printed the traceback and exited 0, so every such
+  crash reported COMPLETED (fixed: exit 1 in 345dbcb, sbatch rc
+  propagation in 641be52, GPU-type constraint in 345dbcb). One
+  fast-failing node black-holed most of a wave. Determinism holds per
+  GPU model only; a preempted requeue restarts from step 0.
 - **Follow-up**: E2 ladder and letter numbers via
   `manuscript/review/external/figs/make_e2_ablation.py` (seed-aware
   rework validated against the probe npz). Separate decision owed on
