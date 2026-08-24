@@ -3,7 +3,7 @@
 #SBATCH --partition=preempt
 #SBATCH --qos=preempt_qos
 #SBATCH --requeue
-#SBATCH --array=0-14
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
@@ -15,13 +15,9 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval/%A_%a.err
 
-# Final test evaluation from step-count sweep, five training replicates
-# (15 jobs = 3 gallery_q x 5 RNG seeds):
-#   task % 3 -> gallery_q (0: g>=0.00, 1: g>=0.25, 2: g>=0.50)
-#   task / 3 -> training seed (0..4)
-# Each reads 5 seed sweep results, finds best step per (metric, query_q).
-# Outputs land in results/test_eval_seeds/ and results/embeddings/ with
-# _seed={s} suffixes; results/test_eval/ (manuscript numbers) is untouched.
+# Final test evaluation from step-count sweep (3 jobs, one per gallery_q):
+#   idx=0: g>=0.00    idx=1: g>=0.25    idx=2: g>=0.50
+# Each reads 5 seed sweep results, finds best step per (metric, query_q)
 
 # Create log directory if it doesn't exist
 mkdir -p /home/kdoherty/logs/wolverines/reid_openset/BioCLIP2/test_eval
@@ -41,22 +37,19 @@ export HF_DATASETS_OFFLINE=1
 export TMPDIR=/scratch/kdoherty
 mkdir -p $TMPDIR
 
-GAL_IDX=$((SLURM_ARRAY_TASK_ID % 3))
-SEED=$((SLURM_ARRAY_TASK_ID / 3))
-
 # Print job info
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
-echo "Array Task ID: $SLURM_ARRAY_TASK_ID (gallery idx $GAL_IDX, seed $SEED)"
+echo "Array Task ID: $SLURM_ARRAY_TASK_ID"
 echo "Node: $SLURMD_NODENAME"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo "Start time: $(date)"
 echo "========================================"
 
 python -u -m utils.reid test_step_eval --model bioclip2 \
-    --idx $GAL_IDX \
-    --output_dir reid_openset/bioclip2/results/test_eval_seeds \
-    --device gpu --seed $SEED --overwrite --export-embeddings
+    --idx $SLURM_ARRAY_TASK_ID \
+    --output_dir reid_openset/bioclip2/results/test_eval \
+    --device gpu --seed 0 --overwrite --export-embeddings
 rc=$?
 
 # Print completion info

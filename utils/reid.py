@@ -1835,8 +1835,7 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
         anchor_embeddings = torch.cat(anchor_embeddings, dim=0).float()
 
         os.makedirs(export_dir, exist_ok=True)
-        npz_path = os.path.join(
-            export_dir, f"emb_g{gallery_threshold:.2f}_step{step}_seed={seed}.npz")
+        npz_path = os.path.join(export_dir, f"emb_g{gallery_threshold:.2f}_step{step}.npz")
         np.savez_compressed(
             npz_path,
             gallery_emb=gallery_embeddings.cpu().numpy().astype(np.float16),
@@ -1953,8 +1952,7 @@ def _evaluate_and_save(model, arcface_loss, gallery_dataset, query_dataset,
             },
         }
 
-        output_path = os.path.join(
-            output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}_seed={seed}.json")
+        output_path = os.path.join(output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
         os.makedirs(output_dir, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(result, f, indent=2,
@@ -1979,10 +1977,7 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
 
     model_config = MODEL_CONFIGS[model_name]
     experiment_dir = model_config["experiment_dir"]
-    # Per-seed replicates live beside (not inside) test_eval/ so
-    # aggregate_results.py's flat glob over test_eval/*.json never
-    # double-counts them.
-    output_dir = os.path.join(experiment_dir, "results", "test_eval_seeds")
+    output_dir = os.path.join(experiment_dir, "results", "test_eval")
 
     seed = args.seed
 
@@ -2001,8 +1996,7 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
     remaining = []
     for entry in schedule:
         q_thresh, step, score = entry
-        out_path = os.path.join(
-            output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}_seed={seed}.json")
+        out_path = os.path.join(output_dir, f"g{gallery_threshold:.2f}_q{q_thresh:.2f}.json")
         if os.path.exists(out_path) and not args.overwrite:
             print(f"  SKIP (exists): {out_path}")
         else:
@@ -2023,12 +2017,6 @@ def run_test_from_step_sweep(model_name, args, gallery_threshold):
     max_step = max(eval_steps)
 
     set_all_seeds(seed)
-    # Deterministic mode is scoped to this subcommand: the frozen backbone
-    # never sees a backward pass, so the deterministic kernels cost little
-    # and each seed replicate is exactly re-runnable on one GPU model.
-    torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
     print("=" * 70)
     print(f"Test Step Eval: {model_config['backbone_label']}, "
@@ -2297,9 +2285,6 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
     os.environ.setdefault("HF_HOME", "/data/user_data/kdoherty/hf_cache")
-    # Required for deterministic cuBLAS matmuls (test_step_eval turns on
-    # torch.use_deterministic_algorithms); must be set before CUDA init.
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     parser = argparse.ArgumentParser(description="Reid open-set experiments")
     subparsers = parser.add_subparsers(dest="command", required=True)
