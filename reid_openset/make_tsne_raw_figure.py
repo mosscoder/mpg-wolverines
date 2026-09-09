@@ -218,8 +218,8 @@ def main():
             extract_raw_features(missing or MODELS)
 
     fig, axes = plt.subplots(2, 3, figsize=(16.5, 10.2))
-    rows = [(panel_raw, 'Raw features (untrained)'),
-            (panel_trained, f'ArcFace training on gallery >= {Q:.1f}\n'
+    rows = [(panel_raw, 'Before training\nNo quality filtering'),
+            (panel_trained, f'After ArcFace training on gallery >= {Q:.1f}\n'
                             f'Unknown queries >= {Q:.1f}')]
     for row, (maker, row_label) in enumerate(rows):
         panels = {m: maker(m) for m in MODELS}
