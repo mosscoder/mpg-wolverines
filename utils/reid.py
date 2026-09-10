@@ -950,7 +950,7 @@ def run_final_test(model_name, args, seed, task_name):
         the filtered gallery's per-event image counts
 
     Thresholds are computed fresh from the trained model's own ArcFace centers
-    (p5 percentile), not imported from hygiene averages.
+    (10th percentile), not imported from hygiene averages.
 
     Args:
         model_name: Key in MODEL_CONFIGS
