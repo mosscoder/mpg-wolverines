@@ -47,6 +47,10 @@ for key in ORDER:
                  f"{f1.mean():.3f} $\\pm$ {f1.std(ddof=1):.3f} & "
                  f"{pr.mean():.3f} & {rc.mean():.3f} \\\\")
 
+# The last row carries no trailing row break; supplement.tex writes
+# \input{...} \\ like the other fragments, and a break before \bottomrule
+# breaks the tabular.
+lines[-1] = lines[-1].rstrip(' \\')
 with open(OUT, 'w') as f:
     f.write('\n'.join(lines) + '\n')
 print(f'wrote {OUT}')
