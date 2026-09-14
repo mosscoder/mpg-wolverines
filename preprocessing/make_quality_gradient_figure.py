@@ -15,7 +15,8 @@ broken by image count. HLC20-H3 2022-03-30 16:51 and HFW12-F7 2016-03-25
 12:48 cover all ten. Turk 2022-03-18 16:33 was chosen over Turk's only
 full-coverage color event (2022-03-30 10:03) on appearance; it lacks the
 [0.4, 0.5) tenth, so that cell falls back to the event's nearest scores and
-prints the score it actually has (0.325 at seed 1).
+prints the score it actually has (0.325 at seed 1). Each row is plotted in
+score order after drawing, so every row reads low to high left to right.
 
 Selection is deterministic. Within each cell the candidates are that event's
 upright color crops in the score range whose bounding-box aspect (height
@@ -98,6 +99,7 @@ def main():
                         top=0.95, bottom=0.10)
     for r, ind in enumerate(ROWS):
         used = set()
+        picks = []
         for c in range(NB):
             lo, hi = c / NB, (c + 1) / NB
             in_range = (scores >= lo) & ((scores < hi) if c < NB - 1 else (scores <= hi))
@@ -114,6 +116,11 @@ def main():
             cand = fit if len(fit) >= KA else cand[np.argsort(da, kind='stable')[:KA]]
             i = int(rng.choice(cand))
             used.add(i)
+            picks.append((lo, hi, len(cand), i))
+        # plot the row in score order, so a fallback image sits where its score belongs
+        picks.sort(key=lambda t: scores[t[3]])
+        for c, (lo, hi, ncand, i) in enumerate(picks):
+            cand = np.array([i] * ncand)  # only the count is reported below
             ax = axes[r, c]
             ax.imshow(fit_box(d[i]['image'].convert('RGB')))
             ax.set_xticks([])
