@@ -1,29 +1,41 @@
-"""Figure 2 (R1 revision): the quality score as a gradient.
+"""Figure 2 (R1 revision): the quality score as a gradient within single
+capture events.
 
 Rows are the three known individuals with the most training images (Turk,
-HLC20-H3, HFW12-F7). Columns are the ten tenths of the quality score range
-([0.0, 0.1), ..., [0.9, 1.0]). Each cell shows one training image of that
-individual whose score falls in that tenth, with the exact score printed
-lower left, and a white-to-green gradient arrow labeled "Quality score"
-runs beneath the grid. The word "bin" appears nowhere on the figure.
+HLC20-H3, HFW12-F7). Each row is ONE daytime (color) capture event of that
+individual, so camera, scene, lighting, and animal are fixed within a row and
+only the pose changes. Columns walk the ten tenths of the quality score
+range ([0.0, 0.1), ..., [0.9, 1.0]) left to right, one image per cell with
+the exact score printed lower left, and a white-to-green gradient arrow
+labeled "Quality score" runs beneath the grid. The word "bin" appears
+nowhere on the figure.
 
-Selection is deterministic. Within each cell the candidates are that
-individual's training crops in the score range whose bounding-box aspect
-(height over width) is within ATOL of the 1:2 thumbnail box, or the KA
-nearest in aspect when fewer than KA qualify, so that every thumbnail keeps
-at least 96% of its crop after the center crop to the box. One candidate is
-drawn with a seeded generator (SEED, default 1, chosen 2026-09-14). A
-different seed rerolls every cell: python preprocessing/make_quality_gradient_figure.py 3
+Event choice (2026-09-14): the color event covering the most tenths, ties
+broken by image count. HLC20-H3 2022-03-30 16:51 and HFW12-F7 2016-03-25
+12:48 cover all ten. Turk 2022-03-18 16:33 was chosen over Turk's only
+full-coverage color event (2022-03-30 10:03) on appearance; it lacks the
+[0.4, 0.5) tenth, so that cell falls back to the event's nearest scores and
+prints the score it actually has (0.325 at seed 1).
+
+Selection is deterministic. Within each cell the candidates are that event's
+upright color crops in the score range whose bounding-box aspect (height
+over width) is within ATOL of the 1:2 thumbnail box, or the KA nearest in
+aspect when fewer than KA qualify, so no thumbnail loses much to the center
+crop. If the event has no image in the range, the KA images nearest the
+range midpoint stand in. No image is used twice in a row. One candidate is
+drawn with a seeded generator (SEED, default 1). A different seed rerolls
+every cell: python preprocessing/make_quality_gradient_figure.py 3
 
 Inputs: the local re-identification dataset train split
 (hugging_face_dataset/v2/data/reidentification_dataset/train, columns id,
-pelage_score, bbox_width, bbox_height, image). Output:
+pelage_score, color, bbox_width, bbox_height, filename, image). Output:
 preprocessing/results/quality_gradient.png, copied to
 manuscript/flat_submission/ by manuscript/update.py.
 
 Run in the wolverines env (datasets, pyarrow).
 """
 import os
+import re
 import sys
 
 import numpy as np
@@ -42,6 +54,11 @@ DATA = os.path.join(ROOT, 'hugging_face_dataset', 'v2', 'data',
 OUT = os.path.join(HERE, 'results', 'quality_gradient.png')
 
 ROWS = ['Turk', 'HLC20-H3', 'HFW12-F7']   # most training images, Table 2
+EVENT = {                                  # one color event per row, minute-resolution start
+    'Turk': '202203181633',
+    'HLC20-H3': '202203301651',
+    'HFW12-F7': '201603251248',
+}
 NB = 10                                    # tenths of the score range
 SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 W, H = 240, 480                            # thumbnail box, 1:2 like the typical crop
@@ -71,7 +88,8 @@ def main():
     scores = np.array(d['pelage_score'], dtype=float)
     aspect = (np.array(d['bbox_height'], dtype=float)
               / np.array(d['bbox_width'], dtype=float))
-    upright = (aspect >= 1.0) & (aspect <= 2.5)
+    upright = (aspect >= 1.0) & (aspect <= 2.5) & (np.array(d['color']) == 1)
+    ev = np.array([re.search(r'_(\d{12})_', f).group(1) for f in d['filename']])
     rng = np.random.default_rng(SEED)
 
     fig, axes = plt.subplots(len(ROWS), NB,
@@ -79,14 +97,23 @@ def main():
     fig.subplots_adjust(wspace=0.01, hspace=0.02, left=0.04, right=0.995,
                         top=0.95, bottom=0.10)
     for r, ind in enumerate(ROWS):
+        used = set()
         for c in range(NB):
             lo, hi = c / NB, (c + 1) / NB
             in_range = (scores >= lo) & ((scores < hi) if c < NB - 1 else (scores <= hi))
-            cand = np.flatnonzero((ids == ind) & upright & in_range)
+            pool = np.flatnonzero((ids == ind) & (ev == EVENT[ind]) & upright)
+            pool = np.array([j for j in pool if j not in used], dtype=int)
+            cand = pool[in_range[pool]]
+            if len(cand) == 0:  # tenth absent from this event: nearest scores in the event
+                mid = (lo + hi) / 2
+                cand = pool[np.argsort(np.abs(scores[pool] - mid), kind='stable')[:KA]]
+                print(f'FALLBACK {ind} [{lo:.1f}, {hi:.1f}): no images in tenth, nearest scores '
+                      f'{np.round(np.sort(scores[cand]), 3).tolist()}')
             da = np.abs(aspect[cand] - BOX)
             fit = cand[da <= ATOL]
             cand = fit if len(fit) >= KA else cand[np.argsort(da, kind='stable')[:KA]]
             i = int(rng.choice(cand))
+            used.add(i)
             ax = axes[r, c]
             ax.imshow(fit_box(d[i]['image'].convert('RGB')))
             ax.set_xticks([])
