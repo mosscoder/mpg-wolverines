@@ -24,7 +24,7 @@ summary/tsne/tsne_raw_meta.npz and t-SNE coordinates in
 summary/tsne/tsne_raw_coords.npz; both are tracked so the figure
 regenerates without recompute.
 
-Palette as in make_tsne_figure.py: Turk orange, HFW12-F7 brown, Tex cyan,
+Palette: Turk orange, HFW12-F7 brown, Tex cyan,
 unknowns red.
 
     python reid_openset/make_tsne_raw_figure.py

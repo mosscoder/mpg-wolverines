@@ -15,7 +15,7 @@
 #SBATCH --output=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/generate_embeddings/%A_%a.out
 #SBATCH --error=/home/kdoherty/logs/wolverines/reid_openset/MegaDescriptor/generate_embeddings/%A_%a.err
 
-# Generates the embedding exports consumed by reid_openset/make_tsne_figure.py:
+# Generates the embedding exports consumed by reid_openset/make_tsne_raw_figure.py:
 #   reid_openset/megadescriptor/results/embeddings/emb_g{gallery_q}_step{step}.npz
 # One array job per gallery threshold (idx=0: g>=0.00, 1: g>=0.25, 2: g>=0.50).
 # Each trains to the step-count sweep's best steps for its combos and exports
