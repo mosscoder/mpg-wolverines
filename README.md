@@ -62,7 +62,9 @@ on first run.
 
 The experiments were run on a Slurm cluster with a preemptible GPU partition.
 Every `.sbatch` file changes to the repository root and uses relative paths,
-and training scripts checkpoint and resume on preemption.
+and the [training scripts](reid_openset/README.md#running-on-slurm) checkpoint
+and resume on preemption. That section explains how the batch files are
+built, what to change for another cluster, and how to run without Slurm.
 
 ## Data
 

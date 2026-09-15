@@ -35,6 +35,53 @@ files wrap them as Slurm array jobs and are the record of the arguments used.
 sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch   # and likewise per encoder and stage
 ```
 
+## Running on Slurm
+
+Every `.sbatch` file in this directory has the same shape, so once you have
+read one you have read them all.
+
+**The header** asks for one GPU, 16 CPUs, 32 GB, and 48 hours on a
+preemptible partition with `--requeue`. Preemption means the scheduler may
+kill a job to make room for higher-priority work and start it again later;
+the training code checkpoints as it goes and resumes from the last
+checkpoint, so a requeued job loses minutes, not hours. `--array=0-N`
+launches N+1 independent tasks from one file, and each task receives its
+number as `$SLURM_ARRAY_TASK_ID`.
+
+**The body** creates the log directory, changes to the repository root,
+activates the `wolverines` environment, points the Hugging Face cache at
+shared storage in offline mode, sets a scratch directory, and runs one
+command:
+
+```bash
+python -u -m utils.reid <command> --model <encoder> --idx $SLURM_ARRAY_TASK_ID \
+    --output_dir reid_openset/<encoder>/results/<stage> --device gpu
+```
+
+The `--idx` value selects one configuration from the stage's grid (which
+learning rate and seed, which threshold, gallery size, and seed, and so on),
+so the file's header comment states how many tasks the stage has and what
+each index means. Task counts: 20 for the learning rate sweep, 10 for the
+embedding dimension, 24 for the few-shot analysis (six configurations per
+task), 15 for the step count, and 3 for the test evaluation.
+
+**On another cluster**, edit only the top of the file: the partition, QOS,
+and any GPU `--constraint`, the four absolute paths (log directory,
+repository root, Hugging Face cache, scratch), and the environment
+activation line. Everything after `cd` is relative to the repository root.
+The dataset must be in the cache before offline jobs run; `scripts/populate_hf_cache.sbatch`
+downloads both configurations once on a node with network access.
+
+**Without Slurm**, run the same command in a loop over the index values on
+any machine with a GPU (`--device cpu` works but is slow). Each index is
+independent and writes its own results file, so tasks can run in any order
+or on several machines.
+
+Useful commands: `sbatch file.sbatch` submits, `squeue -u $USER` lists your
+jobs, `sacct -j <jobid>` shows the state of each array task after it ends,
+and `sbatch --array=3,7 file.sbatch` reruns only the tasks that failed. Logs
+land in the directory named by `--output` and `--error`, one file per task.
+
 Selected hyperparameters for the manuscript (learning rate 0.0005 and 256
 dimensions for DINOv3 and MegaDescriptor, 0.001 and 512 for BioCLIP-2) are
 listed in `summary/fewshot/hyperparameters.md`.

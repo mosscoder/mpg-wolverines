@@ -16,7 +16,8 @@
 #
 # Uses raw cosine similarity instead of T-Norm:
 # - L2-normalized embeddings for cosine similarity scores in [0, 1]
-# - Calibrates threshold on raw cosine scores using LOO within gallery
+# - Calibrates per-individual novelty thresholds at the 10th percentile of
+#   gallery-to-ArcFace-center cosine similarity
 # - Evaluates Balanced Accuracy = (Known Accept + Unknown Reject) / 2
 # - Macro-averaged per-individual metrics for fair comparison across individuals
 
