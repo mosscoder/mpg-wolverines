@@ -42,3 +42,10 @@ The production head is applied to every out-of-sample crop by
 `pelage_score` column of the re-identification dataset.
 
 Experiment notes are in `RESEARCH_LOG.md`.
+
+## See also
+
+- [Repository overview](../README.md)
+- [Dataset creation](../hugging_face_dataset/v2/README.md)
+- [Role assignment and manuscript assets](../preprocessing/README.md)
+- [Re-identification and novelty detection](../reid_openset/README.md)

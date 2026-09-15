@@ -39,7 +39,7 @@ sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch   # and likewise per 
 
 A Slurm cluster with a GPU partition is a prerequisite: every stage is
 launched as an array job. Every `.sbatch` file in this directory has the same
-shape, so once you have read one you have read them all.
+structure.
 
 **The header** asks for one GPU, 16 CPUs, 32 GB, and 48 hours on a
 preemptible partition with `--requeue`. Preemption means the scheduler may
@@ -107,3 +107,10 @@ Implemented in `utils/reid_evaluation.py`.
 
 `bioclip2/PROJECTION_NOTES.md` records how BioCLIP-2's text-alignment layer is
 handled.
+
+## See also
+
+- [Repository overview](../README.md)
+- [Dataset creation](../hugging_face_dataset/v2/README.md)
+- [Pelage visibility classifier](../pelage_sorting/README.md)
+- [Role assignment and manuscript assets](../preprocessing/README.md)

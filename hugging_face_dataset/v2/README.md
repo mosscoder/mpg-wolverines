@@ -157,3 +157,10 @@ minute of the first frame, are:
 
 How the 558 inference events are assigned to gallery, validation, and unknown
 roles is documented in [preprocessing/README.md](../../preprocessing/README.md).
+
+## See also
+
+- [Repository overview](../../README.md)
+- [Pelage visibility classifier](../../pelage_sorting/README.md)
+- [Role assignment and manuscript assets](../../preprocessing/README.md)
+- [Re-identification and novelty detection](../../reid_openset/README.md)

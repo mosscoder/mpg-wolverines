@@ -50,3 +50,10 @@ recent 10% of a known individual's events, held out whole, and the validation
 queries are the most recent events before that. No image of an individual in
 a later split predates an image of the same individual in an earlier one, so
 the evaluation measures generalization to visits the models have not seen.
+
+## See also
+
+- [Repository overview](../README.md)
+- [Dataset creation](../hugging_face_dataset/v2/README.md)
+- [Pelage visibility classifier](../pelage_sorting/README.md)
+- [Re-identification and novelty detection](../reid_openset/README.md)
