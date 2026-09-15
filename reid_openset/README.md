@@ -26,7 +26,7 @@ files wrap them as Slurm array jobs and are the record of the arguments used.
 |---|---|---|---|
 | `00_sweep_lr` | `opt_lr` | 4 learning rates by 5 seeds on validation queries | `results/opt/lr/` |
 | `01_sweep_embedding_dim` | `opt_embedding_dim` | embedding dimension 256 or 512 by 5 seeds | `results/opt/embedding_dim/` |
-| `02_hygiene_sweep` | `hygiene` | few-shot analysis: 3 gallery quality thresholds by 6 gallery sizes (2 to 64 images per individual) by 8 seeds, 144 runs; 300 steps, evaluated every 10, checkpoint chosen by cross-validated recall at rank one; test metrics recorded at every query threshold | `results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on |
+| `02_hygiene_sweep` | `hygiene` | few-shot analysis: 3 gallery quality thresholds by 6 gallery sizes (2 to 64 images per individual) by 8 seeds, 144 runs; 300 steps, evaluated every 10, checkpoint chosen by cross-validated recall at rank one; test metrics recorded at every query quality threshold | `results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on |
 | `03_tune_step_count` | `tune_step_count` | full-data step count: 3 gallery quality thresholds by 5 seeds, 3,000-step budget evaluated every 100 | `results/step_count/` |
 | `04_test_eval` | `test_step_eval` | full-data comparison: one seed-0 model per gallery quality threshold trained to the step selected in 03, evaluated on the test split at every query quality threshold, 9 cells per encoder | `results/test_eval/` |
 | `05_generate_embeddings` | `test_step_eval --export-embeddings` | the invocation that produced the tracked embedding exports read by the t-SNE figure | `results/embeddings/*.npz` |
