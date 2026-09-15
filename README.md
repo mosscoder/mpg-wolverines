@@ -9,7 +9,7 @@ Informatics*: automated re-identification and novelty detection of wolverines
 Wolverines are listed as threatened under the U.S. Endangered Species Act and
 occur at low density in remote terrain, so camera trap re-identification is
 one of few practical ways to study them. A bait frame exposes the ventral
-pelage pattern to a nearby game camera, but the animal moves while it feeds and the pattern is clearly visible in only a fraction of frames. The pipeline has two stages.
+pelage pattern to a nearby game camera, but the animal moves while it feeds and the pattern is clearly visible in only a fraction of images. The pipeline has two stages.
 
 1. **Pelage visibility classifier.** An image classifier scores every image from 0 to 1, the estimated
    probability that the pelage pattern is clearly visible. We call this the
@@ -25,11 +25,11 @@ Quality score thresholds of 0, 0.25, and 0.50 are applied to the gallery, to
 the queries, or to both. Re-identification is scored by recall at rank one and
 novelty detection by balanced accuracy, each averaged over individuals. Two
 experiments: a few-shot analysis (2 to 64 gallery images per individual, eight
-seeds) and a full-data comparison on a temporal test holdout.
+seeds) and a full-data comparison on the test split, the most recent events of each known individual.
 
-![Ten images from one capture event for each of three individuals, sorted left to right by quality score](preprocessing/results/quality_gradient_readme.png)
+![Ten images from one camera trap event for each of three individuals, sorted left to right by quality score](preprocessing/results/quality_gradient_readme.png)
 
-*The quality score as a gradient within a single capture event. Each row is
+*The quality score as a gradient within a single camera trap event. Each row is
 one daytime event of one individual, ten images sorted from low to high
 score, with the score printed on each image. Camera, scene, and lighting are
 fixed within a row, so the score changes with the animal's pose alone.*

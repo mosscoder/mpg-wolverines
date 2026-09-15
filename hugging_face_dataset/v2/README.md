@@ -19,7 +19,7 @@ events and categorized pelage visibility at the event level:
 
 | Metric | Count |
 |--------|-------|
-| Total capture events | 1,479 |
+| Total camera trap events | 1,479 |
 | Reviewed events | 1,385 |
 | Unreviewed events | 94 |
 
@@ -31,8 +31,8 @@ Reviewed events by category:
 | Partial | 489 | 35.3% |
 | No | 308 | 22.2% |
 
-The Robust designation applies to the capture event, not to individual images.
-Robust events contain a mixture of high and low quality frames, and that
+The Robust designation applies to the camera trap event, not to individual images.
+Robust events contain a mixture of high and low quality images, and that
 mixture is what the pelage visibility classifier (stage 1) is trained on.
 Only Robust events proceed to the pipeline.
 
@@ -56,7 +56,7 @@ the animal rather than from the scene.
 
 **Script:** `scripts/02_prepare_labeling_data.py`
 
-Images for human annotation are the **earliest capture events** for each
+Images for human annotation are the **earliest camera trap events** for each
 individual and color mode (day or night). The production classifier is
 trained on these earliest events and applied to everything captured later, so
 it never sees a "future" image during training.
@@ -104,7 +104,7 @@ probability that the pelage pattern is clearly visible, written to
 **Script:** `scripts/07_create_reidentification_dataset.py`
 
 Writes the `reidentification` configuration: every scored crop with its
-individual identity and a temporal train/test split per individual (the most
+individual identity and a temporal training and test split per individual (the most
 recent 10% of each known individual's events are the test split). Columns:
 `id`, `ymdh`, `color`, `pelage_score`, `data_source`, `filename`,
 `megadetector_confidence`, `bbox_x`, `bbox_y`, `bbox_width`, `bbox_height`,
@@ -134,7 +134,7 @@ Not all 588 Robust events reach the re-identification dataset:
 | Pelage classifier training | 20 | 2,701 | held out for training |
 | Pelage inference and re-identification | 558 | 49,312 | |
 
-**Non-overlap guarantee.** The 20 capture events used to train the pelage
+**Non-overlap guarantee.** The 20 camera trap events used to train the pelage
 visibility classifier share no image with the 558 events in the
 re-identification dataset. Script 05 enforces this by excluding every crop
 from a labeled event before inference. The 20 training events (two per

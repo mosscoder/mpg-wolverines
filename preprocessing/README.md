@@ -13,7 +13,7 @@ dataset.
 | `assign_reid_individuals.py` | An individual qualifies as known if it has at least 64 training images with quality score above 0.5 and at least one test image above 0.5. For each known individual, the most recent training events are set aside as validation queries until every quality score range ([0.75, 1], [0.5, 0.75), [0.25, 0.5), [0, 0.25)) is represented | `results/feasible_individuals.json` |
 | `assign_reid_unknowns_all_test.py` | Individuals that do not qualify become simulated unknowns. Their images in the upstream training split are identified so that all of an unknown's images serve as test queries and none enter training | `results/unknown_assignment.json` |
 | `make_table_individuals.py` | Per-individual images, events, and day spans for each split, with the gap from the last in-sample event to the first test event (manuscript Table 2) | `results/table_individuals.tex` |
-| `make_quality_gradient_figure.py` | Manuscript Figure 2: ten images spanning the quality score range from one capture event for each of the three best-sampled individuals | `results/quality_gradient.png` |
+| `make_quality_gradient_figure.py` | Manuscript Figure 2: ten images spanning the quality score range from one camera trap event for each of the three best-sampled individuals | `results/quality_gradient.png` |
 
 ## Roles
 
