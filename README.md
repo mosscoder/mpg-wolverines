@@ -36,6 +36,13 @@ fixed within a row, so the score changes with the animal's pose alone.*
 
 ## Environment
 
+**Prerequisite: a Slurm cluster with a GPU partition.** Every training and
+evaluation stage is launched as a Slurm array job, and the batch files assume
+`sbatch`, a preemptible partition, and one GPU per task. The
+[Slurm section](reid_openset/README.md#running-on-slurm) of the
+re-identification runbook explains how the batch files are built and what to
+change for your cluster.
+
 ```bash
 mamba env create -f environment.yml
 mamba activate wolverines
@@ -59,13 +66,6 @@ bash install_minimal_pytorchwildlife.sh
 The script installs PytorchWildlife from GitHub without its dependency
 resolver, then the packages it needs. It downloads the MegaDetector v6 weights
 on first run.
-
-The experiments were run on a Slurm cluster with a preemptible GPU partition.
-Every `.sbatch` file changes to the repository root and uses relative paths,
-and the training scripts checkpoint and resume on preemption. The
-[Slurm section](reid_openset/README.md#running-on-slurm) of the
-re-identification runbook explains how the batch files are built, what to
-change for another cluster, and how to run without Slurm.
 
 ## Data
 

@@ -37,8 +37,9 @@ sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch   # and likewise per 
 
 ## Running on Slurm
 
-Every `.sbatch` file in this directory has the same shape, so once you have
-read one you have read them all.
+A Slurm cluster with a GPU partition is a prerequisite: every stage is
+launched as an array job. Every `.sbatch` file in this directory has the same
+shape, so once you have read one you have read them all.
 
 **The header** asks for one GPU, 16 CPUs, 32 GB, and 48 hours on a
 preemptible partition with `--requeue`. Preemption means the scheduler may
@@ -71,11 +72,6 @@ repository root, Hugging Face cache, scratch), and the environment
 activation line. Everything after `cd` is relative to the repository root.
 The dataset must be in the cache before offline jobs run; `scripts/populate_hf_cache.sbatch`
 downloads both configurations once on a node with network access.
-
-**Without Slurm**, run the same command in a loop over the index values on
-any machine with a GPU (`--device cpu` works but is slow). Each index is
-independent and writes its own results file, so tasks can run in any order
-or on several machines.
 
 Useful commands: `sbatch file.sbatch` submits, `squeue -u $USER` lists your
 jobs, `sacct -j <jobid>` shows the state of each array task after it ends,
