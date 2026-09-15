@@ -62,6 +62,5 @@ Implemented in `utils/reid_evaluation.py`.
   center (`compute_arcface_center_thresholds`).
 - **Confidence intervals**: 95% t-intervals across seeds.
 
-Experiment notes, including negative results, are in `RESEARCH_LOG.md`.
 `bioclip2/PROJECTION_NOTES.md` records how BioCLIP-2's text-alignment layer is
 handled.

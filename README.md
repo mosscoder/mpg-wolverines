@@ -88,7 +88,7 @@ outputs, and the values used for the manuscript.
 4. [Re-identification and novelty detection](reid_openset/README.md)
 
 Experiment notes, including negative results, are in
-`pelage_sorting/RESEARCH_LOG.md` and `reid_openset/RESEARCH_LOG.md`.
+`pelage_sorting/RESEARCH_LOG.md`.
 
 ## Citation
 
