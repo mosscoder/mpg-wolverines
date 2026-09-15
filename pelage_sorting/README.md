@@ -41,8 +41,6 @@ The production head is applied to every out-of-sample crop by
 `hugging_face_dataset/v2/scripts/05_infer_pelage.py`, which produces the
 `pelage_score` column of the re-identification dataset.
 
-Experiment notes are in `RESEARCH_LOG.md`.
-
 ## See also
 
 - [Repository overview](../README.md)

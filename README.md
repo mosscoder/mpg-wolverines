@@ -104,9 +104,6 @@ outputs, and the values used for the manuscript.
 3. [Role assignment and manuscript assets](preprocessing/README.md)
 4. [Re-identification and novelty detection](reid_openset/README.md)
 
-Experiment notes, including negative results, are in
-`pelage_sorting/RESEARCH_LOG.md`.
-
 ## Citation
 
 To be added on publication.
