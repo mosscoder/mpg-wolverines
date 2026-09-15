@@ -1,6 +1,7 @@
 #!/bin/bash
 # Minimal installation script for PytorchWildlife with MegaDetectorV6
-# Only installs what's needed for 01_detect_wildlife.py script
+# Only installs what hugging_face_dataset/v2/scripts/01_run_megadetector.py needs.
+# Run inside a fresh environment (see README.md, Environment).
 # Uses MIT-licensed YOLOv9 models to avoid YOLOv5 dependencies
 
 set -e
@@ -16,7 +17,7 @@ echo "Installing ALL PytorchWildlife dependencies..."
 pip install supervision==0.23.0
 pip install torch torchvision
 pip install ultralytics
-pip install Pillow numpy tqdm
+pip install Pillow numpy pandas tqdm
 pip install wget chardet timm
 
 # For the wolverines dataset
@@ -24,4 +25,4 @@ echo "Installing dataset dependencies..."
 pip install datasets
 
 echo "Installation complete!"
-echo "Run: python process_masks/scripts/01_detect_wildlife.py --max_images 5 --confidence 0.2"
+echo "Run: python hugging_face_dataset/v2/scripts/01_run_megadetector.py --help"

@@ -42,9 +42,23 @@ mamba activate wolverines
 ```
 
 `environment.yml` pins PyTorch 2.7.1 and installs transformers from source
-(required for DINOv3). The MegaDetector cropping step runs in its own
-environment; see `install_minimal_pytorchwildlife.sh`. Gated model downloads
-read `HF_TOKEN` from a `.env` file at the repository root.
+(required for DINOv3). Gated model downloads read `HF_TOKEN` from a `.env`
+file at the repository root.
+
+The MegaDetector cropping step (dataset creation script 01) is the one part
+of the pipeline that does not run in the `wolverines` environment, because
+PytorchWildlife pins its own PyTorch and YOLO dependencies. Give it a separate
+environment:
+
+```bash
+mamba create -n megadetector python=3.12
+mamba activate megadetector
+bash install_minimal_pytorchwildlife.sh
+```
+
+The script installs PytorchWildlife from GitHub without its dependency
+resolver, then the packages it needs. It downloads the MegaDetector v6 weights
+on first run.
 
 The experiments were run on a Slurm cluster with a preemptible GPU partition.
 Every `.sbatch` file changes to the repository root and uses relative paths,
