@@ -6,8 +6,9 @@ words and shallow. Convention shared with the vole repo
 (`local_drivers/RESEARCH_LOG.md` there is the canonical template).
 
 The first two entries were written 2026-08-21 to 22, deleted with the
-five-seed revert (db59393, 2026-08-24), and restored here 2026-09-14 from
-git history, trimmed to what still holds.
+five-seed revert (be9ec26, 2026-08-24), and restored here 2026-09-14 from
+git history, trimmed to what still holds. Commit hashes throughout were
+remapped 2026-09-15 after the history rewrite that purged manuscript/.
 
 ## test-eval-reproducibility-probe
 
@@ -19,7 +20,7 @@ git history, trimmed to what still holds.
   were compared against the committed values.
 - **Positive**: Training reproduced almost exactly (losses match to the
   fourth decimal at every logged step, same tuned steps). The
-  `--export-embeddings` path (7ce7426) works end to end and produced the
+  `--export-embeddings` path (00a56d6) works end to end and produced the
   22 tracked npz files in `{model}/results/embeddings/`.
 - **Negative**: Recall@1 drifted despite identical config, standard
   deviation 0.027 across the 27 cells, worst cell moved 0.070. Cause is
@@ -34,7 +35,7 @@ git history, trimmed to what still holds.
 - **Objective**: Put an explicit error bar on every test-grid cell with
   across-seed replication, in place of a frame-level bootstrap for the
   editor's correlated-frames comment (E2).
-- **Methods**: c2d4d47 (2026-08-21). test_step_eval gained deterministic
+- **Methods**: 839ee05 (2026-08-21). test_step_eval gained deterministic
   kernels and seed-suffixed outputs, 45 tasks (3 encoders by 3 thresholds
   by seeds 0 to 4), smoke-gated on the dinov3 task 0.
 - **Positive**: Absolute macro Recall@1 swung 0.716 to 0.790 across seeds,
@@ -43,8 +44,8 @@ git history, trimmed to what still holds.
   no-inflation claim held independently of training noise.
 - **Negative**: The Blackwell preempt nodes had no sm_120 kernels for
   PyTorch 2.7.1 and the sbatch reported COMPLETED on crashes (fixed in
-  345dbcb and 641be52). Determinism holds per GPU model only.
-- **Follow-up**: Reverted 2026-08-24 (db59393). The roadmap decided E2
+  e601b1e and 426113f). Determinism holds per GPU model only.
+- **Follow-up**: Reverted 2026-08-24 (be9ec26). The roadmap decided E2
   argues from the manuscript's reported results alone, so no event-matched
   control shipped and the seed-level code was removed. The only artifact,
   a test-crop EXIF timestamp CSV, was deleted 2026-09-14.
@@ -54,7 +55,7 @@ git history, trimmed to what still holds.
 - **Objective**: First Figure 7 candidate for R1.7, each encoder's
   embedding space at its best re-identification and best novelty
   detection filter combination.
-- **Methods**: `make_tsne_figure.py` (74356c0, 2026-08-26), fit-on-all
+- **Methods**: `make_tsne_figure.py` (7ec0360, 2026-08-26), fit-on-all
   t-SNE per panel with Procrustes alignment, coordinates cached in
   `summary/tsne/tsne_coords.npz`.
 - **Positive**: Established the palette, alignment, and marker
@@ -69,7 +70,7 @@ git history, trimmed to what still holds.
 - **Objective**: Figure 7 for R1.7 and the mechanism cited in R1.2: the
   frozen feature space of each encoder before training against the
   ArcFace embedding after training at gallery filter 0.50.
-- **Methods**: `make_tsne_raw_figure.py` (859c8e7, 2026-09-09). Row 1
+- **Methods**: `make_tsne_raw_figure.py` (fbabced, 2026-09-09). Row 1
   reads raw encoder features cached in `summary/tsne/raw_features/`
   (recomputed from the dataset if absent), row 2 reads the tracked
   embedding exports at the best balanced-accuracy step. Selection and

@@ -163,7 +163,7 @@ The pipeline processes only "Robust" capture events. Not all 588 robust events r
 
 The 558 inference events (49,312 images) partition across experimental roles based on individual identity and sample sufficiency. Gallery-eligible individuals have enough events to populate gallery and validation sets; simulated unknowns serve as novel individuals during open-set evaluation.
 
-Source: `hugging_face_dataset/v2/data/feasible_individuals.json`, `hugging_face_dataset/v2/data/quality_capture_rates.json`
+Source: `preprocessing/results/feasible_individuals.json`, `hugging_face_dataset/v2/data/quality_capture_rates.json`
 
 | Role | Individual | Events | Images |
 |------|-----------|--------|--------|
@@ -386,12 +386,13 @@ HuggingFace datasets use Apache Arrow, which stores data in columnar format:
 - Row-based: Read row -> Extract field -> Repeat 44,201 times (cache misses, object allocations)
 - Column-based: Read entire column in one sequential scan (zero-copy to numpy)
 
-**Implementation:** `utils/arrow_cache.py`, `utils/optimized_filters.py`
+**Implementation:** `utils/optimized_filters.py`
 
-### S2. Detailed Metric Justification
+### S2. Metric Definitions
 
-See `reid_openset/METRICS.md` for comprehensive discussion of:
-- Why F1 macro-averaging mixes populations unfairly
-- Mathematical formulation of Balanced Accuracy components
-- Separation of detection task from identification task
-- Implementation details for LOO threshold calibration
+Recall at rank one and balanced accuracy are defined in the manuscript's Methods
+(Section 2.5.4) and implemented in `utils/reid_evaluation.py`: recall at rank one
+averages per-individual top-1 accuracy over known individuals, and balanced accuracy
+is the mean of the known acceptance rate and the unknown rejection rate, each averaged
+over individuals. Novelty thresholds are calibrated per individual from the 10th
+percentile of gallery-to-ArcFace-center cosine similarity (`compute_arcface_center_thresholds`).
