@@ -4,47 +4,16 @@ A systematic hyperparameter optimization workflow for identifying high-quality w
 
 ## Installation
 
-**Prerequisites**: GPU cluster with CUDA support (CUDA 11.8 or 12.x) and mamba/conda
+**Prerequisites**: GPU cluster with CUDA support and mamba/conda
 
-### Option 1: Using the Installation Script (Recommended)
 ```bash
-# Clone repository
-cd /home/kdoherty/wolverines/
-git clone <repo-url> pelage_sorting
-
-# Run installation script (creates environment and installs all dependencies)
-cd pelage_sorting
-bash ../install_dependencies.sh
-
-# Script automatically:
-# - Creates mamba environment 'wolverines' with Python 3.12
-# - Detects CUDA version and installs appropriate PyTorch
-# - Installs all required dependencies
-```
-
-### Option 2: Using Conda Environment File
-```bash
-# Create environment from file
+# From the repository root
 mamba env create -f environment.yml
 mamba activate wolverines
-
-# Note: Requires CUDA 12.1 by default - edit environment.yml for different CUDA versions
 ```
 
-### Option 3: Manual Installation
-```bash
-mamba create -n wolverines python=3.12
-mamba activate wolverines
-
-# Install PyTorch (adjust CUDA version as needed)
-pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu121
-
-# Install other dependencies
-pip install -r requirements.txt
-
-# Install transformers from source (required for DINOv3)
-pip install git+https://github.com/huggingface/transformers.git
-```
+`environment.yml` pins PyTorch 2.7.1 and installs transformers from source (required
+for DINOv3). Edit the pytorch channel entries for a different CUDA version.
 
 ### Verify Installation
 ```bash
