@@ -1,259 +1,44 @@
-# Pelage Sorting Workflow
+# Stage 1: pelage visibility classifier
 
-A systematic hyperparameter optimization workflow for identifying high-quality wolverine pelage images using DINOv3 features and linear classification. **Requires GPU/CUDA support - optimized for compute clusters with preemptible partition and 24 concurrent jobs.**
+A frozen DINOv3-ViT-B/16 encoder with one trained linear layer (768 to 2)
+that scores each crop by the probability that the pelage pattern is clearly
+visible. Trained on the `pelage` configuration of `kdoherty/wolverines`
+(2,431 training and 270 test crops, labeled Full versus None or Partial).
 
-## Installation
+Fixed settings: 224 by 224 resize with no center crop, no augmentation, AdamW
+at learning rate 0.001 and weight decay 0.01, batch size 32, cross-entropy
+loss. Metrics are macro-averaged over the two classes.
 
-**Prerequisites**: GPU cluster with CUDA support and mamba/conda
+## Scripts, in run order
 
-```bash
-# From the repository root
-mamba env create -f environment.yml
-mamba activate wolverines
-```
+Run from the repository root in the `wolverines` environment. Scripts 00 to
+02 have matching `sbatch/` files for a Slurm GPU partition.
 
-`environment.yml` pins PyTorch 2.7.1 and installs transformers from source (required
-for DINOv3). Edit the pytorch channel entries for a different CUDA version.
-
-### Verify Installation
-```bash
-python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}, GPUs: {torch.cuda.device_count()}')"
-python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
-
-# Installation should show CUDA: True and GPUs > 0 for successful setup
-```
-
-## Overview
-
-This workflow consists of 3 main experiments designed to optimize wolverine image classification:
-
-1. **Resize Size Sweep** (`00_sweep_resize`): Find optimal resize size (no center cropping)
-2. **Learning Rate Sweep** (`01_sweep_lr`): Find optimal learning rate with cross-validation
-3. **Final Test** (`02_test_performance`): Train final model with optimal parameters
-
-## Directory Structure (on cluster)
-
-```
-/home/kdoherty/wolverines/pelage_sorting/
-├── scripts/           # Python training scripts (use relative paths)
-├── sbatch/           # SLURM batch scripts (handle cd and environment)
-├── utils/            # Utility modules including preemption handling
-├── results/          # JSON results from experiments
-├── figures/          # Generated visualizations
-├── logs/             # SLURM job logs
-├── checkpoints/      # Preemption checkpoints
-└── README.md         # This file
-```
-
-## Usage
-
-### Running Experiments
-
-Each experiment uses SLURM array jobs on the **preempt partition** with up to 24 concurrent jobs:
+| Script | What it does | Output |
+|---|---|---|
+| `scripts/00_find_best_epoch.py` | Five-fold stratified cross-validation on the training split, macro F1 recorded at each of 50 epochs; the epoch maximizing the cross-validated mean is selected (16 for the manuscript) | `results/00_best_epoch/` |
+| `scripts/01_test_performance.py` | Trains on the full training split for the selected epochs and evaluates the test split each epoch | `results/01_test/final_test_performance.json` |
+| `scripts/02_train_production.py` | Trains the production head on train plus test with the selected settings and saves only the linear layer | `results/02_production/` |
+| `scripts/03_make_figures.py` | Training and validation curves for the three runs above | `figures/` (not tracked) |
+| `scripts/04_head_ablation.py` | Reviewer-requested ablation: linear head versus a two-layer head (256 or 768 hidden units, ReLU) on identical cached features, epochs chosen by cross-validation, five seeds each. Runs locally on a single GPU or CPU | `results/04_head_ablation/` |
+| `scripts/04_head_ablation_table.py` | Supplementary table fragment from the per-seed ablation JSONs | `results/04_head_ablation/table_s7_head_ablation.tex` |
 
 ```bash
-# 1. Resize size sweep (32 configurations distributed across 24 jobs)
-sbatch sbatch/00_sweep_resize.sbatch
-
-# 2. Learning rate sweep (35 configurations distributed across 24 jobs)
-sbatch sbatch/01_sweep_lr.sbatch
-
-# 3. Final test performance (single job: job 0 only, others exit gracefully)
-sbatch sbatch/02_test_performance.sbatch
+sbatch pelage_sorting/sbatch/00_find_best_epoch.sbatch
+sbatch pelage_sorting/sbatch/01_test_performance.sbatch
+sbatch pelage_sorting/sbatch/02_train_production.sbatch
+python pelage_sorting/scripts/04_head_ablation.py
 ```
 
-### Generating Figures
+## Reported result
 
-After experiments complete, generate visualizations:
+At the selected 16 epochs the classifier reaches macro-averaged test F1 0.87
+(precision 0.92, recall 0.84). The head ablation found no gain from added
+capacity: F1 0.905 (linear, 28 epochs), 0.885 (256 hidden units), 0.856 (768
+hidden units), means over five seeds at each head's own selected epoch count.
 
-```bash
-cd /home/kdoherty/wolverines/pelage_sorting
-python scripts/03_make_figures.py \
-    --results_base_dir results \
-    --output_dir figures
-```
+The production head is applied to every out-of-sample crop by
+`hugging_face_dataset/v2/scripts/05_infer_pelage.py`, which produces the
+`pelage_score` column of the re-identification dataset.
 
-### Monitoring Jobs
-
-Check job status:
-```bash
-squeue -u kdoherty
-```
-
-View logs:
-```bash
-cd /home/kdoherty/wolverines/pelage_sorting
-
-# Check specific job log
-tail -f logs/00_resize/00_sweep_resize_JOBID_0.out
-
-# Check error logs  
-tail -f logs/00_resize/00_sweep_resize_JOBID_0.err
-
-# Monitor all jobs in an experiment
-ls -la logs/01_learning_rate/
-```
-
-### Rerunning Failed Jobs
-
-To rerun specific configurations or overwrite existing results:
-
-```bash
-cd /home/kdoherty/wolverines/pelage_sorting
-
-# Rerun specific job index
-python scripts/00_sweep_resize.py --idx 3 --overwrite
-
-# Rerun with different parameters
-python scripts/01_sweep_lr.py --idx 25 --device cpu --overwrite
-
-# Check job-specific checkpoints
-ls -la checkpoints/
-```
-
-## Experiment Details
-
-### 00_sweep_resize.py
-
-**Purpose**: Find optimal resize size (no center cropping)
-
-**Parameters**:
-- Resize sizes: [256, 512, 768, 1024]
-- Seeds: [0, 1, 2, 3, 4, 5, 6, 7]
-- Dataset: 10% stratified sample per class
-- Fixed: lr=0.001, batch_size=16, epochs=10
-
-**Job Distribution**: 32 configs distributed across 24 jobs (jobs 0-7 handle 2 configs each, jobs 8-23 handle 1 config each).
-
-### 01_sweep_lr.py
-
-**Purpose**: Find optimal learning rate with 5-fold cross-validation
-
-**Parameters**:
-- Learning rates: [1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2]
-- Folds: 5-fold stratified CV
-- Epochs: 50 (with epoch-by-epoch tracking)
-
-**Job Distribution**: 35 configs distributed across 24 jobs (jobs 0-10 handle 2 configs each, jobs 11-23 handle 1 config each).
-
-### 02_test_performance.py
-
-**Purpose**: Final evaluation with optimal hyperparameters
-
-**Configuration**: Uses best settings from previous experiments
-- Full train/test split
-- Best resize size from script 00
-- Optimal learning rate from script 01
-- Comprehensive metric tracking
-
-## Results Format
-
-Each experiment saves JSON results with:
-
-```json
-{
-  "job_idx": 0,
-  "params": {...},
-  "seed": 0,
-  "final_val_f1": 0.85,
-  "final_val_precision": 0.83,
-  "final_val_recall": 0.87,
-  "final_val_accuracy": 0.84,
-  "best_val_f1": 0.86,
-  "training_time": 1234.5,
-  "epochs_trained": 10
-}
-```
-
-Learning rate sweep additionally includes:
-- `train_history`: Epoch-by-epoch training metrics
-- `val_history`: Epoch-by-epoch validation metrics
-
-## Generated Figures
-
-The visualization script creates:
-
-1. **Resize Size Results** (`00_resize_results.png`): Bar chart with 95% CI
-2. **Learning Rate Results** (`01_learning_rate_results.png`): Line plots with CI ribbons  
-3. **Final Performance** (`02_final_performance.png`): Training curves and metrics
-
-## Dependencies
-
-- Python 3.8+
-- PyTorch
-- Transformers (HuggingFace)
-- Datasets (HuggingFace) 
-- scikit-learn
-- matplotlib, seaborn
-- numpy, pandas
-
-Environment setup:
-```bash
-mamba activate wolverines  # Assumes environment already exists
-```
-
-## Key Features
-
-- **Preemption Ready**: Auto-requeue jobs with checkpointing and resume capability
-- **High Throughput**: Up to 24 concurrent GPU jobs on preemptible partition
-- **Fault Tolerance**: Automatically skips completed configurations and resumes interrupted work
-- **Reproducibility**: Fixed seeds and parameter tracking  
-- **Portable**: No hardcoded paths in Python scripts
-- **Monitoring**: Comprehensive logging and progress tracking
-- **Flexibility**: Easy parameter modification and rerunning
-
-## Preemption Handling
-
-This workflow is optimized for preemptible clusters:
-
-### Automatic Features
-- **Auto-requeue**: Jobs automatically restart if preempted (`--requeue` flag)
-- **Checkpoint saving**: Progress saved periodically and on preemption signals
-- **Resume capability**: Jobs resume from last checkpoint on restart
-- **Signal handling**: Graceful shutdown on SIGTERM with state preservation
-
-### Manual Recovery
-```bash
-cd /home/kdoherty/wolverines/pelage_sorting
-
-# Check checkpoint status
-ls -la checkpoints/
-cat checkpoints/01_learning_rate_job_025.json
-
-# Clear specific checkpoint to restart from beginning
-rm checkpoints/01_learning_rate_job_025.json
-
-# Force rerun with overwrite
-python scripts/01_sweep_augmentations.py --idx 25 --overwrite
-```
-
-### Monitoring Preemptions
-```bash
-# Check job queue and reasons
-squeue -u kdoherty -o "%.10i %.10P %.20j %.8u %.2t %.10M %.6D %R"
-
-# Check for preempted jobs (PD with ReqNodeNotAvail)
-squeue -u kdoherty -t PD
-
-# View completed/failed jobs
-sacct -u kdoherty --starttime=today --format=JobID,JobName,State,ExitCode,DerivedExitCode
-```
-
-## Notes
-
-- **Base Directory**: All scripts assume you cd to `/home/kdoherty/wolverines/pelage_sorting/`  
-- **Log Location**: Job logs saved in `logs/` (local to project)
-- **Results Storage**: Individual JSON files in `results/` for easy analysis
-- **Checkpoints**: Automatic checkpoint files in `checkpoints/` for preemption recovery
-- **GPU Detection**: Jobs automatically detect and use available GPUs
-- **Overwrite Logic**: Use `--overwrite` flag to force recomputation of existing results
-- **Partition Benefits**: Preemptible partition offers ~5x more concurrent jobs than general
-- **Resource Efficiency**: 24 concurrent jobs maximize GPU utilization during peak times
-
-## Job Array Sizing Summary
-
-| Experiment | Total Configs | Array Jobs | Distribution |
-|------------|---------------|------------|--------------|
-| 00_resize | 32 | 0-23 | Jobs 0-7: 2 configs, Jobs 8-23: 1 config |
-| 01_learning_rate | 35 | 0-23 | Jobs 0-10: 2 configs, Jobs 11-23: 1 config |
-| 02_test_performance | 1 | 0-23 | Job 0: 1 config, Jobs 1-23: exit gracefully |
+Experiment notes are in `RESEARCH_LOG.md`.
