@@ -10,8 +10,10 @@ Columns: individual, role, then for each of train, validation, and test:
 images, capture events, and inclusive span in days from the first to the
 last event day; the test group adds the in-sample gap, hours from the
 last training or validation event to the first test event. Unknown
-individuals have no validation set and no in-sample data; their
-training-period events are used only as queries. The last row carries no
+individuals have no training or validation data: every one of their
+events, including those the upstream dataset labels as training, is a
+test query, so all of their images are pooled under test. The last row
+carries no
 trailing row break; the manuscript writes \input{...} \\ like the other
 fragments.
 
@@ -71,9 +73,13 @@ for role, names in (('Known', KNOWN), ('Unknown', UNKNOWN)):
         lines.append('\\midrule')
     for ind in names:
         m_tr, m_te = tr_id == ind, te_id == ind
-        train = cells(tr_ymdh[m_tr & ~val_mask])
-        val = cells(tr_ymdh[m_tr & val_mask]) if role == 'Known' else '-- & -- & --'
-        test = cells(te_ymdh[m_te])
+        if role == 'Known':
+            train = cells(tr_ymdh[m_tr & ~val_mask])
+            val = cells(tr_ymdh[m_tr & val_mask])
+            test = cells(te_ymdh[m_te])
+        else:
+            train = val = '-- & -- & --'
+            test = cells(np.concatenate([tr_ymdh[m_tr], te_ymdh[m_te]]))
         if role == 'Known':
             last_in = max(stamp(y) for y in tr_ymdh[m_tr])
             first_test = min(stamp(y) for y in te_ymdh[m_te])
