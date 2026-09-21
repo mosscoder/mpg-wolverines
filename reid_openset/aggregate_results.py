@@ -13,6 +13,8 @@ Produces:
 import json
 import glob
 import os
+import re
+import csv
 import sys
 
 import matplotlib.pyplot as plt
@@ -273,60 +275,6 @@ def _write_latex_s1_hyperparams(out_dir):
     _write_latex_fragment(lines, os.path.join(out_dir, 'table_s1_hyperparams.tex'))
 
 
-def _write_latex_thresh_table(model_data, strategies_attr, out_dir, filename):
-    """Generate LaTeX rows for threshold tables (S3 or S4).
-
-    Columns per backbone: Gal. only | Query only | Gal. + Query (as gal / query).
-    Rows: gallery sizes (2, 4, 8, 16, 32, 64).
-    """
-    models = list(model_data.keys())
-    labels = [model_data[m]['label'].replace('Frozen ', '') for m in models]
-
-    # Collect all gallery sizes
-    all_sizes = sorted(set(
-        sz for m in models
-        for sz in model_data[m][strategies_attr]['gallery_query']['x']
-    ))
-
-    # Build lookups: model -> gallery_size -> threshold for each strategy
-    lookup = {}
-    for m in models:
-        lookup[m] = {}
-        for strat_key in ['gallery', 'query', 'gallery_query']:
-            s = model_data[m][strategies_attr][strat_key]
-            lookup[m][strat_key] = {}
-            for i, sz in enumerate(s['x']):
-                gal = s['best_gal'][i] if i < len(s['best_gal']) else None
-                q = s['best_q'][i] if i < len(s['best_q']) else None
-                lookup[m][strat_key][sz] = (gal, q)
-
-    lines = []
-    for sz in all_sizes:
-        parts = [str(sz)]
-        for m in models:
-            # Gallery only: show gal threshold
-            gal_data = lookup[m]['gallery'].get(sz, (None, None))
-            gal_val = f"{gal_data[0]:.2f}" if gal_data[0] is not None else '---'
-            parts.append(gal_val)
-
-            # Query only: show query threshold
-            q_data = lookup[m]['query'].get(sz, (None, None))
-            q_val = f"{q_data[1]:.2f}" if q_data[1] is not None else '---'
-            parts.append(q_val)
-
-            # Gallery + Query: show gal / query
-            gq_data = lookup[m]['gallery_query'].get(sz, (None, None))
-            if gq_data[0] is not None and gq_data[1] is not None:
-                gq_val = f"{gq_data[0]:.2f} / {gq_data[1]:.2f}"
-            else:
-                gq_val = '---'
-            parts.append(gq_val)
-
-        lines.append(' & '.join(parts) + ' \\\\')
-
-    _write_latex_fragment(lines, os.path.join(out_dir, filename))
-
-
 def _write_latex_s5_test_steps(out_dir):
     """Generate LaTeX rows for Table S5: optimal steps and CV R@1.
 
@@ -412,18 +360,92 @@ def _write_latex_s5_test_steps(out_dir):
     _write_latex_fragment(lines, os.path.join(out_dir, 'table_s5_test_steps.tex'))
 
 
+# Filter combinations in the column order of Supplementary Tables S3 and S4:
+# no filter, gallery only, query only, gallery and query. Each entry is
+# (gallery quality threshold, query quality threshold).
+FILTER_COMBOS = [(0.0, 0.0), (0.25, 0.0), (0.5, 0.0), (0.0, 0.25), (0.0, 0.5),
+                 (0.25, 0.25), (0.25, 0.5), (0.5, 0.25), (0.5, 0.5)]
+
+
+def _filter_family(gal, q):
+    if gal == 0 and q == 0:
+        return 'none'
+    if q == 0:
+        return 'gallery'
+    if gal == 0:
+        return 'query'
+    return 'both'
+
+
+def _bold_family_best(values, texts):
+    """Wrap in \\textbf the text of the best-scoring combination within each
+    filter family (the combination Figures 3 and 5 plot). The no-filter
+    family has one member and is never bolded."""
+    best = {}
+    for combo, v in values.items():
+        fam = _filter_family(*combo)
+        if fam == 'none':
+            continue
+        if fam not in best or v > values[best[fam]]:
+            best[fam] = combo
+    chosen = set(best.values())
+    return [r'\textbf{%s}' % texts[c] if c in chosen else texts[c]
+            for c in FILTER_COMBOS]
+
+
+def _write_latex_fewshot_results_table(metric, out_dir, filename):
+    """Full few-shot results for one metric (S3 recall at rank one, S4
+    balanced accuracy): one block per encoder, a row per gallery size with
+    the mean and 95% half-width across seeds for all nine filter
+    combinations, then a No cap row with the full-data test evaluation
+    (single seed-0 run at the validation-selected step). Reads the summary
+    CSVs this script writes, so it must run after them."""
+    fs_col = {'r1': 'R@1 (95% CI)', 'ba': 'BA (95% CI)'}[metric]
+    te_col = {'r1': 'R@1', 'ba': 'BA'}[metric]
+    fs_file = {'r1': 'recall_at_1.csv', 'ba': 'balanced_accuracy.csv'}[metric]
+    fewshot = {}
+    with open(os.path.join('reid_openset/summary/fewshot', fs_file)) as f:
+        for r in csv.DictReader(f):
+            m = re.match(r'([0-9.]+) \(±([0-9.]+)\)', r[fs_col])
+            fewshot[(r['backbone'], int(r['gallery_size']),
+                     float(r['gallery_q']), float(r['query_q']))] = (
+                float(m.group(1)), float(m.group(2)))
+    test = {}
+    with open(os.path.join('reid_openset/summary/test_eval', fs_file)) as f:
+        for r in csv.DictReader(f):
+            test[(r['backbone'], float(r['gallery_q']), float(r['query_q']))] = float(r[te_col])
+    backbones = [b for b in ('Frozen DINOv3-ViT-B/16', 'Frozen MegaDescriptor-L-384',
+                             'Frozen BioCLIP-2 ViT-L/14')
+                 if any(k[0] == b for k in fewshot)]
+    sizes = sorted({k[1] for k in fewshot})
+    lines = []
+    for bi, b in enumerate(backbones):
+        if bi:
+            lines.append(r'\addlinespace')
+        lines.append(r'\multicolumn{10}{l}{\textit{%s}} \\' % _latex_escape(b.replace('Frozen ', '')))
+        for n in sizes:
+            vals = {c: fewshot[(b, n, c[0], c[1])][0] for c in FILTER_COMBOS}
+            texts = {c: '%.2f $\\pm$%.2f' % fewshot[(b, n, c[0], c[1])] for c in FILTER_COMBOS}
+            lines.append('%d & %s \\\\' % (n, ' & '.join(_bold_family_best(vals, texts))))
+        lines.append(r'\cmidrule(lr){1-10}')
+        vals = {c: test[(b, c[0], c[1])] for c in FILTER_COMBOS}
+        texts = {c: '%.2f' % test[(b, c[0], c[1])] for c in FILTER_COMBOS}
+        lines.append('No cap & %s \\\\' % ' & '.join(_bold_family_best(vals, texts)))
+    _write_latex_fragment(lines, os.path.join(out_dir, filename))
+
+
+def write_latex_fewshot_results_tables(out_dir='reid_openset/summary/latex'):
+    """Supplementary Tables S3 and S4 (paired with Figures 3 and 5)."""
+    _write_latex_fewshot_results_table('r1', out_dir, 'table_s3_fewshot_r1.tex')
+    _write_latex_fewshot_results_table('ba', out_dir, 'table_s4_fewshot_ba.tex')
+
+
 def write_latex_tables(model_data, out_dir='reid_openset/summary/latex'):
-    """Write LaTeX table fragment files for manuscript appendix tables S1, S3, S4, S5."""
+    """Write LaTeX table fragments for Supplementary Tables S1 and S5 (S3 and S4
+    follow once the test evaluation summary exists)."""
     print(f'\n=== Writing LaTeX table fragments -> {out_dir}/ ===')
 
     _write_latex_s1_hyperparams(out_dir)
-
-    if model_data:
-        _write_latex_thresh_table(model_data, 'strategies_r1', out_dir,
-                                  'table_s3_thresh_r1.tex')
-        _write_latex_thresh_table(model_data, 'strategies_ba', out_dir,
-                                  'table_s4_thresh_ba.tex')
-
     _write_latex_s5_test_steps(out_dir)
 
     print('  LaTeX table fragments complete.')
@@ -600,6 +622,9 @@ def main():
         create_test_eval_tables(all_data, test_eval_dir)
         print(f'\nGenerating test eval figures -> {test_eval_dir}/')
         create_test_eval_figures(all_data, test_eval_dir)
+    # ---- Few-shot result tables S3 and S4 (need both summaries above) ----
+    if model_data and all_data:
+        write_latex_fewshot_results_tables()
 
 
 if __name__ == '__main__':
