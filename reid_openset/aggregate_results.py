@@ -393,13 +393,15 @@ def _bold_family_best(values, texts):
             for c in FILTER_COMBOS]
 
 
-def _write_latex_fewshot_results_table(metric, out_dir, filename):
+def _write_latex_fewshot_results_table(metric, out_dir, stem):
     """Full few-shot results for one metric (S3 recall at rank one, S4
-    balanced accuracy): one block per encoder, a row per gallery size with
-    the mean and 95% half-width across seeds for all nine filter
-    combinations, then a No cap row with the full-data test evaluation
-    (single seed-0 run at the validation-selected step). Reads the summary
-    CSVs this script writes, so it must run after them."""
+    balanced accuracy), one fragment per encoder so that supplement.tex can
+    place the encoder label rows itself (a \\multicolumn cannot be the first
+    token of an \\input file inside a tabular). Each fragment holds a row per
+    gallery size with the mean and 95% half-width across seeds for all nine
+    filter combinations, then a No cap row with the full-data test
+    evaluation (single seed-0 run at the validation-selected step). Reads
+    the summary CSVs this script writes, so it must run after them."""
     fs_col = {'r1': 'R@1 (95% CI)', 'ba': 'BA (95% CI)'}[metric]
     te_col = {'r1': 'R@1', 'ba': 'BA'}[metric]
     fs_file = {'r1': 'recall_at_1.csv', 'ba': 'balanced_accuracy.csv'}[metric]
@@ -414,15 +416,14 @@ def _write_latex_fewshot_results_table(metric, out_dir, filename):
     with open(os.path.join('reid_openset/summary/test_eval', fs_file)) as f:
         for r in csv.DictReader(f):
             test[(r['backbone'], float(r['gallery_q']), float(r['query_q']))] = float(r[te_col])
-    backbones = [b for b in ('Frozen DINOv3-ViT-B/16', 'Frozen MegaDescriptor-L-384',
-                             'Frozen BioCLIP-2 ViT-L/14')
-                 if any(k[0] == b for k in fewshot)]
+    encoders = [('Frozen DINOv3-ViT-B/16', 'dinov3'),
+                ('Frozen MegaDescriptor-L-384', 'megadescriptor'),
+                ('Frozen BioCLIP-2 ViT-L/14', 'bioclip2')]
     sizes = sorted({k[1] for k in fewshot})
-    lines = []
-    for bi, b in enumerate(backbones):
-        if bi:
-            lines.append(r'\addlinespace')
-        lines.append(r'\multicolumn{10}{l}{\textit{%s}} \\' % _latex_escape(b.replace('Frozen ', '')))
+    for b, tag in encoders:
+        if not any(k[0] == b for k in fewshot):
+            continue
+        lines = []
         for n in sizes:
             vals = {c: fewshot[(b, n, c[0], c[1])][0] for c in FILTER_COMBOS}
             texts = {c: '%.2f $\\pm$%.2f' % fewshot[(b, n, c[0], c[1])] for c in FILTER_COMBOS}
@@ -431,13 +432,13 @@ def _write_latex_fewshot_results_table(metric, out_dir, filename):
         vals = {c: test[(b, c[0], c[1])] for c in FILTER_COMBOS}
         texts = {c: '%.2f' % test[(b, c[0], c[1])] for c in FILTER_COMBOS}
         lines.append('No cap & %s \\\\' % ' & '.join(_bold_family_best(vals, texts)))
-    _write_latex_fragment(lines, os.path.join(out_dir, filename))
+        _write_latex_fragment(lines, os.path.join(out_dir, '%s_%s.tex' % (stem, tag)))
 
 
 def write_latex_fewshot_results_tables(out_dir='reid_openset/summary/latex'):
     """Supplementary Tables S3 and S4 (paired with Figures 3 and 5)."""
-    _write_latex_fewshot_results_table('r1', out_dir, 'table_s3_fewshot_r1.tex')
-    _write_latex_fewshot_results_table('ba', out_dir, 'table_s4_fewshot_ba.tex')
+    _write_latex_fewshot_results_table('r1', out_dir, 'table_s3_fewshot_r1')
+    _write_latex_fewshot_results_table('ba', out_dir, 'table_s4_fewshot_ba')
 
 
 def write_latex_tables(model_data, out_dir='reid_openset/summary/latex'):
