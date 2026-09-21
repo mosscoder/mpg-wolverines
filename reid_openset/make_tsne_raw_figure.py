@@ -3,7 +3,7 @@
 Columns are the three backbones. Row 1 is each backbone's frozen feature
 space with no training and no quality filter: a seeded subsample of the
 known individuals' training images as identity-tinted circles and every
-image of the four simulated unknowns as red plus markers. Row 2 is the
+image of the four simulated unknowns as black-edged red triangles. Row 2 is the
 trained ArcFace embedding at the gallery >= 0.50 configuration, showing
 that filtered training gallery and the unknown images scoring >= 0.50.
 
@@ -218,7 +218,7 @@ def main():
             extract_raw_features(missing or MODELS)
 
     fig, axes = plt.subplots(2, 3, figsize=(16.5, 10.2))
-    rows = [(panel_raw, 'Before training\nNo quality filtering'),
+    rows = [(panel_raw, 'Before ArcFace training\nNo quality filtering'),
             (panel_trained, f'After ArcFace training on gallery >= {Q:.1f}\n'
                             f'Unknown queries >= {Q:.1f}')]
     for row, (maker, row_label) in enumerate(rows):
@@ -232,15 +232,19 @@ def main():
             a = c @ R
             g_xy, t_xy = a[:p['n_g']], a[p['n_g']:]
             ax = axes[row, col]
-            for name in KNOWN_ORDER:
-                m = p['gallery_ids'] == name
-                base = np.array(matplotlib.colors.to_rgb(ID_COLORS[name]))
-                ax.scatter(g_xy[m, 0], g_xy[m, 1], s=6.25,
-                           color=1 - (1 - base) * 0.55, linewidths=0,
-                           alpha=1.0, zorder=2)
+            g_cols = np.array([1 - (1 - np.array(matplotlib.colors.to_rgb(ID_COLORS[n]))) * 0.55
+                               for n in p['gallery_ids']])
             m = ~p['known'] & p['keep']
-            ax.scatter(t_xy[m, 0], t_xy[m, 1], s=11.25, marker='+',
-                       color=UNKNOWN_COLOR, linewidths=0.6, alpha=0.55, zorder=5)
+            u_xy = t_xy[m]
+            # Unknowns are black-edged red triangles. Row 1 draws them under the
+            # known dots (2,542 unknowns would otherwise bury the knowns); row 2
+            # draws its 78 unknowns on top.
+            z_unknown, z_known = (2, 5) if row == 0 else (5, 2)
+            ax.scatter(u_xy[:, 0], u_xy[:, 1], s=16, marker='^',
+                       color=UNKNOWN_COLOR, edgecolors='black', linewidths=0.4,
+                       alpha=0.8, zorder=z_unknown)
+            ax.scatter(g_xy[:, 0], g_xy[:, 1], s=9, c=g_cols,
+                       edgecolors='white', linewidths=0.35, alpha=0.70, zorder=z_known)
             ax.set_xlim(a[:, 0].min() - 2, a[:, 0].max() + 2)
             ax.set_ylim(a[:, 1].min() - 2, a[:, 1].max() + 2)
             if row == 0:
@@ -260,8 +264,8 @@ def main():
 
     handles = ([Line2D([], [], ls='', marker='o', ms=6, color=ID_COLORS[n], label=n)
                 for n in KNOWN_ORDER]
-               + [Line2D([], [], ls='', marker='+', ms=8, mew=1.2,
-                         color=UNKNOWN_COLOR, label='Unknown')])
+               + [Line2D([], [], ls='', marker='^', ms=7, mew=0.6,
+                         color=UNKNOWN_COLOR, markeredgecolor='black', label='Unknown')])
     axes[0, 2].legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1.0),
                       fontsize=9, frameon=True, title='Individual',
                       title_fontproperties={'weight': 'bold', 'size': 10})
