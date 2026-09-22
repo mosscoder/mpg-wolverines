@@ -9,43 +9,62 @@ Fixed settings: 224 by 224 resize with no center crop, no augmentation, AdamW
 at learning rate 0.001 and weight decay 0.01, batch size 32, cross-entropy
 loss. Metrics are macro-averaged over the two classes.
 
-## Scripts, in run order
+Scripts live in `scripts/` and run in numbered order from the repository
+root in the `wolverines` environment. Scripts 00 to 02 have matching `sbatch/`
+files for a Slurm GPU partition.
 
-Run from the repository root in the `wolverines` environment. Scripts 00 to
-02 have matching `sbatch/` files for a Slurm GPU partition.
+## 00. Epoch selection
 
-**`scripts/00_find_best_epoch.py`** runs five-fold cross-validation on the
-training split, stratified by label, and records macro F1 at each of 50
-epochs. The epoch that maximizes the cross-validated mean is selected (16 for
-the manuscript). Output goes to `results/00_best_epoch/`.
+**Script:** `scripts/00_find_best_epoch.py`
+**Slurm:** `sbatch pelage_sorting/sbatch/00_find_best_epoch.sbatch`
 
-**`scripts/01_test_performance.py`** trains on the full training split for the
-selected number of epochs and evaluates the test split at each epoch. Output
-goes to `results/01_test/final_test_performance.json`.
+Runs five-fold cross-validation on the training split, stratified by label,
+and records macro F1 at each of 50 epochs. The epoch that maximizes the
+cross-validated mean is selected (16 for the manuscript).
 
-**`scripts/02_train_production.py`** trains the production head on the
-training and test splits together with the selected settings and saves only
-the linear layer. Output goes to `results/02_production/`.
+**Output:** `results/00_best_epoch/`.
 
-**`scripts/03_make_figures.py`** plots training and validation curves for the
-three runs above. Its figures go to `figures/`, which is not tracked.
+## 01. Test performance
 
-**`scripts/04_head_ablation.py`** runs the reviewer-requested ablation,
-comparing the linear head with a two-layer head (256 or 768 hidden units,
-ReLU) on identical cached encoder outputs, with epochs chosen by
-cross-validation and five seeds each. It runs locally on a single GPU or CPU.
-Output goes to `results/04_head_ablation/`.
+**Script:** `scripts/01_test_performance.py`
+**Slurm:** `sbatch pelage_sorting/sbatch/01_test_performance.sbatch`
 
-**`scripts/04_head_ablation_table.py`** writes the supplementary table fragment
-from the per-seed ablation JSONs, to
-`results/04_head_ablation/table_s7_head_ablation.tex`.
+Trains on the full training split for the selected number of epochs and
+evaluates the test split at each epoch.
 
-```bash
-sbatch pelage_sorting/sbatch/00_find_best_epoch.sbatch
-sbatch pelage_sorting/sbatch/01_test_performance.sbatch
-sbatch pelage_sorting/sbatch/02_train_production.sbatch
-python pelage_sorting/scripts/04_head_ablation.py
-```
+**Output:** `results/01_test/final_test_performance.json`.
+
+## 02. Production classifier
+
+**Script:** `scripts/02_train_production.py`
+**Slurm:** `sbatch pelage_sorting/sbatch/02_train_production.sbatch`
+
+Trains the production head on the training and test splits together with the
+selected settings and saves only the linear layer.
+
+**Output:** `results/02_production/`.
+
+## 03. Training curves
+
+**Script:** `scripts/03_make_figures.py`
+
+Plots training and validation curves for the three runs above.
+
+**Output:** `figures/`, which is not tracked.
+
+## 04. Head ablation
+
+**Scripts:** `scripts/04_head_ablation.py`, `scripts/04_head_ablation_table.py`
+
+The reviewer-requested ablation compares the linear head with a two-layer head
+(256 or 768 hidden units, ReLU) on identical cached encoder outputs, with
+epochs chosen by cross-validation and five seeds each. It runs locally on a
+single GPU or CPU (`python pelage_sorting/scripts/04_head_ablation.py`). The
+table script then writes the supplementary table fragment from the per-seed
+ablation JSONs.
+
+**Output:** `results/04_head_ablation/`, including
+`table_s7_head_ablation.tex`.
 
 ## Reported result
 

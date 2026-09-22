@@ -20,52 +20,82 @@ before training (gallery quality threshold) and to the queries at evaluation
 utils.reid <command> --model <encoder>`; the per-encoder `scripts/*.sbatch`
 files wrap them as Slurm array jobs and are the record of the arguments used.
 
-## Stages per encoder, in run order
+Each stage below is one sbatch file in an encoder's `scripts/` directory,
+wrapping the `utils.reid` command it names, and writes to that encoder's
+`results/` directory. Stages run in numbered order, once per encoder, for
+example `sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch`.
 
-Each stage is one sbatch file in an encoder's `scripts/` directory, wrapping
-the `utils.reid` command named in parentheses, and writes to that encoder's
-`results/` directory.
+## 00. Learning rate sweep
 
-**`00_sweep_lr`** (`opt_lr`) sweeps four learning rates (0.0001, 0.0005,
-0.001, and 0.005) at an embedding dimension of 256, with five seeds each,
-training for 100 steps and evaluating every 10. Each run trains on the earlier
-half of every known individual's training-period events and is scored by
-recall at rank one on the later half, with up to 64 images per individual on
-each side. The learning rate with the highest seed-averaged recall at its best
-step is selected. Output goes to `results/opt/lr/`.
+**Sbatch:** `scripts/00_sweep_lr.sbatch`
+**Command:** `opt_lr`
 
-**`01_sweep_embedding_dim`** (`opt_embedding_dim`) repeats that design for
-embedding dimensions of 256 and 512 at the selected learning rate. Output goes
-to `results/opt/embedding_dim/`.
+Sweeps four learning rates (0.0001, 0.0005, 0.001, and 0.005) at an embedding
+dimension of 256, with five seeds each, training for 100 steps and evaluating
+every 10. Each run trains on the earlier half of every known individual's
+training-period events and is scored by recall at rank one on the later half,
+with up to 64 images per individual on each side. The learning rate with the
+highest seed-averaged recall at its best step is selected.
 
-**`02_hygiene_sweep`** (`hygiene`) runs the few-shot experiment, crossing 3
-gallery quality thresholds with 6 gallery sizes (2 to 64 images per
+**Output:** `results/opt/lr/`.
+
+## 01. Embedding dimension sweep
+
+**Sbatch:** `scripts/01_sweep_embedding_dim.sbatch`
+**Command:** `opt_embedding_dim`
+
+Repeats that design for embedding dimensions of 256 and 512 at the selected
+learning rate.
+
+**Output:** `results/opt/embedding_dim/`.
+
+## 02. Few-shot experiment
+
+**Sbatch:** `scripts/02_hygiene_sweep.sbatch`
+**Command:** `hygiene`
+
+Crosses 3 gallery quality thresholds with 6 gallery sizes (2 to 64 images per
 individual) and 8 seeds, for 144 runs per encoder. Each run trains for 300
 steps and is evaluated every 10 steps on the validation queries and on the
 test queries at every query quality threshold. The reported checkpoint is the
 step with the highest recall at rank one on the validation queries, averaged
-over the eight seeds. Output goes to
-`results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on.
+over the eight seeds.
 
-**`03_tune_step_count`** (`tune_step_count`) selects training length for the
-full-data experiment. It crosses 3 gallery quality thresholds with 5 seeds on
-a 3,000-step budget evaluated every 100 steps, and for each pair of gallery
-and query quality thresholds it keeps the step with the highest mean recall at
-rank one on the validation queries (Supplementary Table S5). Output goes to
-`results/step_count/`.
+**Output:** `results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on.
 
-**`04_test_eval`** (`test_step_eval`) runs the full-data experiment. It trains
-one seed-0 model per gallery quality threshold and evaluates it once on the
-test split at each query quality threshold, using the step selected for that
-pair in 03, for 9 cells per encoder. Output goes to `results/test_eval/`.
+## 03. Full-data step selection
 
-**`05_generate_embeddings`** (`test_step_eval --export-embeddings`) records the
-invocation that produced the tracked embedding exports read by the t-SNE
-figure. Output goes to `results/embeddings/*.npz`.
+**Sbatch:** `scripts/03_tune_step_count.sbatch`
+**Command:** `tune_step_count`
 
-```bash
-sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch   # and likewise per encoder and stage
-```
+Selects training length for the full-data experiment. It crosses 3 gallery
+quality thresholds with 5 seeds on a 3,000-step budget evaluated every 100
+steps, and for each pair of gallery and query quality thresholds it keeps the
+step with the highest mean recall at rank one on the validation queries
+(Supplementary Table S5).
+
+**Output:** `results/step_count/`.
+
+## 04. Full-data experiment
+
+**Sbatch:** `scripts/04_test_eval.sbatch`
+**Command:** `test_step_eval`
+
+Trains one seed-0 model per gallery quality threshold and evaluates it once on
+the test split at each query quality threshold, using the step selected for
+that pair in 03, for 9 cells per encoder.
+
+**Output:** `results/test_eval/`.
+
+## 05. Embedding exports
+
+**Sbatch:** `scripts/05_generate_embeddings.sbatch`
+**Command:** `test_step_eval --export-embeddings`
+
+Records the invocation that produced the tracked embedding exports read by the
+t-SNE figure.
+
+**Output:** `results/embeddings/*.npz`.
 
 ## Running on Slurm
 
@@ -114,22 +144,35 @@ Selected hyperparameters for the manuscript (learning rate 0.0005 and 256
 dimensions for DINOv3 and MegaDescriptor, 0.001 and 512 for BioCLIP-2) are
 listed in `summary/fewshot/hyperparameters.md`.
 
-## Summaries and figures
+## Summaries and supplementary tables
 
-**`aggregate_results.py`** builds tidy tables and the manuscript figures from
-every results JSON, covering few-shot recall at rank one and balanced
-accuracy, the full-data test evaluation, and the selected hyperparameters. It
-also writes the LaTeX fragments for Supplementary Tables S1, S3, S4, and S5.
-Output goes to `summary/fewshot/`, `summary/test_eval/`, and `summary/latex/`.
+**Script:** `aggregate_results.py`
 
-**`make_tsne_raw_figure.py`** draws manuscript Figure 7, a t-SNE projection of
-each encoder's frozen output before training and of its embeddings after
-training at a gallery quality threshold of 0.50, from `results/embeddings/`.
-Output goes to `summary/tsne/tsne_raw_vs_trained.png`.
+Builds tidy tables and the manuscript figures from every results JSON,
+covering few-shot recall at rank one and balanced accuracy, the full-data test
+evaluation, and the selected hyperparameters. It also writes the LaTeX
+fragments for Supplementary Tables S1, S3, S4, and S5.
 
-**`fig34_step300.py`** re-reads the few-shot figures at the fixed final
-checkpoint (step 300) instead of the selected checkpoint, for the review
-response. Its figures are not tracked here.
+**Output:** `summary/fewshot/`, `summary/test_eval/`, and `summary/latex/`.
+
+## Embedding space figure
+
+**Script:** `make_tsne_raw_figure.py`
+
+Draws manuscript Figure 7, a t-SNE projection of each encoder's frozen output
+before training and of its embeddings after training at a gallery quality
+threshold of 0.50, from `results/embeddings/`.
+
+**Output:** `summary/tsne/tsne_raw_vs_trained.png`.
+
+## Review response figures
+
+**Script:** `fig34_step300.py`
+
+Re-reads the few-shot figures at the fixed final checkpoint (step 300) instead
+of the selected checkpoint, for the review response.
+
+**Output:** review response figures, not tracked here.
 
 ## Evaluation
 

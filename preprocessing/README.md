@@ -6,30 +6,48 @@ plus two generators for manuscript assets. Run from the repository root in the
 `wolverines` environment; they read the local copy of the re-identification
 dataset.
 
-## Scripts
+Scripts run in numbered order below from the repository root.
 
-**`assign_reid_individuals.py`** decides which individuals are known. An
-individual qualifies if it has at least 64 training images with a quality
-score above 0.5 and at least one test image above 0.5. For each known
-individual, the most recent training events are set aside as validation
-queries until every quality score range ([0.75, 1], [0.5, 0.75), [0.25, 0.5),
-and [0, 0.25)) is represented. Output goes to
-`results/feasible_individuals.json`.
+## 01. Known individuals and validation queries
 
-**`assign_reid_unknowns_all_test.py`** makes the individuals that do not
-qualify into unknown individuals. It identifies their images in the upstream
-training split so that all of an unknown individual's images serve as test
-queries and none enter training. Output goes to
-`results/unknown_assignment.json`.
+**Script:** `assign_reid_individuals.py`
 
-**`make_table_individuals.py`** writes manuscript Table 2, giving images,
-events, and day spans per individual and split, with the gap from the last
-training or validation event to the first test event. Output goes to
-`results/table_individuals.tex`.
+Decides which individuals are known. An individual qualifies if it has at
+least 64 training images with a quality score above 0.5 and at least one test
+image above 0.5. For each known individual, the most recent training events
+are set aside as validation queries until every quality score range
+([0.75, 1], [0.5, 0.75), [0.25, 0.5), and [0, 0.25)) is represented.
 
-**`make_quality_gradient_figure.py`** draws manuscript Figure 2, ten images
-spanning the quality score range from one camera trap event for each of the
-three best-sampled individuals. Output goes to `results/quality_gradient.png`.
+**Output:** `results/feasible_individuals.json`.
+
+## 02. Unknown individuals
+
+**Script:** `assign_reid_unknowns_all_test.py`
+
+Makes the individuals that do not qualify into unknown individuals. It
+identifies their images in the upstream training split so that all of an
+unknown individual's images serve as test queries and none enter training.
+
+**Output:** `results/unknown_assignment.json`.
+
+## 03. Table 2
+
+**Script:** `make_table_individuals.py`
+
+Writes manuscript Table 2, giving images, events, and day spans per individual
+and split, with the gap from the last training or validation event to the
+first test event.
+
+**Output:** `results/table_individuals.tex`.
+
+## 04. Figure 2
+
+**Script:** `make_quality_gradient_figure.py`
+
+Draws manuscript Figure 2, ten images spanning the quality score range from
+one camera trap event for each of the three best-sampled individuals.
+
+**Output:** `results/quality_gradient.png`.
 
 ## Roles
 
