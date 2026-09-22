@@ -22,14 +22,46 @@ files wrap them as Slurm array jobs and are the record of the arguments used.
 
 ## Stages per encoder, in run order
 
-| Sbatch | Command | Design | Output |
-|---|---|---|---|
-| `00_sweep_lr` | `opt_lr` | 4 learning rates by 5 seeds on validation queries | `results/opt/lr/` |
-| `01_sweep_embedding_dim` | `opt_embedding_dim` | embedding dimension 256 or 512 by 5 seeds | `results/opt/embedding_dim/` |
-| `02_hygiene_sweep` | `hygiene` | few-shot analysis: 3 gallery quality thresholds by 6 gallery sizes (2 to 64 images per individual) by 8 seeds, 144 runs; 300 steps, evaluated every 10, checkpoint chosen by cross-validated recall at rank one; test metrics recorded at every query quality threshold | `results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on |
-| `03_tune_step_count` | `tune_step_count` | full-data step count: 3 gallery quality thresholds by 5 seeds, 3,000-step budget evaluated every 100 | `results/step_count/` |
-| `04_test_eval` | `test_step_eval` | full-data comparison: one seed-0 model per gallery quality threshold trained to the step selected in 03, evaluated on the test split at every query quality threshold, 9 cells per encoder | `results/test_eval/` |
-| `05_generate_embeddings` | `test_step_eval --export-embeddings` | the invocation that produced the tracked embedding exports read by the t-SNE figure | `results/embeddings/*.npz` |
+Each stage is one sbatch file in an encoder's `scripts/` directory, wrapping
+the `utils.reid` command named in parentheses, and writes to that encoder's
+`results/` directory.
+
+**`00_sweep_lr`** (`opt_lr`) sweeps four learning rates (0.0001, 0.0005,
+0.001, and 0.005) at an embedding dimension of 256, with five seeds each,
+training for 100 steps and evaluating every 10. Each run trains on the earlier
+half of every known individual's training-period events and is scored by
+recall at rank one on the later half, with up to 64 images per individual on
+each side. The learning rate with the highest seed-averaged recall at its best
+step is selected. Output goes to `results/opt/lr/`.
+
+**`01_sweep_embedding_dim`** (`opt_embedding_dim`) repeats that design for
+embedding dimensions of 256 and 512 at the selected learning rate. Output goes
+to `results/opt/embedding_dim/`.
+
+**`02_hygiene_sweep`** (`hygiene`) runs the few-shot experiment, crossing 3
+gallery quality thresholds with 6 gallery sizes (2 to 64 images per
+individual) and 8 seeds, for 144 runs per encoder. Each run trains for 300
+steps and is evaluated every 10 steps on the validation queries and on the
+test queries at every query quality threshold. The reported checkpoint is the
+step with the highest recall at rank one on the validation queries, averaged
+over the eight seeds. Output goes to
+`results/hygiene/threshold=0.00_gallery=16_seed=0.json` and so on.
+
+**`03_tune_step_count`** (`tune_step_count`) selects training length for the
+full-data experiment. It crosses 3 gallery quality thresholds with 5 seeds on
+a 3,000-step budget evaluated every 100 steps, and for each pair of gallery
+and query quality thresholds it keeps the step with the highest mean recall at
+rank one on the validation queries (Supplementary Table S5). Output goes to
+`results/step_count/`.
+
+**`04_test_eval`** (`test_step_eval`) runs the full-data experiment. It trains
+one seed-0 model per gallery quality threshold and evaluates it once on the
+test split at each query quality threshold, using the step selected for that
+pair in 03, for 9 cells per encoder. Output goes to `results/test_eval/`.
+
+**`05_generate_embeddings`** (`test_step_eval --export-embeddings`) records the
+invocation that produced the tracked embedding exports read by the t-SNE
+figure. Output goes to `results/embeddings/*.npz`.
 
 ```bash
 sbatch reid_openset/dinov3/scripts/02_hygiene_sweep.sbatch   # and likewise per encoder and stage
@@ -63,7 +95,7 @@ The `--idx` value selects one configuration from the stage's grid (which
 learning rate and seed, which threshold, gallery size, and seed, and so on),
 so the file's header comment states how many tasks the stage has and what
 each index means. Task counts: 20 for the learning rate sweep, 10 for the
-embedding dimension, 24 for the few-shot analysis (six configurations per
+embedding dimension, 24 for the few-shot experiment (six configurations per
 task), 15 for the step count, and 3 for the test evaluation.
 
 **On another cluster**, edit only the top of the file: the partition, QOS,
@@ -84,11 +116,20 @@ listed in `summary/fewshot/hyperparameters.md`.
 
 ## Summaries and figures
 
-| Script | What it does | Output |
-|---|---|---|
-| `aggregate_results.py` | Tidy tables and manuscript figures from every results JSON: few-shot recall and balanced accuracy, test evaluation, hyperparameters, LaTeX table fragments | `summary/fewshot/`, `summary/test_eval/`, `summary/latex/` |
-| `make_tsne_raw_figure.py` | Manuscript Figure 7: t-SNE of each encoder's frozen output before training and its embedding after training at gallery quality threshold 0.50, from `results/embeddings/` | `summary/tsne/tsne_raw_vs_trained.png` |
-| `fig34_step300.py` | Few-shot figures re-read at the fixed final checkpoint (step 300) instead of the selected checkpoint, for the review response | review response figures (not tracked here) |
+**`aggregate_results.py`** builds tidy tables and the manuscript figures from
+every results JSON, covering few-shot recall at rank one and balanced
+accuracy, the full-data test evaluation, and the selected hyperparameters. It
+also writes the LaTeX fragments for Supplementary Tables S1, S3, S4, and S5.
+Output goes to `summary/fewshot/`, `summary/test_eval/`, and `summary/latex/`.
+
+**`make_tsne_raw_figure.py`** draws manuscript Figure 7, a t-SNE projection of
+each encoder's frozen output before training and of its embeddings after
+training at a gallery quality threshold of 0.50, from `results/embeddings/`.
+Output goes to `summary/tsne/tsne_raw_vs_trained.png`.
+
+**`fig34_step300.py`** re-reads the few-shot figures at the fixed final
+checkpoint (step 300) instead of the selected checkpoint, for the review
+response. Its figures are not tracked here.
 
 ## Evaluation
 
