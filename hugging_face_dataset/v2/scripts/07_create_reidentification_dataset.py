@@ -421,7 +421,7 @@ def main():
     parser.add_argument('--push_to_hub', action='store_true',
                        help='Push dataset to HuggingFace Hub')
     parser.add_argument('--hub_dataset_name', type=str,
-                       default='kdoherty/wolverines',
+                       default='mpg-ranch/wolverines',
                        help='HuggingFace dataset name')
     parser.add_argument('--config_name', type=str,
                        default='reidentification',

@@ -88,7 +88,7 @@ def load_feasibility_config():
 def load_reidentification_dataset():
     """Load the wolverines dataset with reidentification configuration."""
     print("Loading wolverines dataset (reidentification config)...")
-    dataset = load_dataset("kdoherty/wolverines", "reidentification", split="train")
+    dataset = load_dataset("mpg-ranch/wolverines", "reidentification", split="train")
     print(f"Loaded {len(dataset)} samples")
     return dataset
 
@@ -96,7 +96,7 @@ def load_reidentification_dataset():
 def load_reidentification_test_dataset():
     """Load the wolverines test split for reidentification."""
     print("Loading wolverines dataset (reidentification test split)...")
-    dataset = load_dataset("kdoherty/wolverines", "reidentification", split="test")
+    dataset = load_dataset("mpg-ranch/wolverines", "reidentification", split="test")
     print(f"Loaded {len(dataset)} test samples")
     return dataset
 

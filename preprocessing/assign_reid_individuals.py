@@ -156,8 +156,8 @@ def main():
 
     # Load both splits
     print("Loading wolverines dataset (reidentification config)...")
-    train_dataset = load_dataset("kdoherty/wolverines", "reidentification", split="train")
-    test_dataset = load_dataset("kdoherty/wolverines", "reidentification", split="test")
+    train_dataset = load_dataset("mpg-ranch/wolverines", "reidentification", split="train")
+    test_dataset = load_dataset("mpg-ranch/wolverines", "reidentification", split="test")
     print(f"Loaded {len(train_dataset)} train samples, {len(test_dataset)} test samples")
 
     # Build per-individual stats using Arrow columnar access

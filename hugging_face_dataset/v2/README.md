@@ -1,6 +1,6 @@
 # Dataset creation
 
-How the `kdoherty/wolverines` Hugging Face dataset was built from raw camera
+How the `mpg-ranch/wolverines` Hugging Face dataset was built from raw camera
 trap images. Scripts live in `scripts/` and run in numbered order from the
 repository root. Script 01 needs the MegaDetector environment
 (`install_minimal_pytorchwildlife.sh` at the root); the rest use the

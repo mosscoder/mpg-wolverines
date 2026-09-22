@@ -32,7 +32,7 @@ from datasets import load_dataset
 
 for config in ["reidentification", "pelage"]:
     for split in ["train", "test"]:
-        ds = load_dataset("kdoherty/wolverines", config, split=split)
+        ds = load_dataset("mpg-ranch/wolverines", config, split=split)
         print(f"cached {config}/{split}: {len(ds)} rows", flush=True)
 EOF
 

@@ -2,7 +2,7 @@
 
 A frozen DINOv3-ViT-B/16 encoder with one trained linear layer (768 to 2)
 that scores each crop by the probability that the pelage pattern is clearly
-visible. Trained on the `pelage` configuration of `kdoherty/wolverines`
+visible. Trained on the `pelage` configuration of `mpg-ranch/wolverines`
 (2,431 training and 270 test images, labeled Full versus None or Partial).
 
 Fixed settings: 224 by 224 resize with no center crop, no augmentation, AdamW

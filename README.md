@@ -72,7 +72,7 @@ on first run.
 
 ## Data
 
-The dataset is hosted on Hugging Face as `kdoherty/wolverines` with two
+The dataset is hosted on Hugging Face as `mpg-ranch/wolverines` with two
 configurations: `pelage` (human-labeled crops for stage 1) and
 `reidentification` (all scored crops with individual identity, for stage 2).
 Splits are temporal within each individual, so no test image predates a
@@ -81,7 +81,7 @@ location metadata.
 
 ```python
 from datasets import load_dataset
-ds = load_dataset("kdoherty/wolverines", "reidentification", split="train")
+ds = load_dataset("mpg-ranch/wolverines", "reidentification", split="train")
 ```
 
 How the dataset was built from raw camera trap images is documented in

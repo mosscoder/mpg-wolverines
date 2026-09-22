@@ -49,8 +49,8 @@ def remap_pelage_labels(example):
 
 def load_wolverines_dataset():
     """Load the wolverines dataset from HuggingFace using pelage config with label remapping"""
-    dataset = load_dataset("kdoherty/wolverines", name="pelage", split="train")
-    test_dataset = load_dataset("kdoherty/wolverines", name="pelage", split="test")
+    dataset = load_dataset("mpg-ranch/wolverines", name="pelage", split="train")
+    test_dataset = load_dataset("mpg-ranch/wolverines", name="pelage", split="test")
     
     # Remap labels for binary classification (2 vs all)
     dataset = dataset.map(remap_pelage_labels)
