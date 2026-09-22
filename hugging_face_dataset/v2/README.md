@@ -85,8 +85,9 @@ second-rater audit of the test set is reported in the manuscript.
 
 **Script:** `scripts/04_create_pelage_dataset.py`
 
-Writes the `pelage` configuration: the annotated crops with a binary label
-(Full versus None or Partial). Columns: `id`, `ymdh`, `color`, `label`,
+Writes the `pelage` configuration: the annotated crops with the annotator's
+three-level label (0 None, 1 Partial, 2 Full). The classifier's loader
+(`utils/dataset.py`) collapses it to Full versus None or Partial. Columns: `id`, `ymdh`, `color`, `label`,
 `filename`, `confidence`, `bbox_x`, `bbox_y`, `bbox_width`, `bbox_height`,
 `bbox_area`, `image`.
 
