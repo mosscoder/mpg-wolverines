@@ -60,8 +60,8 @@ The reviewer-requested ablation compares the linear head with a two-layer head
 (256 or 768 hidden units, ReLU) on identical cached encoder outputs, with
 epochs chosen by cross-validation and five seeds each. It runs locally on a
 single GPU or CPU (`python pelage_sorting/scripts/04_head_ablation.py`). The
-table script then writes the supplementary table fragment from the per-seed
-ablation JSONs.
+table script then writes the fragment for Supplementary Table S6 from the
+per-seed ablation JSONs (the file name keeps its earlier S7 number).
 
 **Output:** `results/04_head_ablation/`, including
 `table_s7_head_ablation.tex`.

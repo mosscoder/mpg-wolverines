@@ -14,7 +14,7 @@ pelage pattern to a nearby game camera, but the animal moves while it feeds and 
 1. **Pelage visibility classifier.** An image classifier scores every image from 0 to 1, the estimated
    probability that the pelage pattern is clearly visible. We call this the
    quality score.
-2. **Re-identification with novelty detection.** An image encoder maps each image to an embedding, and images are compared by the similarity of their embeddings.
+2. **Re-identification with novelty detection.** A frozen image encoder turns each image into an encoder output, a trained projection head maps that output to an embedding, and images are compared by the cosine similarity of their embeddings.
    A query is assigned to the known individual of its nearest gallery image,
    or flagged as unknown when that similarity falls below a threshold. We compared three encoders: DINOv3-ViT-B/16
    (general-purpose; [Siméoni et al. 2025](https://doi.org/10.48550/arXiv.2508.10104)),
@@ -23,9 +23,12 @@ pelage pattern to a nearby game camera, but the animal moves while it feeds and 
 
 Quality score thresholds of 0, 0.25, and 0.50 are applied to the gallery, to
 the queries, or to both. Re-identification is scored by recall at rank one and
-novelty detection by balanced accuracy, each averaged over individuals. Two
-experiments: a few-shot analysis (2 to 64 gallery images per individual, eight
-seeds) and a full-data comparison on the test split, the most recent events of each known individual.
+novelty detection by balanced accuracy, each averaged over individuals. There
+are two experiments, a few-shot experiment (2 to 64 gallery images per
+individual, eight seeds) and a full-data experiment that trains on every
+eligible gallery image. Both report performance on the test split, the most
+recent events of each known individual, at checkpoints selected on the
+validation queries.
 
 ![Ten images from one camera trap event for each of three individuals, sorted left to right by quality score](preprocessing/results/quality_gradient_readme.png)
 

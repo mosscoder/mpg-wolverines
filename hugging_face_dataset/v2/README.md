@@ -12,10 +12,11 @@ repository root. Script 01 needs the MegaDetector environment
 **Source:** the detections inventory spreadsheet (`data/Detections inventory_2023.08.29.xlsx`, not tracked)
 
 Before automated processing, field biologists reviewed camera trap capture
-events and categorized pelage visibility at the event level:
+events and recorded pelage visibility at the event level in the inventory's
+`marks` field as Robust, Partial, or No:
 
 - **Robust**: at least some images in the event show clear, identifiable pelage markings
-- **Not Robust**: no image in the event shows sufficient pelage markings for identification
+- **Partial** and **No**: the markings were only partly visible or not visible, and the event does not proceed
 
 | Metric | Count |
 |--------|-------|

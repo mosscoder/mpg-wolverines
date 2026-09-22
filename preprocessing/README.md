@@ -1,7 +1,7 @@
 # Role assignment and manuscript assets
 
 Scripts that decide which individuals serve as known (gallery) individuals,
-which serve as simulated unknowns, and which events are validation queries,
+which serve as unknown individuals, and which events are validation queries,
 plus two generators for manuscript assets. Run from the repository root in the
 `wolverines` environment; they read the local copy of the re-identification
 dataset.
@@ -53,7 +53,7 @@ one camera trap event for each of the three best-sampled individuals.
 
 The 558 inference events (49,312 images) partition by identity and sample
 sufficiency. Known individuals populate the gallery, validation queries, and
-known test queries; simulated unknowns are never seen in training and appear
+known test queries; unknown individuals are never seen in training and appear
 only as test queries for novelty detection.
 
 | Role | Individual | Events | Images |
@@ -65,10 +65,10 @@ only as test queries for novelty detection.
 | Known | HFW12-F7 | 48 | 12,815 |
 | Known | Tex | 11 | 343 |
 | **Subtotal known** | **6 individuals** | **505** | **46,759** |
-| Simulated unknown | PA23-F1 | 40 | 1,497 |
-| Simulated unknown | PA23-M2 | 4 | 556 |
-| Simulated unknown | Powder Paws | 6 | 418 |
-| Simulated unknown | PA23-M1 | 2 | 71 |
+| Unknown | PA23-F1 | 40 | 1,497 |
+| Unknown | PA23-M2 | 4 | 556 |
+| Unknown | Powder Paws | 6 | 418 |
+| Unknown | PA23-M1 | 2 | 71 |
 | Excluded | HLC21-H1 | 1 | 11 |
 | **Subtotal unknown and excluded** | **5 individuals** | **53** | **2,553** |
 
