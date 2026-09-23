@@ -109,7 +109,23 @@ outputs, and the values used for the manuscript.
 
 ## Citation
 
-To be added on publication.
+Cite the dataset as:
+
+MPG Ranch. 2026. wolverines. Hugging Face.
+https://doi.org/10.57967/hf/10574
+
+```bibtex
+@misc{mpg_ranch_2026,
+    author    = { MPG Ranch },
+    title     = { wolverines (Revision c2ecee9) },
+    year      = 2026,
+    url       = { https://huggingface.co/datasets/mpg-ranch/wolverines },
+    doi       = { 10.57967/hf/10574 },
+    publisher = { Hugging Face }
+}
+```
+
+The manuscript citation will be added on publication.
 
 ## References
 
