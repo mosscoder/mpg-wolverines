@@ -159,9 +159,9 @@ fragments for Supplementary Tables S1, S3, S4, and S5.
 
 **Script:** `make_tsne_raw_figure.py`
 
-Draws manuscript Figure 7, a t-SNE projection of each encoder's frozen output
-before training and of its embeddings after training at a gallery quality
-threshold of 0.50, from `results/embeddings/`.
+Draws manuscript Figure 7, a t-SNE projection of each encoder's embeddings
+after training with no quality filtering and after training at gallery and
+query quality thresholds of 0.50, from `results/embeddings/`.
 
 **Output:** `summary/tsne/tsne_raw_vs_trained.png`.
 
