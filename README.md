@@ -111,16 +111,16 @@ outputs, and the values used for the manuscript.
 
 Cite the dataset as:
 
-MPG Ranch. 2026. wolverines. Hugging Face.
-https://doi.org/10.57967/hf/10574
+Doherty, K., Baughan, K., Davis, B., and Ramsey, P. 2026. wolverines.
+Hugging Face. https://doi.org/10.57967/hf/10575
 
 ```bibtex
-@misc{mpg_ranch_2026,
-    author    = { MPG Ranch },
-    title     = { wolverines (Revision c2ecee9) },
+@misc{kyle_doherty_2026,
+    author    = { Kyle Doherty and Kalon Baughan and Bret Davis and Philip Ramsey },
+    title     = { wolverines (Revision 5316a09) },
     year      = 2026,
     url       = { https://huggingface.co/datasets/mpg-ranch/wolverines },
-    doi       = { 10.57967/hf/10574 },
+    doi       = { 10.57967/hf/10575 },
     publisher = { Hugging Face }
 }
 ```
