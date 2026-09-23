@@ -40,7 +40,7 @@ def _plot_scores_facet(ax, strategies, strategy_keys, metric, colors, ylabel):
             ax.fill_between(s['x'], s[f'{metric}_ci_lower'], s[f'{metric}_ci_upper'],
                             color=colors[key], alpha=0.2)
 
-    ax.set_xlabel('Training examples per individual', fontsize=17.3)
+    ax.set_xlabel('Gallery images per individual', fontsize=17.3)
     ax.set_ylabel(ylabel, fontsize=17.3)
     if gallery_sizes:
         ax.set_xticks(gallery_sizes)
@@ -94,7 +94,7 @@ def create_rank1_figure(model_data: dict, output_dir: str):
         md = model_data[model_name]
         strategies = md['strategies_r1']
 
-        ylabel = 'Wolverine re-identification score\n(Test Recall@1)' if i == 0 else ''
+        ylabel = 'Recall at rank one' if i == 0 else ''
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'r1', colors, ylabel)
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)
@@ -146,7 +146,7 @@ def create_novelty_detection_figure(model_data: dict, output_dir: str):
         md = model_data[model_name]
         strategies = md['strategies_ba']
 
-        ylabel = 'Novel wolverine detection score\n(Test Balanced Accuracy)' if i == 0 else ''
+        ylabel = 'Balanced accuracy' if i == 0 else ''
         ci_lo, ci_hi = _plot_scores_facet(ax, strategies, strategy_keys, 'ba', colors, ylabel)
         global_ci_lower.extend(ci_lo)
         global_ci_upper.extend(ci_hi)

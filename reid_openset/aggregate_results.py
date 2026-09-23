@@ -509,10 +509,10 @@ def create_test_eval_figures(all_data, out_dir):
 
     metrics = [
         ('recall_at_1',
-         'Wolverine re-identification score\n(Test Recall@1)',
+         'Recall at rank one',
          'test_rank@1.png', (0.5, 0.95)),
         ('balanced_accuracy',
-         'Novel wolverine detection score\n(Test Balanced Accuracy)',
+         'Balanced accuracy',
          'test_novelty_detection.png', (0.4, 0.85)),
     ]
 
@@ -542,7 +542,7 @@ def create_test_eval_figures(all_data, out_dir):
         # X-axis: query thresholds
         ax.set_xticks(range(len(query_thresholds)))
         ax.set_xticklabels([f'{q:.2f}' for q in query_thresholds])
-        ax.set_xlabel('Query Filter Threshold')
+        ax.set_xlabel('Query quality threshold')
         ax.set_ylabel(metric_label)
         ax.set_ylim(ylim)
         ax.set_yticks(np.arange(ylim[0], ylim[1] + 0.001, 0.05))
@@ -554,7 +554,7 @@ def create_test_eval_figures(all_data, out_dir):
         handler_map = {}
         # Model section header
         model_title = mpatches.Patch(
-            facecolor='none', edgecolor='none', label=r'$\bf{Model}$')
+            facecolor='none', edgecolor='none', label=r'$\bf{Encoder}$')
         legend_handles.append(model_title)
         handler_map[model_title] = _TitleHandler()
         for backbone in backbones:
@@ -565,7 +565,7 @@ def create_test_eval_figures(all_data, out_dir):
         # Gallery filter section header
         gallery_title = mpatches.Patch(
             facecolor='none', edgecolor='none',
-            label=r'$\bf{Gallery\ filter\ thresh.}$')
+            label=r'$\bf{Gallery\ quality\ threshold}$')
         legend_handles.append(gallery_title)
         handler_map[gallery_title] = _TitleHandler()
         for gt in gallery_thresholds:

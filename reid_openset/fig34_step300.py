@@ -37,10 +37,10 @@ TITLES = {'dinov3': 'DINOv3-ViT-B/16', 'megadescriptor': 'MegaDescriptor-L-384',
 SIZES = [2, 4, 8, 16, 32, 64]
 STEP = 300
 FAMILIES = [
-    ('None', [(0.0, 'q>=0.0')], '#888888'),
-    ('Gallery', [(0.25, 'q>=0.0'), (0.5, 'q>=0.0')], '#1f77b4'),
-    ('Query', [(0.0, 'q>=0.25'), (0.0, 'q>=0.5')], '#ff7f0e'),
-    ('Gallery + Query', [(g, q) for g in (0.25, 0.5)
+    ('No filter', [(0.0, 'q>=0.0')], '#888888'),
+    ('Gallery only', [(0.25, 'q>=0.0'), (0.5, 'q>=0.0')], '#1f77b4'),
+    ('Query only', [(0.0, 'q>=0.25'), (0.0, 'q>=0.5')], '#ff7f0e'),
+    ('Gallery and query', [(g, q) for g in (0.25, 0.5)
                          for q in ('q>=0.25', 'q>=0.5')], '#2ca02c'),
 ]
 
@@ -80,7 +80,7 @@ def figure(metric, ylabel, outname):
             ax.fill_between(SIZES, los, his, color=color, alpha=0.2)
             lo_all += los
             hi_all += his
-        ax.set_xlabel('Training examples per individual', fontsize=17.3)
+        ax.set_xlabel('Gallery images per individual', fontsize=17.3)
         ax.set_ylabel(ylabel if i == 0 else '', fontsize=17.3)
         ax.set_xticks(SIZES)
         ax.grid(True, alpha=0.3, axis='y')
@@ -111,6 +111,5 @@ def figure(metric, ylabel, outname):
 
 if __name__ == '__main__':
     os.makedirs(OUT_DIR, exist_ok=True)
-    figure('r1', 'Re-identification score\n(Test Recall@1)', 'fig3_step300.png')
-    figure('ba', 'Novel wolverine detection score\n(Test Balanced Accuracy)',
-           'fig4_step300.png')
+    figure('r1', 'Recall at rank one', 'fig3_step300.png')
+    figure('ba', 'Balanced accuracy', 'fig4_step300.png')
