@@ -4,7 +4,7 @@ Code, data pipeline, and results for a manuscript under review at *Ecological
 Informatics*: automated re-identification and novelty detection of wolverines
 (*Gulo gulo*) from bait-station camera trap images.
 
-## The experiment
+## Project Overview
 
 Wolverines are listed as threatened under the U.S. Endangered Species Act and
 occur at low density in remote terrain, so camera trap re-identification is
